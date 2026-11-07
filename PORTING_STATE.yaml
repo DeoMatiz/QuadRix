@@ -1,8 +1,11 @@
 port: horizon-rust-to-quadrix-python
+repo: https://github.com/DeoMatiz/QuadRix
+branch: main
+
 target_dir: quadrix/
 entry_point: quadrix.py
 package_name: quadrix
-display_name: QuadRix          # capital Q, capital R
+display_name: QuadRix            # capital Q, capital R
 env_prefix: QUADRIX_
 
 rust_root: horizon/crates/horizon-client/src/
@@ -24,19 +27,34 @@ last_session: 2026-11-08
 
 # Order matters. Do not port a file until its depends_on are done.
 files:
+
   # --- Phase 0: base (types, math, NBT) ---
-  - rust: horizon-core/src/geometry.rs
+  - rust: horizon-core/src/geometry/mod.rs
     python: quadrix/core/geometry.py
-    status: pending
+    test: tests/core/test_geometry.py
+    status: done
+    lines_rust: ~700
     depends_on: []
-    note: "Vec3, Aabb, BlockPos, Direction"
+    note: >
+      Vec3, Aabb, Direction, Axis, BlockHit, java_min/java_max,
+      floor_i32, clamp, next_up/next_down.
+      Placeholder for BlockPos and trig: use plain tuples / math functions
+      inside geometry.py for now; real BlockPos comes from position.rs later,
+      real trig from trig.rs later. Do NOT import quadrix.world.position
+      or quadrix.core.trig in this file — stub locally.
+
   - rust: horizon-world/src/nbt.rs
     python: quadrix/world/nbt.py
-    status: pending
+    test: tests/world/test_nbt.py
+    status: done
+    lines_rust: ~1300
+    lines_python: ~600
     depends_on: []
-    note: "NBT reader for movement-properties.nbt and cached-collision.nbt"
+    note: "NBT reader. Verified on real movement-properties.nbt (3 keys: blocks, DataVersion, states)."
+
   - rust: horizon-world/src/registry.rs
     python: quadrix/world/registry.py
+    test: tests/world/test_registry.py
     status: pending
     depends_on: [horizon-world/src/nbt.rs]
     note: "BlockRegistry, reads block-registry.nbt"
@@ -44,25 +62,32 @@ files:
   # --- Phase 1: physics ---
   - rust: entities/fluids.rs
     python: quadrix/entities/fluids.py
+    test: tests/entities/fluids/test_fluids.py
     status: pending
     lines_rust: 500
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
     assets: [.local/horizon-client-motion/movement-properties.nbt]
     note: "EntityFluidInteraction, FluidState, FluidTags"
+
   - rust: motion/fluids.rs
     python: quadrix/motion/fluids.py
+    test: tests/motion/test_fluids.py
     status: pending
     lines_rust: 600
     depends_on: [entities/fluids.rs]
     assets: [.local/horizon-client-motion/movement-properties.nbt]
+
   - rust: motion/environment.rs
     python: quadrix/motion/environment.py
+    test: tests/motion/test_environment.py
     status: pending
     lines_rust: 450
     depends_on: [motion/fluids.rs, health.rs]
     assets: []
+
   - rust: motion.rs
     python: quadrix/motion/core.py
+    test: tests/motion/test_core.py
     status: pending
     lines_rust: 7000
     depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs]
@@ -76,6 +101,7 @@ files:
   # --- Phase 2: network ---
   - rust: player_sync.rs
     python: quadrix/player_sync.py
+    test: tests/test_player_sync.py
     status: pending
     lines_rust: 90
     depends_on: [horizon-protocol/src/packets/play.rs]
