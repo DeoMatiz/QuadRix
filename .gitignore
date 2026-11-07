@@ -1,0 +1,42 @@
+﻿# --- Generated Minecraft assets (must NOT be committed) ---
+.local/
+
+# --- Rust original (reference only, not part of this repo) ---
+horizon/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# --- Logs / temp ---
+*.log
+*.tmp

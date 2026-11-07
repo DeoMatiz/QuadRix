@@ -1,0 +1,82 @@
+port: horizon-rust-to-quadrix-python
+target_dir: quadrix/
+entry_point: quadrix.py
+package_name: quadrix
+display_name: QuadRix          # capital Q, capital R
+env_prefix: QUADRIX_
+
+rust_root: horizon/crates/horizon-client/src/
+rust_core: horizon/crates/horizon-core/src/
+rust_world: horizon/crates/horizon-world/src/
+rust_protocol: horizon/crates/horizon-protocol/src/
+
+assets_root: .local/
+assets_client: .local/horizon-client/26.3/
+assets_motion: .local/horizon-client-motion/
+assets_collision: .local/horizon-client-collision/
+assets_health: .local/horizon-client-health/
+assets_block_behavior: .local/horizon-client-block-behavior/
+assets_render: .local/horizon-client-render/
+assets_structures: .local/horizon-client-structures/
+minecraft_cache: .local/minecraft/
+
+last_session: 2026-11-08
+
+# Order matters. Do not port a file until its depends_on are done.
+files:
+  # --- Phase 0: base (types, math, NBT) ---
+  - rust: horizon-core/src/geometry.rs
+    python: quadrix/core/geometry.py
+    status: pending
+    depends_on: []
+    note: "Vec3, Aabb, BlockPos, Direction"
+  - rust: horizon-world/src/nbt.rs
+    python: quadrix/world/nbt.py
+    status: pending
+    depends_on: []
+    note: "NBT reader for movement-properties.nbt and cached-collision.nbt"
+  - rust: horizon-world/src/registry.rs
+    python: quadrix/world/registry.py
+    status: pending
+    depends_on: [horizon-world/src/nbt.rs]
+    note: "BlockRegistry, reads block-registry.nbt"
+
+  # --- Phase 1: physics ---
+  - rust: entities/fluids.rs
+    python: quadrix/entities/fluids.py
+    status: pending
+    lines_rust: 500
+    depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
+    assets: [.local/horizon-client-motion/movement-properties.nbt]
+    note: "EntityFluidInteraction, FluidState, FluidTags"
+  - rust: motion/fluids.rs
+    python: quadrix/motion/fluids.py
+    status: pending
+    lines_rust: 600
+    depends_on: [entities/fluids.rs]
+    assets: [.local/horizon-client-motion/movement-properties.nbt]
+  - rust: motion/environment.rs
+    python: quadrix/motion/environment.py
+    status: pending
+    lines_rust: 450
+    depends_on: [motion/fluids.rs, health.rs]
+    assets: []
+  - rust: motion.rs
+    python: quadrix/motion/core.py
+    status: pending
+    lines_rust: 7000
+    depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs]
+    assets:
+      - .local/horizon-client-motion/movement-properties.nbt
+      - .local/horizon-client-collision/cached-collision.nbt
+      - .local/horizon-client-motion/landing-definitions.json
+      - .local/horizon-client-motion/landing-states.json
+    note: "HUGE. Slice by functions. Start with PlayerMotion, gravity, jump, walk only."
+
+  # --- Phase 2: network ---
+  - rust: player_sync.rs
+    python: quadrix/player_sync.py
+    status: pending
+    lines_rust: 90
+    depends_on: [horizon-protocol/src/packets/play.rs]
+    assets: []
