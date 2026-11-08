@@ -112,11 +112,12 @@ files:
   - rust: horizon-client-render/src/effects.rs (StatusFlags)
     python: quadrix/effects.py
     test: tests/test_effects.py
-    status: pending
+    status: done
     lines_rust: ~650
+    lines_python: ~400
     depends_on: [health.rs (PART 1)]
-    note: "StatusFlags struct (line 399): resistance, fire_resistance, absorption, regeneration. Imported by health.rs/motion.rs as crate::effects::StatusFlags. Port ONLY the data type and pure helpers, NOT rendering parts."
-
+    note: "StatusFlags struct: resistance, fire_resistance, absorption, regeneration. 12 tests. Verified: resistance_amplifier(StatusFlags(resistance=1)) == 1."
+    
   - rust: game/combat.rs (armor + knockback parts only)
     python: quadrix/combat.py
     test: tests/test_combat.py
