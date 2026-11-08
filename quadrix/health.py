@@ -18,7 +18,15 @@ import struct
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
+
+from quadrix.effects import (
+    StatusFlags,
+    damage_protection as effects_damage_protection,
+    has_fire_resistance as effects_has_fire_resistance,
+)
+from quadrix.combat import armor_reduction, hurt_armor as combat_hurt_armor
+from quadrix.totem import try_use_totem, TOTEM_EFFECTS
 
 
 # ─── HealthEvent ──────────────────────────────────────────────────────
@@ -536,7 +544,9 @@ class PlayerHealth:
     data: dict  # Simplified SyncedFloats representation
     ids: PlayerFloatIds
     food: dict = field(default_factory=dict)  # FoodData simplification
-    hurt: dict = field(
+    # PART 2: ``hurt`` is the PlayerHealth method. The Rust ``hurt`` field is
+    # kept under ``hurt_state`` so both names can coexist in Python.
+    hurt_state: dict = field(
         default_factory=lambda: {
             "no_action_time": 0,
             "cooldown": 0,
@@ -556,6 +566,21 @@ class PlayerHealth:
     tick_count: int = 0
     totem_ready: bool = False
     totem_used: bool = False
+
+    # === PART 2: hurt environment state ===
+    # PlayerMotion carried these in Rust; PlayerHealth owns them here so the
+    # hurt path is self-contained.
+    client_side: bool = False
+    entity_id: int = 0
+    invulnerable: bool = False
+    client_loaded: bool = True
+    status: StatusFlags = field(default_factory=StatusFlags)
+    fire_ticks: int = 0
+    yaw: float = 0.0
+    events: list = field(default_factory=list)
+    attributes: dict = field(default_factory=dict)
+    hurt_log: list = field(default_factory=list)
+    protocol: object = None
 
     # === Constructor ===
     
@@ -596,7 +621,7 @@ class PlayerHealth:
             data=data,
             ids=resources.ids,
             food={},
-            hurt={
+            hurt_state={
                 "no_action_time": 0,
                 "cooldown": 0,
                 "last_hurt": 0.0,
@@ -608,6 +633,7 @@ class PlayerHealth:
             hurt_animation_time=0,
             hurt_dir=0.0,
             indicated_dir=None,
+            attributes=dict(attributes),
             dead=False,
             sync_velocity=False,
             game_time=0,
@@ -658,19 +684,19 @@ class PlayerHealth:
         self.game_time = self.game_time + 1  # wrapping add
         self.tick_count = self.tick_count + 1  # wrapping add
         
-        if self.hurt.get("cooldown", 0) > 0:
-            self.hurt["cooldown"] = self.hurt["cooldown"] - 1
+        if self.hurt_state.get("cooldown", 0) > 0:
+            self.hurt_state["cooldown"] = self.hurt_state["cooldown"] - 1
         
-        if self.hurt.get("hurt_time", 0) > 0:
-            self.hurt["hurt_time"] = self.hurt["hurt_time"] - 1
+        if self.hurt_state.get("hurt_time", 0) > 0:
+            self.hurt_state["hurt_time"] = self.hurt_state["hurt_time"] - 1
         
         if self.hurt_animation_time > 0:
             self.hurt_animation_time = self.hurt_animation_time - 1
 
     def animate_hurt(self) -> None:
         """Start hurt animation (tilt and red flash)."""
-        self.hurt["hurt_duration"] = 10
-        self.hurt["hurt_time"] = 10
+        self.hurt_state["hurt_duration"] = 10
+        self.hurt_state["hurt_time"] = 10
         self.hurt_animation_time = 10
 
     def animate_hurt_dir(self, yaw: float) -> None:
@@ -707,11 +733,11 @@ class PlayerHealth:
         if damage <= 0.0:
             if damage < 0.0:
                 # Health increased - reset cooldown
-                self.hurt["cooldown"] = 10
+                self.hurt_state["cooldown"] = 10
         else:
             # Health decreased - trigger hurt
-            self.hurt["last_hurt"] = damage
-            self.hurt["cooldown"] = 20
+            self.hurt_state["last_hurt"] = damage
+            self.hurt_state["cooldown"] = 20
             self.animate_hurt()
 
     def set_health(self, value: float, absorption: bool = False) -> None:
@@ -838,3 +864,1272 @@ def _validate_imports():
 
 if __name__ == "__main__":
     _validate_imports()
+
+# в•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђв•ђ
+# PART 2 --- hurt / die logic (health.rs lines 448-1062)
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+# --------- Supporting enums / small data types ---------------------------------------------------------------------------------------
+class Scaling(Enum):
+    """Port of horizon-world damage_source::Scaling."""
+    Never = "never"
+    LivingNonPlayer = "when_caused_by_living_non_player"
+    Always = "always"
+
+    def name_of(self) -> str:
+        return self.value
+
+
+class Difficulty(Enum):
+    """Port of horizon-world food::Difficulty."""
+    Peaceful = "peaceful"
+    Easy = "easy"
+    Normal = "normal"
+    Hard = "hard"
+
+
+class Bypass(Enum):
+    """Port of horizon-world damage_reduction::Bypass."""
+    Armor = auto()
+    Effects = auto()
+    Resistance = auto()
+    Enchantments = auto()
+
+
+class ImmunityTag(Enum):
+    """Port of horizon-world damage_immunity::ImmunityTag."""
+    BypassesInvulnerability = auto()
+    Fire = auto()
+    Fall = auto()
+    Drowning = auto()
+    Freezing = auto()
+
+
+class DamageRule(Enum):
+    """Port of horizon-world damage_immunity::DamageRule."""
+    Drowning = auto()
+    Fall = auto()
+    Fire = auto()
+    Freeze = auto()
+
+
+class HurtTag(Enum):
+    """Port of horizon-world living_hurt::HurtTag."""
+    Fire = auto()
+    Freezing = auto()
+    DamagesHelmet = auto()
+    BypassesCooldown = auto()
+    NoImpact = auto()
+    NoKnockback = auto()
+
+
+class DamageStat(Enum):
+    """Port of horizon-world living_damage::DamageStat."""
+    Absorbed = auto()
+    DealtAbsorbed = auto()
+    Taken = auto()
+
+
+# The wire/catalog id of a damage type. Rust wraps a usize; the Python
+# catalog keys by canonical name, so the id is the name itself.
+DamageTypeId = str
+
+
+# Rust constants used by the hurt path.
+STAT_LIMIT: float = 3.4028235e37
+HURT_LOG: int = 64
+MAX_F32: float = 3.4028235e38
+
+
+def _positive(value: float) -> float:
+    """Port of living_damage::positive."""
+    if math.isnan(value):
+        return value
+    if value <= 0.0:
+        return 0.0
+    return value
+
+
+def _stat_amount(value: float) -> int:
+    """Port of living_damage::stat_amount (Java Math.round(float))."""
+    scaled = value * 10.0
+    if math.isnan(scaled) or math.isinf(scaled):
+        return 0
+    # Java Math.round is floor(x + 0.5), saturating at the integer bounds.
+    rounded = math.floor(scaled + 0.5)
+    if rounded > 2_147_483_647:
+        return 2_147_483_647
+    if rounded < -2_147_483_648:
+        return -2_147_483_648
+    return int(rounded)
+
+
+def _java_min(a: float, b: float) -> float:
+    if math.isnan(a) or math.isnan(b):
+        return math.nan
+    if a == 0.0 and b == 0.0:
+        # Preserve -0.0 the way Java Math.min does.
+        return a if math.copysign(1.0, a) < 0.0 else b
+    return a if a <= b else b
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    if value < minimum:
+        return minimum
+    if math.isnan(value) or math.isnan(maximum):
+        return math.nan
+    return _java_min(value, maximum)
+
+
+# --------- HealthRules ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+@dataclass
+class HealthRules:
+    """Port of horizon-client-render world::HealthRules (world.rs line 540)."""
+    difficulty: Difficulty = Difficulty.Normal
+    natural_regeneration: bool = True
+    drowning_damage: bool = True
+    fall_damage: bool = True
+    fire_damage: bool = True
+    freeze_damage: bool = True
+
+
+def _coerce_rules(rules: Any) -> HealthRules:
+    if isinstance(rules, HealthRules):
+        return rules
+    if rules is None:
+        return HealthRules()
+    if isinstance(rules, dict):
+        return HealthRules(
+            difficulty=rules.get("difficulty", Difficulty.Normal),
+            natural_regeneration=rules.get("natural_regeneration", True),
+            drowning_damage=rules.get("drowning_damage", True),
+            fall_damage=rules.get("fall_damage", True),
+            fire_damage=rules.get("fire_damage", True),
+            freeze_damage=rules.get("freeze_damage", True),
+        )
+    return rules
+
+
+# --------- DamageSource ------------------------------------------------------------------------------------------------------------------------------------------------------------
+_BYPASS_TAGS = {
+    Bypass.Armor: "minecraft:bypasses_armor",
+    Bypass.Effects: "minecraft:bypasses_effects",
+    Bypass.Resistance: "minecraft:bypasses_resistance",
+    Bypass.Enchantments: "minecraft:bypasses_enchantments",
+}
+_HURT_TAGS = {
+    HurtTag.Fire: "minecraft:is_fire",
+    HurtTag.Freezing: "minecraft:is_freezing",
+    HurtTag.DamagesHelmet: "minecraft:damages_helmet",
+    HurtTag.BypassesCooldown: "minecraft:bypasses_cooldown",
+    HurtTag.NoImpact: "minecraft:no_impact",
+    HurtTag.NoKnockback: "minecraft:no_knockback",
+}
+_IMMUNITY_TAGS = {
+    ImmunityTag.BypassesInvulnerability: "minecraft:bypasses_invulnerability",
+    ImmunityTag.Fire: "minecraft:is_fire",
+    ImmunityTag.Fall: "minecraft:is_fall",
+    ImmunityTag.Drowning: "minecraft:is_drowning",
+    ImmunityTag.Freezing: "minecraft:is_freezing",
+}
+
+
+class DamageSource:
+    """Port of horizon-world damage_source::DamageSource<'a, E>.
+
+    ``__call__`` returns the type id, so ``environment.source`` can be used
+    both as the Rust field and as the HurtWorld ``source()`` method.
+    """
+
+    def __init__(self, catalog: Any, name: str, direct: Any = None,
+                 causing: Any = None, position: Optional[list[float]] = None):
+        self.catalog = catalog
+        self._name = name
+        self._direct = direct
+        self._causing = causing
+        self._position = position
+
+    def __call__(self) -> DamageTypeId:
+        return self._name
+
+    def definition(self) -> DamageType:
+        return _catalog_definition(self.catalog, self._name)
+
+    def type_id(self) -> DamageTypeId:
+        return self._name
+
+    def is_type(self, name: str) -> bool:
+        return self.definition().id == name
+
+    def in_tag(self, tag: str) -> bool:
+        return _catalog_in_tag(self.catalog, self._name, tag)
+
+    def bypasses(self, kind: Bypass) -> bool:
+        return self.in_tag(_BYPASS_TAGS[kind])
+
+    def hurt_tag(self, tag: HurtTag) -> bool:
+        return self.in_tag(_HURT_TAGS[tag])
+
+    def immunity_tag(self, tag: ImmunityTag) -> bool:
+        return self.in_tag(_IMMUNITY_TAGS[tag])
+
+    def direct_entity(self) -> Any:
+        return self._direct
+
+    def causing_entity(self) -> Any:
+        return self._causing
+
+    def is_direct(self) -> bool:
+        return self._direct == self._causing
+
+    def position_raw(self) -> Optional[list[float]]:
+        return self._position
+
+    def food_exhaustion(self) -> float:
+        return float(self.definition().exhaustion)
+
+
+def _catalog_definition(catalog: Any, name: str) -> DamageType:
+    if isinstance(catalog, DamageCatalog):
+        return catalog.get(name)
+    if isinstance(catalog, dict):
+        value = catalog.get(name)
+        if isinstance(value, DamageType):
+            return value
+        if isinstance(value, dict):
+            return DamageType(
+                id=str(value.get("id", name)),
+                message_id=str(value.get("message_id", "")),
+                exhaustion=float(value.get("exhaustion", 0.0)),
+                scaling=str(value.get("scaling", "when_caused_by_living_non_player")),
+                effects=str(value.get("effects", "hurt")),
+                death_message_type=str(value.get("death_message_type", "default")),
+                tags=list(value.get("tags", [])),
+            )
+    raise KeyError(f"unknown damage type {name!r}")
+
+
+def _catalog_in_tag(catalog: Any, name: str, tag: str) -> bool:
+    if isinstance(catalog, DamageCatalog):
+        return catalog.has_tag(name, tag)
+    if isinstance(catalog, dict):
+        value = catalog.get(name)
+        if isinstance(value, DamageType):
+            return tag in value.tags
+        if isinstance(value, dict):
+            return tag in value.get("tags", [])
+    return False
+
+
+def _resolve_source(resources: Any, source: Any) -> DamageSource:
+    catalog = getattr(resources, "damage", resources)
+    if isinstance(source, DamageSource):
+        return source
+    name = source if isinstance(source, str) else str(source)
+    # Validate eagerly, like Catalog::source(...).ok_or("unknown ...")
+    _catalog_definition(catalog, name)
+    return DamageSource(catalog, name)
+
+
+# --------- Blocking rules (horizon-world blocking_rules.rs) ------------------------------------------------
+class _MatchedSets:
+    """Port of health.rs MatchedSets: every set is already matched."""
+    def source_in_set(self, value: bool) -> bool:
+        return bool(value)
+
+
+@dataclass
+class DamageReduction:
+    """Port of horizon-world blocking_rules::DamageReduction<S>."""
+    horizontal_angle: float
+    types: Optional[bool] = None
+    base: float = 0.0
+    factor: float = 1.0
+
+    def resolve(self, world: _MatchedSets, damage: float, angle: float) -> float:
+        if angle > 0.017453292 * self.horizontal_angle:
+            return 0.0
+        if self.types is not None and not world.source_in_set(self.types):
+            return 0.0
+        return _clamp(self.base + self.factor * damage, 0.0, damage)
+
+
+@dataclass
+class ItemDamageFunction:
+    """Port of horizon-world blocking_rules::ItemDamageFunction."""
+    threshold: float
+    base: float
+    factor: float
+
+    def apply(self, damage: float) -> int:
+        if damage < self.threshold:
+            return 0
+        return int(math.floor(self.base + self.factor * damage))
+
+
+@dataclass
+class BlockingRules:
+    """Port of horizon-world blocking_rules::BlockingRules<S>."""
+    delay_seconds: float = 0.0
+    disable_scale: float = 1.0
+    reductions: list[DamageReduction] = field(default_factory=list)
+    item_damage: ItemDamageFunction = field(
+        default_factory=lambda: ItemDamageFunction(0.0, 0.0, 0.0)
+    )
+
+    def delay_ticks(self) -> int:
+        return int(math.floor(self.delay_seconds * 20.0 + 0.5))
+
+    def disable_ticks(self, seconds: float) -> int:
+        duration = seconds * self.disable_scale
+        if duration > 0.0:
+            return int(math.floor(duration * 20.0 + 0.5))
+        return 0
+
+    def resolve(self, world: _MatchedSets, damage: float, angle: float) -> float:
+        blocked = 0.0
+        for reduction in self.reductions:
+            blocked += reduction.resolve(world, damage, angle)
+        return _clamp(blocked, 0.0, damage)
+
+
+# --------- Blocking ------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+@dataclass
+class Blocking:
+    """Port of health.rs::Blocking (line 637)."""
+    rules: BlockingRules
+    bypassed: bool
+    pierce: bool
+    angle: float
+
+
+# --------- Hooks / protocol ------------------------------------------------------------------------------------------------------------------------------------------------
+class Hurting:
+    """Port of health.rs::Hurting<'a> for the Player variant."""
+    def __init__(self, kind: str, entity: int, source: HurtSource):
+        self.kind = kind
+        self.entity = entity
+        self.source = source
+
+    @classmethod
+    def player(cls, entity: int, source: HurtSource) -> "Hurting":
+        return cls("player", entity, source)
+
+
+# Module hooks, mirrors of the Rust OnceLock hooks.
+HURT_SERVER_HOOK: Optional[Callable[[Hurting, float], Any]] = None
+DAMAGE_PRE_HOOK: Optional[Callable[[Hurting, float], Any]] = None
+DAMAGE_POST_HOOK: Optional[Callable[[Hurting, float], Any]] = None
+
+
+class HealthProtocol:
+    """Protocol for effects owned by the game (sounds, particles, packets).
+
+    The hurt path never fakes these services: it calls this protocol, and a
+    game integration supplies the real implementation.
+    """
+    def play_sound(self, sound: str, entity: int = 0) -> None:
+        # Default: no audio device attached. Callers may subclass.
+        return None
+
+    def particle(self, name: str, entity: int = 0, count: int = 1) -> None:
+        return None
+
+    def broadcast_damage(self, source: DamageTypeId, entity: int = 0) -> None:
+        return None
+
+
+class _CallableBool:
+    """A field that is also callable, mirroring Rust field+method names."""
+
+    def __init__(self, value: bool):
+        self.value = bool(value)
+
+    def __call__(self) -> bool:
+        return self.value
+
+    def __bool__(self) -> bool:
+        return self.value
+
+    def __eq__(self, other: object) -> bool:
+        return self.value == other
+
+    def __repr__(self) -> str:
+        return repr(self.value)
+
+
+class _CallableInt:
+    """An int field that is also callable, mirroring Rust field+method names."""
+
+    def __init__(self, value: int):
+        self.value = int(value)
+
+    def __call__(self) -> int:
+        return self.value
+
+    def __int__(self) -> int:
+        return self.value
+
+    def __index__(self) -> int:
+        return self.value
+
+    def __eq__(self, other: object) -> bool:
+        return self.value == other
+
+    def __repr__(self) -> str:
+        return repr(self.value)
+
+
+# --------- Environment ---------------------------------------------------------------------------------------------------------------------------------------------------------------
+class Environment:
+    """Port of health.rs::Environment (line 601) and all its impl methods.
+
+    Rust splits these methods over several traits; Python keeps one method per
+    name and accepts the trait-specific arguments optionally.
+    """
+
+    def __init__(
+        self,
+        *,
+        entity: int,
+        causing: int,
+        direct: int = 0,
+        invulnerable: bool,
+        client_loaded: bool,
+        rules: HealthRules,
+        source: DamageSource,
+        living_cause: bool,
+        events: list,
+        dead: bool,
+        sync_velocity: bool,
+        game_time: int,
+        status: StatusFlags,
+        blocking: Optional[Blocking] = None,
+        blocked: float = 0.0,
+        fully_blocked: bool = False,
+        block_sound: bool = False,
+        knocked: bool = False,
+        totem: bool = False,
+        totem_fired: bool = False,
+        canceled: bool = False,
+        data: Optional[dict] = None,
+        food: Optional[dict] = None,
+        attributes: Optional[dict] = None,
+        protocol: Optional[HealthProtocol] = None,
+    ):
+        self.entity = entity
+        self.causing = causing
+        self.direct = direct
+        self.invulnerable_flag = bool(invulnerable)
+        # ``client_loaded`` must be callable as the ImmunityWorld method too.
+        self.client_loaded = _CallableBool(client_loaded)
+        self.rules = rules
+        self.source = source
+        self.living_cause = living_cause
+        self.events = events
+        self.dead = bool(dead)
+        self.sync_velocity = bool(sync_velocity)
+        self.game_time = _CallableInt(game_time)
+        self.status = status
+        self.blocking = blocking
+        self.blocked = float(blocked)
+        self.fully_blocked = bool(fully_blocked)
+        self.block_sound = bool(block_sound)
+        self.knocked = bool(knocked)
+        self.totem = bool(totem)
+        self.totem_fired = bool(totem_fired)
+        self.canceled = bool(canceled)
+        self.data = data if data is not None else {}
+        self.food = food if food is not None else {}
+        self.attributes = attributes if attributes is not None else {}
+        self.protocol = protocol
+        self.hurt_sounds: list[str] = []
+
+    # ------ helper / event methods ------------------------------------------------------------------------------------------------------------------
+    def source_in_set(self, value: bool) -> bool:
+        return bool(value)
+
+    def hurt_source(self) -> HurtSource:
+        return HurtSource(
+            damage_type=self.source.definition().id,
+            causing=self.causing,
+            direct=0,
+        )
+
+    def event(self, event: HealthEvent, **values: Any) -> None:
+        for key, value in values.items():
+            setattr(event, key, value)
+        self.events.append(event)
+
+    def phase(self, name: str) -> None:
+        self.event(HealthEvent.Phase, text=name)
+
+    def stat(self, name: str, amount: int) -> None:
+        self.event(HealthEvent.Statistic, stat_name=name, amount=amount)
+
+    def updated(self, data: Any, id: Any) -> None:
+        value = 0.0
+        if isinstance(data, dict):
+            if id in data:
+                value = data[id]
+            elif id == getattr(self, "health_id", None):
+                value = data.get("health", 0.0)
+            elif id == getattr(self, "absorption_id", None):
+                value = data.get("absorption", 0.0)
+        dirty = bool(getattr(data, "is_dirty", lambda: False)())
+        self.event(HealthEvent.Updated, id=id, value=value, dirty=dirty)
+
+    # ------ ArmorWorld ---------------------------------------------------------------------------------------------------------------------------------------------------------
+    def weapon(self) -> Optional[Any]:
+        return None
+
+    def server_level(self) -> Optional[Any]:
+        return ()
+
+    def modify_armor_effectiveness(self, level: Any, weapon: Any, value: float) -> float:
+        return value
+
+    # ------ ServerDamageEnvironment ---------------------------------------------------------------------------------------------------------------
+    def invulnerable(self, state: Optional[dict] = None) -> bool:
+        return _server_player_immunity(self)
+
+    def bypasses(self, kind: Bypass) -> bool:
+        return self.source.bypasses(kind)
+
+    def hurt_armor(self, attributes: Optional[dict], damage: float) -> None:
+        # The worn armor lives in the game, which wears it from this event.
+        self.event(
+            HealthEvent.ArmorHurt,
+            source=self.source.type_id(),
+            amount=damage,
+        )
+
+    def has_resistance(self) -> bool:
+        return self.status.resistance is not None
+
+    def resistance_amplifier(self) -> int:
+        if self.status.resistance is None:
+            raise ValueError("no resistance effect")
+        return int(self.status.resistance)
+
+    def award_resisted(self, value: int) -> None:
+        self.stat("resisted", value)
+
+    def attacker(self) -> Optional[Any]:
+        return None
+
+    def award_dealt_resisted(self, value: int) -> None:
+        raise RuntimeError("no damage attacker")
+
+    def damage_protection(self, level: Any = None) -> float:
+        return effects_damage_protection(
+            self.status, self.source.definition().id
+        )
+
+    def award_self(self, stat: DamageStat, value: int) -> None:
+        if stat is DamageStat.Absorbed:
+            self.stat("absorbed", value)
+        elif stat is DamageStat.Taken:
+            self.stat("taken", value)
+        else:
+            raise RuntimeError("attacker statistic")
+
+    def award_attacker(self, attacker: Any, stat: DamageStat, value: int) -> None:
+        raise RuntimeError("no damage attacker")
+
+    def source_food_exhaustion(self) -> float:
+        return float(self.source.definition().exhaustion)
+
+    def ability_invulnerable(self) -> bool:
+        return self.invulnerable_flag
+
+    def level_is_client(self) -> bool:
+        return False
+
+    def record_damage(self, amount: float) -> None:
+        self.event(
+            HealthEvent.RecordedDamage,
+            source=self.source.type_id(),
+            amount=amount,
+        )
+
+    def damage_event(self) -> None:
+        self.phase("entity-damage")
+
+    def damage_pre(self, damage: float) -> float:
+        hook = DAMAGE_PRE_HOOK
+        if hook is None:
+            return damage
+        before = float(damage)
+        changed = hook(Hurting.player(self.entity, self.hurt_source()), before)
+        if isinstance(changed, tuple):
+            changed = changed[-1]
+        if changed is None or changed == before:
+            return damage
+        changed = float(changed)
+        if math.isnan(changed) or changed < 0.0:
+            return 0.0
+        return min(changed, MAX_F32)
+
+    def damage_post(self, damage: float) -> None:
+        hook = DAMAGE_POST_HOOK
+        if hook is not None:
+            hook(Hurting.player(self.entity, self.hurt_source()), damage)
+
+    # ------ CombatEnvironment ------------------------------------------------------------------------------------------------------------------------------------
+    def dead_flag(self) -> bool:
+        return bool(self.dead)
+
+    # ------ ImmunityWorld ------------------------------------------------------------------------------------------------------------------------------------------------
+    def removed(self) -> bool:
+        return False
+
+    def permanently_invulnerable(self) -> bool:
+        return False
+
+    def temporarily_invulnerable(self) -> bool:
+        return False
+
+    def tag(self, state: Any = None, tag: Any = None) -> bool:
+        # Rust has two fields named ``tag`` in different traits.
+        if tag is None:
+            tag = state
+        if isinstance(tag, HurtTag):
+            return self.source.hurt_tag(tag)
+        if isinstance(tag, ImmunityTag):
+            return self.source.immunity_tag(tag)
+        raise TypeError(f"unknown tag {tag!r}")
+
+    def creative_source(self) -> bool:
+        return False
+
+    def fire_immune(self) -> bool:
+        return False
+
+    def fall_immune(self) -> bool:
+        return False
+
+    def enchantment_immunity(self) -> bool:
+        return False
+
+    def damage_rule(self, rule: DamageRule) -> bool:
+        if rule is DamageRule.Drowning:
+            return bool(self.rules.drowning_damage)
+        if rule is DamageRule.Fall:
+            return bool(self.rules.fall_damage)
+        if rule is DamageRule.Fire:
+            return bool(self.rules.fire_damage)
+        if rule is DamageRule.Freeze:
+            return bool(self.rules.freeze_damage)
+        raise ValueError(f"unknown damage rule {rule!r}")
+
+    def changing_dimension(self) -> bool:
+        return False
+
+    def ender_pearl(self) -> bool:
+        return self.source.is_type("minecraft:ender_pearl")
+
+    # ``client_loaded`` is the callable field set in __init__.
+
+    # ------ HurtWorld ------------------------------------------------------------------------------------------------------------------------------------------------------------
+    def source(self) -> DamageTypeId:
+        return self.source.type_id()
+
+    def is_server_player(self) -> bool:
+        return True
+
+    def dead_or_dying(self, state: Optional[dict] = None) -> bool:
+        health = float(self.data.get("health", 1.0))
+        return health <= 0.0 or bool(self.dead)
+
+    def fire_resistance(self, state: Optional[dict] = None) -> bool:
+        return effects_has_fire_resistance(self.status)
+
+    def hurt_start(self, state: Optional[dict], damage: float) -> tuple[bool, float]:
+        canceled = False
+        current = damage
+        hook = HURT_SERVER_HOOK
+        if hook is not None:
+            result = hook(Hurting.player(self.entity, self.hurt_source()), current)
+            if isinstance(result, tuple):
+                canceled = bool(result[0])
+                if len(result) > 1:
+                    current = float(result[1])
+            else:
+                canceled = bool(result)
+        self.canceled = self.canceled or canceled
+        return canceled, current
+
+    def sleeping(self, state: Optional[dict] = None) -> bool:
+        return False
+
+    def stop_sleeping(self, state: Optional[dict] = None) -> None:
+        return None
+
+    def use_item(self, state: Optional[dict] = None) -> Optional[Any]:
+        return None
+
+    def apply_blocking(self, state: Optional[dict], damage: float) -> float:
+        b = self.blocking
+        if b is None:
+            return 0.0
+        if damage <= 0.0 or b.bypassed or b.pierce:
+            return 0.0
+        if isinstance(b.rules, dict):
+            rules = BlockingRules(
+                delay_seconds=float(b.rules.get("delay_seconds", 0.0)),
+                disable_scale=float(b.rules.get("disable_scale", 1.0)),
+                reductions=[
+                    r if isinstance(r, DamageReduction) else DamageReduction(**r)
+                    for r in b.rules.get("reductions", [])
+                ],
+            )
+        else:
+            rules = b.rules
+        self.blocked = rules.resolve(_MatchedSets(), damage, b.angle)
+        self.fully_blocked = self.blocked >= damage
+        return self.blocked
+
+    def freeze_hurts_extra(self, state: Optional[dict] = None) -> bool:
+        return False
+
+    def helmet_empty(self, state: Optional[dict] = None) -> bool:
+        return True
+
+    def hurt_helmet(self, state: Optional[dict], damage: float) -> None:
+        return None
+
+    def actually_hurt(self, state: Optional[dict], damage: float) -> None:
+        if _server_player_immunity(self):
+            return
+        self._apply_after_immunity_check(damage)
+
+    def resolve_mob(self, state: Optional[dict] = None) -> None:
+        return None
+
+    def resolve_player(self, state: Optional[dict] = None) -> None:
+        return None
+
+    def blocking_component(self, item: Any) -> Optional[Blocking]:
+        return self.blocking
+
+    def on_blocked(self, state: Optional[dict], block: Any) -> None:
+        self.block_sound = True
+
+    def broadcast_damage(self, state: Optional[dict] = None) -> None:
+        self.event(
+            HealthEvent.DamageBroadcast,
+            source=self.source.type_id(),
+        )
+        if self.protocol is not None:
+            self.protocol.broadcast_damage(self.source.type_id(), self.entity)
+
+    def mark_hurt(self, state: Optional[dict] = None) -> None:
+        self.sync_velocity = True
+
+    def knockback(self, state: Optional[dict], damage: float, blocked: bool) -> None:
+        self.knocked = True
+
+    def death_protection(self, state: Optional[dict] = None) -> bool:
+        if not self.totem or self.source.immunity_tag(
+            ImmunityTag.BypassesInvulnerability
+        ):
+            return False
+        used = try_use_totem(
+            True,
+            bypasses_invulnerability=False,
+            main_hand=True,
+        )
+        if not used:
+            return False
+        self.totem_fired = True
+        # The game's totem handler (totem.rs) restores one health and applies
+        # the three TOTEM_EFFECTS. Keep the effect list on the environment.
+        self.totem_effects = list(TOTEM_EFFECTS)
+        return True
+
+    def death_sound(self, state: Optional[dict] = None) -> Optional[str]:
+        return None
+
+    def make_sound(self, state: Optional[dict], sound: Any) -> None:
+        self.phase("death-sound")
+
+    def secondary_sound(self, state: Optional[dict] = None) -> None:
+        if self.source.definition().effects == "thorns":
+            self.phase("thorns-sound")
+
+    def die(self, state: Optional[dict] = None) -> None:
+        if self.data is not None:
+            self.data["health"] = 0.0
+        self.dead = True
+        self.phase("death-request")
+
+    def hurt_sound(self, state: Optional[dict] = None) -> None:
+        if not self.block_sound:
+            sound = hurt_sound(self.source.definition().effects)
+            self.hurt_sounds.append(sound)
+            if self.protocol is not None:
+                self.protocol.play_sound(sound, self.entity)
+        self.phase("hurt-sound")
+
+    def game_time(self) -> int:
+        return int(self.game_time)
+
+    def effects_on_hurt(self, state: Optional[dict], damage: float) -> None:
+        return None
+
+    def player_hurt_criterion(
+        self,
+        state: Optional[dict],
+        original: float,
+        amount: float,
+        blocked: bool,
+    ) -> None:
+        self.event(
+            HealthEvent.Criterion,
+            original=original,
+            amount=amount,
+            blocked=blocked,
+        )
+
+    def award_blocked(self, state: Optional[dict], amount: int) -> None:
+        self.stat("blocked", amount)
+
+    def attacker_criterion(
+        self,
+        state: Optional[dict],
+        original: float,
+        damage: float,
+        blocked: bool,
+    ) -> None:
+        return None
+
+    # ------ PlayerHurtWorld ------------------------------------------------------------------------------------------------------------------------------------------
+    def bypasses_invulnerability(self, state: Optional[dict] = None) -> bool:
+        return self.source.in_tag("minecraft:bypasses_invulnerability")
+
+    def remove_shoulders(self, state: Optional[dict] = None) -> None:
+        return None
+
+    def scales_with_difficulty(self, state: Optional[dict] = None) -> bool:
+        scaling = self.source.definition().scaling
+        if scaling == "never" or scaling == Scaling.Never:
+            return False
+        if scaling == "always" or scaling == Scaling.Always:
+            return True
+        return bool(self.living_cause)
+
+    def difficulty(self, state: Optional[dict] = None) -> Difficulty:
+        return self.rules.difficulty
+
+    # ------ ServerPlayerHurtWorld ------------------------------------------------------------------------------------------------------------------------
+    def causing_entity(self, state: Optional[dict] = None) -> Any:
+        return _CausingEntity.Other
+
+    def arrow_player_owner(self, state: Optional[dict], arrow: Any) -> Optional[Any]:
+        return None
+
+    def can_harm_player(self, state: Optional[dict], player: Any) -> bool:
+        return True
+
+    # ------ inner damage (server_player_damage.rs / living_damage.rs) ------------
+    def _after_armor(self, damage: float) -> float:
+        if self.bypasses(Bypass.Armor):
+            return damage
+        self.hurt_armor(self.attributes, damage)
+        armor = float(self.attributes.get("minecraft:armor", 0.0))
+        toughness = float(self.attributes.get("minecraft:armor_toughness", 0.0))
+        return armor_reduction(armor, toughness, damage)
+
+    def _after_magic(self, damage: float) -> float:
+        if self.bypasses(Bypass.Effects):
+            return damage
+        if self.has_resistance() and not self.bypasses(Bypass.Resistance):
+            reduction = (self.resistance_amplifier() + 1) * 5
+            remainder = 25 - reduction
+            original = damage
+            damage = _positive(damage * float(remainder) / 25.0)
+            resisted = original - damage
+            if 0.0 < resisted < STAT_LIMIT:
+                self.award_resisted(_stat_amount(resisted))
+        if damage <= 0.0:
+            return 0.0
+        if self.bypasses(Bypass.Enchantments):
+            return damage
+        protection = self.damage_protection(self.server_level())
+        if protection > 0.0:
+            protection = _clamp(protection, 0.0, 20.0)
+            damage = damage * (1.0 - protection / 25.0)
+        return damage
+
+    def _apply_after_immunity_check(self, damage: float) -> None:
+        damage = self._after_armor(damage)
+        damage = self._after_magic(damage)
+        absorption = float(self.data.get("absorption", 0.0))
+        remaining = _positive(damage - absorption)
+        new_absorption = absorption - (damage - remaining)
+        self.data["absorption"] = new_absorption
+        absorbed = damage - remaining
+        if 0.0 < absorbed < STAT_LIMIT:
+            self.award_self(DamageStat.Absorbed, _stat_amount(absorbed))
+        remaining = self.damage_pre(remaining)
+        if remaining == 0.0:
+            self.damage_post(0.0)
+            return
+        if self.is_server_player():
+            exhaustion = self.source_food_exhaustion()
+            self._cause_food_exhaustion(exhaustion)
+        self.record_damage(remaining)
+        health = float(self.data.get("health", 1.0))
+        self.data["health"] = health - remaining
+        if remaining < STAT_LIMIT:
+            self.award_self(DamageStat.Taken, _stat_amount(remaining))
+        self.damage_event()
+        self.damage_post(remaining)
+
+    def _cause_food_exhaustion(self, value: float) -> None:
+        if self.ability_invulnerable() or self.level_is_client():
+            return
+        # FoodData.add_exhaustion, with the dict-backed simplification.
+        current = float(self.food.get("exhaustion", 0.0))
+        self.food["exhaustion"] = _java_min(current + value, 40.0)
+
+
+class _CausingEntity:
+    Other = "other"
+
+
+# --------- immunity helpers ------------------------------------------------------------------------------------------------------------------------------------------------
+def _entity_invulnerable(env: Environment) -> bool:
+    return env.permanently_invulnerable() or env.temporarily_invulnerable()
+
+
+def _base_immunity(env: Environment) -> bool:
+    if env.removed():
+        return True
+    if (
+        _entity_invulnerable(env)
+        and not env.tag(ImmunityTag.BypassesInvulnerability)
+        and not env.creative_source()
+    ):
+        return True
+    if env.tag(ImmunityTag.Fire) and env.fire_immune():
+        return True
+    return env.tag(ImmunityTag.Fall) and env.fall_immune()
+
+
+def _living_immunity(env: Environment) -> bool:
+    return _base_immunity(env) or env.enchantment_immunity()
+
+
+def _player_immunity(env: Environment) -> bool:
+    if _living_immunity(env):
+        return True
+    for tag, rule in (
+        (ImmunityTag.Drowning, DamageRule.Drowning),
+        (ImmunityTag.Fall, DamageRule.Fall),
+        (ImmunityTag.Fire, DamageRule.Fire),
+        (ImmunityTag.Freezing, DamageRule.Freeze),
+    ):
+        if env.tag(tag):
+            return not env.damage_rule(rule)
+    return False
+
+
+def _server_player_immunity(env: Environment) -> bool:
+    if _player_immunity(env):
+        return True
+    if env.changing_dimension() and not env.ender_pearl():
+        return True
+    return not env.client_loaded()
+
+
+# --------- hurt_server / player_hurt_server / server_player_hurt_server ------------
+def _hurt_server(env: Environment, state: dict, damage: float) -> bool:
+    """Port of living_hurt::hurt_server."""
+    if env.invulnerable(state) or env.dead_or_dying(state):
+        return False
+    if env.tag(state, HurtTag.Fire) and env.fire_resistance(state):
+        return False
+    canceled, damage = env.hurt_start(state, damage)
+    if canceled:
+        return False
+    if env.sleeping(state):
+        env.stop_sleeping(state)
+    state["no_action_time"] = 0
+    if damage < 0.0:
+        damage = 0.0
+    original = damage
+    item = env.use_item(state)
+    blocked_amount = env.apply_blocking(state, damage)
+    damage -= blocked_amount
+    blocked = blocked_amount > 0.0
+    if env.tag(state, HurtTag.Freezing) and env.freeze_hurts_extra(state):
+        damage *= 5.0
+    if (
+        env.tag(state, HurtTag.DamagesHelmet)
+        and not env.helmet_empty(state)
+    ):
+        env.hurt_helmet(state, damage)
+        damage *= 0.75
+    if not math.isfinite(damage):
+        damage = MAX_F32
+    cooldown = int(state.get("cooldown", 0))
+    if cooldown > 10 and not env.tag(state, HurtTag.BypassesCooldown):
+        if damage <= float(state.get("last_hurt", 0.0)):
+            return False
+        env.actually_hurt(state, damage - float(state.get("last_hurt", 0.0)))
+        state["last_hurt"] = damage
+        fresh = False
+    else:
+        state["last_hurt"] = damage
+        state["cooldown"] = 20
+        env.actually_hurt(state, damage)
+        state["hurt_duration"] = 10
+        state["hurt_time"] = state["hurt_duration"]
+        fresh = True
+    env.resolve_mob(state)
+    env.resolve_player(state)
+    if fresh:
+        component = env.blocking_component(item)
+        if component is not None and blocked:
+            env.on_blocked(state, component)
+        else:
+            env.broadcast_damage(state)
+        if not env.tag(state, HurtTag.NoImpact) and (not blocked or damage > 0.0):
+            env.mark_hurt(state)
+        fully_blocked = blocked and damage <= 0.0
+        if not env.tag(state, HurtTag.NoKnockback) and not fully_blocked:
+            env.knockback(state, damage, blocked)
+    if env.dead_or_dying(state):
+        if not env.death_protection(state):
+            if fresh:
+                sound = env.death_sound(state)
+                env.make_sound(state, sound)
+                env.secondary_sound(state)
+            env.die(state)
+    elif fresh:
+        env.hurt_sound(state)
+        env.secondary_sound(state)
+    accepted = (not blocked) or damage > 0.0
+    if accepted:
+        state["last_source"] = env.source()
+        state["last_stamp"] = env.game_time()
+        env.effects_on_hurt(state, damage)
+    if env.is_server_player():
+        env.player_hurt_criterion(state, original, damage, blocked)
+        if 0.0 < blocked_amount < STAT_LIMIT:
+            env.award_blocked(state, _stat_amount(blocked_amount))
+    env.attacker_criterion(state, original, damage, blocked)
+    return accepted
+
+
+def _player_hurt_server(env: Environment, state: dict, damage: float) -> bool:
+    """Port of player_hurt::player_hurt_server."""
+    if env.invulnerable(state):
+        return False
+    if env.ability_invulnerable() and not env.bypasses_invulnerability(state):
+        return False
+    state["no_action_time"] = 0
+    if env.dead_or_dying(state):
+        return False
+    env.remove_shoulders(state)
+    if env.scales_with_difficulty(state):
+        difficulty = env.difficulty(state)
+        if difficulty is Difficulty.Peaceful:
+            damage = 0.0
+        if difficulty is Difficulty.Easy:
+            damage = _java_min(damage / 2.0 + 1.0, damage)
+        if difficulty is Difficulty.Hard:
+            damage = damage * 3.0 / 2.0
+    if damage == 0.0:
+        return False
+    return _hurt_server(env, state, damage)
+
+
+def _server_player_hurt_server(env: Environment, state: dict, damage: float) -> bool:
+    """Port of player_hurt::server_player_hurt_server."""
+    if env.invulnerable(state):
+        return False
+    causing = env.causing_entity(state)
+    if causing == "player":
+        if not env.can_harm_player(state, causing):
+            return False
+    return _player_hurt_server(env, state, damage)
+
+
+# --------- PlayerHealth hurt methods (health.rs lines 448-582) ---------------------------------------
+def _player_health_hurt(
+    self: PlayerHealth,
+    resources: HealthResources,
+    rules: Any,
+    source: Any,
+    amount: float,
+    blocking: Optional[Blocking],
+    living_cause: bool,
+    causing: int,
+) -> BlockOutcome:
+    if self.client_side:
+        return BlockOutcome(
+            hurt=False,
+            blocked=0.0,
+            fully_blocked=False,
+            sound=False,
+            knockback=False,
+            canceled=False,
+        )
+    src = _resolve_source(resources, source)
+    before = self.health() + self.absorption()
+    fire_ticks = self.fire_ticks
+    source_name = src.definition().id
+    totem_ready = self.totem_ready
+    invulnerable = self.invulnerable
+    env = Environment(
+        entity=self.entity_id,
+        causing=causing,
+        invulnerable=invulnerable,
+        client_loaded=self.client_loaded,
+        rules=_coerce_rules(rules),
+        source=src,
+        living_cause=living_cause,
+        events=self.events,
+        dead=self.dead,
+        sync_velocity=self.sync_velocity,
+        game_time=self.game_time,
+        status=self.status,
+        blocking=blocking,
+        totem=totem_ready,
+        data=self.data,
+        food=self.food,
+        attributes=self.attributes,
+        protocol=self.protocol,
+    )
+    hurt = _server_player_hurt_server(env, self.hurt_state, float(amount))
+    outcome = BlockOutcome(
+        hurt=hurt,
+        blocked=env.blocked,
+        fully_blocked=env.fully_blocked,
+        sound=env.block_sound,
+        knockback=env.knocked,
+        canceled=env.canceled,
+    )
+    self.dead = env.dead
+    self.sync_velocity = env.sync_velocity
+    if env.totem_fired:
+        self.totem_used = True
+        self.totem_ready = False
+        # DeathProtection.TOTEM_EFFECTS restores one health (totem.rs).
+        self.data["health"] = 1.0
+    if outcome.hurt:
+        self.hurt_animation_time = int(self.hurt_state.get("hurt_time", 0))
+    # dealDefaultKnockback ends in indicateDamage unless blocked.
+    if outcome.knockback and outcome.blocked <= 0.0:
+        self.indicate_damage(0.0, 0.0, self.yaw)
+    after = self.health() + self.absorption()
+    armor = float(self.attributes.get("minecraft:armor", 0.0))
+    toughness = float(self.attributes.get("minecraft:armor_toughness", 0.0))
+    if len(self.hurt_log) >= HURT_LOG:
+        self.hurt_log.pop(0)
+    self.hurt_log.append(
+        HurtRecord(
+            game_time=self.game_time,
+            source=source_name,
+            amount=float(amount),
+            blocked=outcome.blocked,
+            taken=before - after,
+            hurt=outcome.hurt,
+            armor=armor,
+            toughness=toughness,
+            health=after,
+            fire_ticks=fire_ticks,
+            knockback=None,
+        )
+    )
+    return outcome
+
+
+def _player_health_hurt_blocking(
+    self: PlayerHealth,
+    resources: HealthResources,
+    rules: Any,
+    source: Any,
+    amount: float,
+    blocking: Optional[Blocking] = None,
+    living_cause: bool = False,
+    causing: int = 0,
+) -> BlockOutcome:
+    return _player_health_hurt(
+        self, resources, rules, source, amount, blocking, living_cause, causing
+    )
+
+
+def _player_health_hurt_caused_by(
+    self: PlayerHealth,
+    resources: HealthResources,
+    rules: Any,
+    source: Any,
+    amount: float,
+    blocking: Optional[Blocking] = None,
+    living_cause: bool = False,
+    causing: int = 0,
+) -> BlockOutcome:
+    return _player_health_hurt(
+        self, resources, rules, source, amount, blocking, living_cause, causing
+    )
+
+
+def _player_health_hurt_simple(
+    self: PlayerHealth,
+    resources: HealthResources,
+    rules: Any,
+    source: Any,
+    amount: float,
+    blocking: Optional[Blocking] = None,
+    living_cause: bool = False,
+    causing: int = 0,
+) -> bool:
+    return _player_health_hurt(
+        self, resources, rules, source, amount, blocking, living_cause, causing
+    ).hurt
+
+
+# Attach the PART 2 methods to PlayerHealth without redefining PART 1.
+PlayerHealth.hurt = _player_health_hurt_simple
+PlayerHealth.hurt_blocking = _player_health_hurt_blocking
+PlayerHealth.hurt_caused_by = _player_health_hurt_caused_by
+
+
+# --- hurt_sound (health.rs line 219) ---------------------------------
+def hurt_sound(effects: str) -> str:
+    """Port of health.rs::hurt_sound by a damage type's effects id."""
+    if effects == "drowning":
+        return "minecraft:entity.player.hurt_drown"
+    if effects == "burning":
+        return "minecraft:entity.player.hurt_on_fire"
+    if effects == "poking":
+        return "minecraft:entity.player.hurt_sweet_berry_bush"
+    if effects == "freezing":
+        return "minecraft:entity.player.hurt_freeze"
+    # HURT and THORNS (both SoundEvents.PLAYER_HURT).
+    return "minecraft:entity.player.hurt"
+
+
+# --------- Self-test ---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+def _validate_part2() -> None:
+    from quadrix.health import (
+        PlayerHealth,
+        HealthResources,
+        PlayerFloatIds,
+        Environment,
+        Blocking,
+    )
+
+    resources = HealthResources(damage={}, ids=PlayerFloatIds(health=0, absorption=1))
+    player = PlayerHealth.new(resources, {"minecraft:max_health": 20.0})
+    assert player.hurt_state["cooldown"] == 0
+    print("[QuadRix] PART 2 import and self-test OK")
+
+
+if __name__ == "__main__":
+    _validate_part2()
+
