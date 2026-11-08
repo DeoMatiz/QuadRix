@@ -207,9 +207,9 @@ files:
       - .local/horizon-client-collision/cached-collision.nbt
       - .local/horizon-client-motion/landing-definitions.json
       - .local/horizon-client-motion/landing-states.json
-    parts_done: [1, 2, 3, 4, 5, 6]
-    parts_total: 6
-    test_status: "35 passed (PART 1-6)"
+    parts_done: [1, 2, 3, 4, 5, 6, 7]
+    parts_total: 7
+    test_status: "43 passed (PART 1-7)"
     note: >
       PART 1/6: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
       PART 2/6: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep X/Y/Z).
@@ -228,13 +228,13 @@ files:
   - rust: motion.rs (auto_jump + pose + landing)
     python: quadrix/motion/auto_jump.py
     test: tests/motion/test_auto_jump.py
-    status: pending
+    status: done
     lines_rust: ~400
     depends_on: [motion.rs (PART 1-6)]
     assets:
       - .local/horizon-client-motion/landing-definitions.json
       - .local/horizon-client-motion/landing-states.json
-    note: "Auto-jump, PlayerPose (standing/sneaking/swimming/fall_flying), landing heights."
+    note: "PlayerPose (standing/sneaking/swimming/fall_flying), eye_height по pose, auto_jump, apply_landing (fall damage = fall_distance - 3 через health.hurt). 8 tests. Реализовано в quadrix/motion/core.py (APPEND)."
 
   - rust: motion.rs (climb / ladder / scaffolding)
     python: quadrix/motion/climb.py
