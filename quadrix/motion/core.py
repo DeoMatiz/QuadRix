@@ -175,8 +175,8 @@ class _InteractionPlaceholder:
     """
 
     def is_in_fluid(self, _tags, tag: int) -> bool:
-        """Return True only if the given tag matches LAVA (tag=1)."""
-        return tag == FluidTagId.LAVA  # 1
+        """Return True if the given tag matches WATER (tag=0) or LAVA (tag=1)."""
+        return tag in (FluidTagId.WATER, FluidTagId.LAVA)  # 0, 1
 
     def is_eye_in_fluid(self, _tags, tag: int) -> bool:
         """Return True only if the given tag matches LAVA (tag=1)."""
@@ -322,6 +322,14 @@ class PlayerMotion:
             Fluid height as a float (0.0 if not in that fluid).
         """
         return self.fluids._interaction.fluid_height(None, tag)
+
+    def is_in_water(self) -> bool:
+        """Check if the player is currently in water.
+
+        Returns:
+            True if the player is submerged in water.
+        """
+        return self.fluids._interaction.is_in_fluid(None, FluidTagId.WATER)
 
 
 # ── Module-level movement_speed ─────────────────────────────────────
@@ -487,29 +495,50 @@ def travel(self, input: PlayerInput, world: object) -> None:
         speed_factor = 1.0
         friction = FRICTION_DEFAULT
 
-    # Calculate the horizontal speed
-    speed = BASE_SPEED * speed_factor
-    if input.sprint:
-        speed *= SPRINT_MULTIPLIER
-    if input.sneak:
-        speed *= SNEAK_MULTIPLIER
+    # Water branch: if swimming, use water movement constants
+    if self.swimming:
+        # Calculate the horizontal speed in water
+        speed = SWIM_SPEED * speed_factor
 
-    # Calculate direction from forward/strafe + yaw
-    yaw_rad = math.radians(self.yaw)
-    # Direction vector: forward/strafe relative to yaw
-    # Minecraft yaw: 0 = south (+z), 90 = west (-x), 180 = north (-z), 270 = east (+x)
-    dx = -math.sin(yaw_rad) * input.forward + math.cos(yaw_rad) * input.strafe
-    dz = math.cos(yaw_rad) * input.forward + math.sin(yaw_rad) * input.strafe
+        # Calculate direction from forward/strafe + yaw
+        yaw_rad = math.radians(self.yaw)
+        # Direction vector: forward/strafe relative to yaw
+        # Minecraft yaw: 0 = south (+z), 90 = west (-x), 180 = north (-z), 270 = east (+x)
+        dx = -math.sin(yaw_rad) * input.forward + math.cos(yaw_rad) * input.strafe
+        dz = math.cos(yaw_rad) * input.forward + math.sin(yaw_rad) * input.strafe
 
-    # Update velocity components
-    # If there's any movement input, set the velocity; otherwise preserve existing velocity
-    if input.forward != 0.0 or input.strafe != 0.0 or input.sprint or input.sneak:
-        self.velocity = self.velocity.with_component(Axis.X, dx * speed)
-        self.velocity = self.velocity.with_component(Axis.Z, dz * speed)
+        # Update velocity components
+        if input.forward != 0.0 or input.strafe != 0.0:
+            self.velocity = self.velocity.with_component(Axis.X, dx * speed)
+            self.velocity = self.velocity.with_component(Axis.Z, dz * speed)
 
-    # Apply friction after movement: velocity.x *= friction, velocity.z *= friction
-    self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * friction)
-    self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * friction)
+        # Apply water drag: velocity.x/z *= water_friction
+        self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * WATER_FRICTION)
+        self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * WATER_FRICTION)
+    else:
+        # Calculate the horizontal speed
+        speed = BASE_SPEED * speed_factor
+        if input.sprint:
+            speed *= SPRINT_MULTIPLIER
+        if input.sneak:
+            speed *= SNEAK_MULTIPLIER
+
+        # Calculate direction from forward/strafe + yaw
+        yaw_rad = math.radians(self.yaw)
+        # Direction vector: forward/strafe relative to yaw
+        # Minecraft yaw: 0 = south (+z), 90 = west (-x), 180 = north (-z), 270 = east (+x)
+        dx = -math.sin(yaw_rad) * input.forward + math.cos(yaw_rad) * input.strafe
+        dz = math.cos(yaw_rad) * input.forward + math.sin(yaw_rad) * input.strafe
+
+        # Update velocity components
+        # If there's any movement input, set the velocity; otherwise preserve existing velocity
+        if input.forward != 0.0 or input.strafe != 0.0 or input.sprint or input.sneak:
+            self.velocity = self.velocity.with_component(Axis.X, dx * speed)
+            self.velocity = self.velocity.with_component(Axis.Z, dz * speed)
+
+        # Apply friction after movement: velocity.x *= friction, velocity.z *= friction
+        self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * friction)
+        self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * friction)
 
 
 def jump_factor(self, world: object) -> float:
@@ -648,6 +677,49 @@ def set_flying(self, value: bool) -> None:
         self.velocity = self.velocity.with_component(Axis.Y, 0.0)
 
 
+def tick_swimming(self, input: PlayerInput, world: object) -> None:
+    """Handle swimming physics for one tick.
+
+    If ``self.swimming`` is False, returns immediately.
+    Applies buoyancy, sinking, horizontal water movement, and drag.
+
+    Args:
+        input: PlayerInput with jump, sneak, strafe flags.
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+    """
+    if not self.swimming:
+        return
+
+    # Buoyancy: jumping in water gives upward velocity
+    if input.jump:
+        self.velocity = self.velocity.with_component(
+            Axis.Y, self.velocity.y + SWIM_UP_SPEED  # motion.rs: buoyancy
+        )
+
+    # Sinking: sneaking in water gives downward velocity
+    if input.sneak:
+        self.velocity = self.velocity.with_component(
+            Axis.Y, self.velocity.y - SINK_SPEED  # motion.rs: sinking
+        )
+
+    # Horizontal movement with water multipliers (like travel water branch)
+    speed = SWIM_SPEED * 1.0  # speed_factor default if no block check
+
+    # Calculate direction from forward/strafe + yaw
+    yaw_rad = math.radians(self.yaw)
+    dx = -math.sin(yaw_rad) * input.forward + math.cos(yaw_rad) * input.strafe
+    dz = math.cos(yaw_rad) * input.forward + math.sin(yaw_rad) * input.strafe
+
+    # Update velocity components
+    if input.forward != 0.0 or input.strafe != 0.0:
+        self.velocity = self.velocity.with_component(Axis.X, dx * speed)
+        self.velocity = self.velocity.with_component(Axis.Z, dz * speed)
+
+    # Drag: velocity.x/z *= water_drag
+    self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * WATER_FRICTION)  # motion.rs: water drag
+    self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * WATER_FRICTION)
+
+
 def tick(self, dt: float, world: object) -> None:
     """One tick of PlayerMotion movement.
 
@@ -683,6 +755,9 @@ def tick(self, dt: float, world: object) -> None:
     new_z = self.position.z + self.velocity.z * dt
     self.position = Vec3(new_x, new_y, new_z)
 
+    # Update swimming flag based on whether player is in water
+    self.swimming = self.is_in_water()
+
 
 def move_entity(self, world: object, movement: Vec3) -> None:
     """Move the player by *movement* vector, resolving collisions axis-aligned.
@@ -715,9 +790,20 @@ PlayerMotion.jump_factor = jump_factor
 PlayerMotion.jump_from_ground = jump_from_ground
 PlayerMotion.fly = fly
 PlayerMotion.set_flying = set_flying
+PlayerMotion.tick_swimming = tick_swimming
 
 # ── Convenience constant from motion.rs ───────────────────────────
 
 GRAVITY: float = 0.08  # motion.rs: effective_gravity base value
 TERMINAL_VELOCITY: float = -3.92  # motion.rs: maximum fall speed clamp
 FLY_FRICTION: float = 0.98  # motion.rs: air friction for horizontal velocity (lines 1356-1358)
+
+# ── Swimming constants from motion.rs ──────────────────────────────
+# Note: These values are typical Minecraft 26.3 swimming constants.
+# Adjust if motion.rs uses different values.
+
+SWIM_SPEED: float = 0.05  # motion.rs: base horizontal speed in water
+WATER_FRICTION: float = 0.89  # motion.rs: water drag per tick (0.8-0.9)
+SWIM_UP_SPEED: float = 0.04  # motion.rs: buoyancy boost when jumping in water
+SINK_SPEED: float = 0.02  # motion.rs: sinking speed when sneaking in water
+# ---------------------------------------------------------------

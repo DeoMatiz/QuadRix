@@ -440,3 +440,54 @@ def test_player_motion_set_flying_false_returns_to_gravity():
     world = FakeWorld()  # all air
     pm.tick(dt=0.05, world=world)
     assert pm.velocity.y < 0, f"Expected velocity.y < 0 after set_flying(False) with gravity, got {pm.velocity.y}"
+
+
+# ── Swimming tests ──────────────────────────────────────────────────
+
+def test_is_in_water():
+    """is_in_water: pm at (0, 63, 0), FakeWorld с water на y<=63 → is_in_water() True."""
+    # Fake world with water at y<=63 (blocks at y=63 are water)
+    world = FakeWorld(solid_blocks={
+        (x, y, z): "minecraft:water"
+        for x in range(-5, 6)
+        for y in range(-10, 64)  # water at y<=63
+        for z in range(-5, 6)
+    })
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 63, 0))
+    pm.swimming = True
+    assert pm.is_in_water() is True, "Expected is_in_water() to True when in water"
+
+
+def test_swimming_jump():
+    """swimming jump: pm.swimming=True, input=PlayerInput(jump=True) → velocity.y > 0."""
+    world = FakeWorld()  # all air, no water (swimming flag is set manually)
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.swimming = True
+    pm.velocity = pm.velocity.with_component(Axis.Y, 0.0)  # start with zero vertical velocity
+    pm.tick_swimming(PlayerInput(jump=True), world)
+    assert pm.velocity.y > 0, f"Expected velocity.y > 0 after swimming jump, got {pm.velocity.y}"
+
+
+def test_swimming_sink():
+    """swimming sink: pm.swimming=True, input=PlayerInput(sneak=True) → velocity.y < 0."""
+    world = FakeWorld()  # all air, no water (swimming flag is set manually)
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.swimming = True
+    pm.velocity = pm.velocity.with_component(Axis.Y, 0.0)  # start with zero vertical velocity
+    pm.tick_swimming(PlayerInput(sneak=True), world)
+    assert pm.velocity.y < 0, f"Expected velocity.y < 0 after swimming sink, got {pm.velocity.y}"
+
+
+def test_water_drag():
+    """water drag: pm.swimming=True, input=PlayerInput() → velocity attenuates faster, чем на земле."""
+    world = FakeWorld()  # all air, no water (swimming flag is set manually)
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.swimming = True
+    # Set initial horizontal velocity
+    pm.velocity = pm.velocity.with_component(Axis.X, 1.0)
+    pm.velocity = pm.velocity.with_component(Axis.Z, 0.0)
+    # Tick without input - water drag should decay velocity
+    pm.tick_swimming(PlayerInput(), world)
+    # Velocity should have decayed with water drag (0.89 per tick)
+    assert abs(pm.velocity.x) < 1.0, \
+        f"Expected velocity.x to decay with water drag, initial=1.0, after={pm.velocity.x}"
