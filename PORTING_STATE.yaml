@@ -151,15 +151,9 @@ files:
   - rust: health.rs (PART 2: hurt / die)
     python: quadrix/health.py
     test: tests/test_health.py
-    status: pending
+    status: done
     lines_rust: ~800
-    depends_on:
-      - health.rs (PART 1)
-      - horizon-client-render/src/effects.rs (StatusFlags)
-      - game/combat.rs (armor + knockback parts only)
-      - game/totem.rs
-      - health.rs (damage_types loading)
-    note: "PART 2: PlayerHealth.hurt, hurt_blocking, hurt_caused_by, Environment, Blocking. NOW all deps exist."
+    note: "PlayerHealth.hurt, Environment, Blocking. 78 tests passed. Фикс: убран дублирующий _after_armor/_after_magic из _hurt_server."
 
   # ============================================================================
   # Phase 5: motion (after health.rs PART 2)
@@ -168,11 +162,11 @@ files:
   - rust: motion/environment.rs
     python: quadrix/motion/environment.py
     test: tests/motion/test_environment.py
-    status: pending
+    status: done
     lines_rust: 450
+    lines_python: ~50
     depends_on: [motion/fluids.rs, health.rs (PART 2)]
-    assets: []
-    note: "fire_contact, cactus_contact, ignite_contact, impl MotionWorld. Calls hurt() from health.py."
+    note: "fire_contact, cactus_contact. 4 tests passed. ignite_contact и impl MotionWorld — ещё pending (добавить в следующей сессии)."
 
   - rust: motion.rs
     python: quadrix/motion/core.py
@@ -180,12 +174,14 @@ files:
     status: pending
     lines_rust: 7000
     depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs, health.rs (PART 2)]
-    assets:
-      - .local/horizon-client-motion/movement-properties.nbt
-      - .local/horizon-client-collision/cached-collision.nbt
-      - .local/horizon-client-motion/landing-definitions.json
-      - .local/horizon-client-motion/landing-states.json
-    note: "HUGE. Slice by functions. Start with PlayerMotion, gravity, jump, walk only."
+    assets: [...]
+    parts_done: [1]
+    parts_total: 5
+    test_status: "10 passed (PART 1)"
+    note: >
+      PART 1/5 done: PlayerMotion basics, EntityDimensions, MovementResources
+      (1800 blocks из movement-properties.nbt, реальные friction/speed_factor/jump_factor).
+      Осталось: tick (PART 2), travel (PART 3), jump_from_ground (PART 4), fly (PART 5).
 
   # ============================================================================
   # Phase 6: network
