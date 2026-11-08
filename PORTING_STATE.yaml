@@ -200,26 +200,27 @@ files:
     test: tests/motion/test_core.py
     status: done
     lines_rust: 7000
-    lines_python: ~1500
+    lines_python: ~1800
     depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs, health.rs (PART 2)]
     assets:
       - .local/horizon-client-motion/movement-properties.nbt
       - .local/horizon-client-collision/cached-collision.nbt
       - .local/horizon-client-motion/landing-definitions.json
       - .local/horizon-client-motion/landing-states.json
-    parts_done: [1, 2, 3, 4, 5, 6, 7]
-    parts_total: 7
-    test_status: "43 passed (PART 1-7)"
+    parts_done: [1, 2, 3, 4, 5, 6, 7, 8]
+    parts_total: 8
+    test_status: "49 passed (PART 1-8)"
     note: >
-      PART 1/6: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
-      PART 2/6: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep X/Y/Z).
-      PART 3/6: travel (walk/sprint/sneak, friction), PlayerInput.
-      PART 4/6: jump_from_ground (jumpFactor из .nbt), sprint boost.
-      PART 5/6: fly, set_flying, flying mode (гравитация отключена).
-      PART 6/6: swimming (is_in_water, tick_swimming, water drag, buoyancy, sink).
-      Базовый + swimming PlayerMotion закрыт. НЕ входит (отдельные сессии):
-      auto_jump, pose, landing, climb, scaffolding, elytra, SceneCollisions,
-      полноценный collision по VoxelShape.
+      PART 1/8: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
+      PART 2/8: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep X/Y/Z).
+      PART 3/8: travel (walk/sprint/sneak, friction), PlayerInput.
+      PART 4/8: jump_from_ground (jumpFactor из .nbt), sprint boost.
+      PART 5/8: fly, set_flying, flying mode.
+      PART 6/8: swimming (is_in_water, water drag, buoyancy, sink).
+      PART 7/8: auto_jump, PlayerPose, landing (fall damage = fall_distance - 3).
+      PART 8/8: climb / ladder / scaffolding (on_climbable, climb, climb_friction).
+      Базовый motion.rs закрыт. НЕ входит (отдельные сессии): elytra, riptide,
+      SceneCollisions, полноценный collision по VoxelShape (см. collision/*.rs).
 
   # ==========================================================================
   # PHASE 5.1 — motion.rs extensions (остаток)
