@@ -173,15 +173,15 @@ files:
     test: tests/motion/test_core.py
     status: pending
     lines_rust: 7000
-    depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs, health.rs (PART 2)]
+    depends_on: [...]
     assets: [...]
-    parts_done: [1]
+    parts_done: [1, 2]
     parts_total: 5
-    test_status: "10 passed (PART 1)"
+    test_status: "14 passed (PART 1+2)"
     note: >
-      PART 1/5 done: PlayerMotion basics, EntityDimensions, MovementResources
-      (1800 blocks из movement-properties.nbt, реальные friction/speed_factor/jump_factor).
-      Осталось: tick (PART 2), travel (PART 3), jump_from_ground (PART 4), fly (PART 5).
+      PART 1/5: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
+      PART 2/5: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep по X/Y/Z).
+      Осталось: travel (PART 3), jump_from_ground (PART 4), fly (PART 5).
 
   # ============================================================================
   # Phase 6: network
