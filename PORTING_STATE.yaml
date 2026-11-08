@@ -114,10 +114,10 @@ files:
     test: tests/test_effects.py
     status: done
     lines_rust: ~650
-    lines_python: ~400
+    lines_python: ~150
     depends_on: [health.rs (PART 1)]
     note: "StatusFlags struct: resistance, fire_resistance, absorption, regeneration. 12 tests. Verified: resistance_amplifier(StatusFlags(resistance=1)) == 1."
-    
+
   - rust: game/combat.rs (armor + knockback parts only)
     python: quadrix/combat.py
     test: tests/test_combat.py
@@ -130,10 +130,11 @@ files:
   - rust: game/totem.rs
     python: quadrix/totem.py
     test: tests/test_totem.py
-    status: pending
+    status: done
     lines_rust: ~200
-    depends_on: [health.rs (PART 1)]
-    note: "Totem of undying: death protection + effects. Small file, 8 KB. Called by health.rs PART 2 when hp <= 0."
+    lines_python: ~150
+    depends_on: [health.rs (PART 1), horizon-client-render/src/effects.rs]
+    note: "try_use_totem, TOTEM_EFFECTS (regeneration, absorption, fire_resistance). 11 tests."
 
   - rust: health.rs (damage_types loading)
     python: quadrix/health.py
