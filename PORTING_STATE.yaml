@@ -139,10 +139,10 @@ files:
   - rust: health.rs (damage_types loading)
     python: quadrix/health.py
     test: tests/test_health.py
-    status: pending
+    status: done
     lines_rust: ~150
     depends_on: [horizon-world/src/nbt.rs]
-    note: "Loads .local/horizon-client-health/damage-types.nbt. Needed by hurt() to know damage type tags (is_fire, bypasses_armor, etc.)."
+    note: "Loads .local/horizon-client-health/{catalog,types,tags,ids}.json. 50 types, 37 tests total. Hex float decoded via struct.unpack."
 
   # ============================================================================
   # Phase 4: health.rs PART 2 (hurt / die) — after all deps done
