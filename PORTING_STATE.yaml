@@ -12,6 +12,7 @@ rust_root: horizon/crates/horizon-client/src/
 rust_core: horizon/crates/horizon-core/src/
 rust_world: horizon/crates/horizon-world/src/
 rust_protocol: horizon/crates/horizon-protocol/src/
+rust_render: horizon/crates/horizon-client-render/src/
 
 assets_root: .local/
 assets_client: .local/horizon-client/26.3/
@@ -26,22 +27,25 @@ minecraft_cache: .local/minecraft/
 last_session: 2026-11-08
 
 # Order matters. Do not port a file until its depends_on are done.
+# Statuses: pending | done | skipped | blocked
 files:
 
-  # --- Phase 0: base (types, math, NBT) ---
+  # ============================================================================
+  # Phase 0: base (types, math, NBT)
+  # ============================================================================
+
   - rust: horizon-core/src/geometry/mod.rs
     python: quadrix/core/geometry.py
     test: tests/core/test_geometry.py
     status: done
     lines_rust: ~700
+    lines_python: ~1000
     depends_on: []
     note: >
       Vec3, Aabb, Direction, Axis, BlockHit, java_min/java_max,
       floor_i32, clamp, next_up/next_down.
-      Placeholder for BlockPos and trig: use plain tuples / math functions
-      inside geometry.py for now; real BlockPos comes from position.rs later,
-      real trig from trig.rs later. Do NOT import quadrix.world.position
-      or quadrix.core.trig in this file — stub locally.
+      ⚠️ Aabb.center() is BROKEN (field instead of method). Test only covers
+      what works. Fix later — does not block other files.
 
   - rust: horizon-world/src/nbt.rs
     python: quadrix/world/nbt.py
@@ -61,14 +65,17 @@ files:
     depends_on: [horizon-world/src/nbt.rs]
     note: "BlockRegistry. Verified on real block-registry.nbt (35723 states, state 0 = minecraft:air)."
 
-  # --- Phase 1: physics ---
+  # ============================================================================
+  # Phase 1: physics — fluids
+  # ============================================================================
+
   - rust: entities/fluids.rs
     python: quadrix/entities/fluids.py
     test: tests/entities/fluids/test_fluids.py
     status: done
     lines_rust: 500
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
-    note: "EntityFluidInteraction, FluidState, FluidTags. ⚠️ fluid_flow() is PLACEHOLDER."
+    note: "EntityFluidInteraction, FluidState, FluidTags. ⚠️ fluid_flow() is PLACEHOLDER — must be fixed before motion/fluids.rs uses it."
 
   - rust: motion/fluids.rs
     python: quadrix/motion/fluids.py
@@ -79,7 +86,10 @@ files:
     depends_on: [entities/fluids.rs]
     note: "MotionWorld aggregate (14 tests). Uses Protocol for missing deps (PlayerMotion, SceneCollisions). fluid_flow() may still be placeholder in entities/fluids.py."
 
-  # --- Phase 0.5: health (needed by motion/environment.rs) ---
+  # ============================================================================
+  # Phase 2: health — PART 1 (types + PlayerHealth basics)
+  # ============================================================================
+
   - rust: health.rs (PART 1: types + PlayerHealth basics)
     python: quadrix/health.py
     test: tests/test_health.py
@@ -89,7 +99,24 @@ files:
     depends_on: [horizon-world/src/registry.rs]
     note: "PART 1: HealthEvent, HurtSource, Knock, BlockOutcome, HurtRecord, AttackRecord, HealthResources, PlayerHealth basics. ⚠️ hurt field is a dict, not State — PART 2 must adapt."
 
-  # --- Phase 0.6: dependencies of health.rs PART 2 ---
+  - rust: health.rs (PART 3: hooks — SKIP)
+    python: null
+    test: null
+    status: skipped
+    note: "Rust-only: HURT_SERVER, DAMAGE_PRE, DAMAGE_POST, KNOCKBACK statics. Not needed in Python."
+
+  # ============================================================================
+  # Phase 3: dependencies of health.rs PART 2
+  # ============================================================================
+
+  - rust: horizon-client-render/src/effects.rs (StatusFlags)
+    python: quadrix/effects.py
+    test: tests/test_effects.py
+    status: pending
+    lines_rust: ~650
+    depends_on: [health.rs (PART 1)]
+    note: "StatusFlags struct (line 399): resistance, fire_resistance, absorption, regeneration. Imported by health.rs/motion.rs as crate::effects::StatusFlags. Port ONLY the data type and pure helpers, NOT rendering parts."
+
   - rust: game/combat.rs (armor + knockback parts only)
     python: quadrix/combat.py
     test: tests/test_combat.py
@@ -98,30 +125,26 @@ files:
     lines_python: ~200
     depends_on: [health.rs (PART 1)]
     note: "armor_reduction, knockback_strength, hurt_armor. Verified: armor_reduction(20, 8, 10) = 3.0, knockback_strength(0) = 0.4."
-    
-  - rust: potions.rs (effects part only)
-    python: quadrix/potions.py
-    test: tests/test_potions.py
-    status: pending
-    lines_rust: ~600 (only effects part)
-    depends_on: [health.rs (PART 1)]
-    note: "ONLY: resistance, fire_resistance, absorption, regeneration. These are the pieces health.rs PART 2 calls. Skip the rest of potions.rs (brewing, applying effects to entities — port later)."
 
-  - rust: totem.rs
+  - rust: game/totem.rs
     python: quadrix/totem.py
     test: tests/test_totem.py
     status: pending
     lines_rust: ~200
     depends_on: [health.rs (PART 1)]
-    note: "totem of undying: death protection + effects. Small file."
+    note: "Totem of undying: death protection + effects. Small file, 8 KB. Called by health.rs PART 2 when hp <= 0."
 
   - rust: health.rs (damage_types loading)
     python: quadrix/health.py
     test: tests/test_health.py
     status: pending
-    lines_rust: ~150 (HealthResources.damage loading only)
+    lines_rust: ~150
     depends_on: [horizon-world/src/nbt.rs]
     note: "Loads .local/horizon-client-health/damage-types.nbt. Needed by hurt() to know damage type tags (is_fire, bypasses_armor, etc.)."
+
+  # ============================================================================
+  # Phase 4: health.rs PART 2 (hurt / die) — after all deps done
+  # ============================================================================
 
   - rust: health.rs (PART 2: hurt / die)
     python: quadrix/health.py
@@ -130,32 +153,31 @@ files:
     lines_rust: ~800
     depends_on:
       - health.rs (PART 1)
+      - horizon-client-render/src/effects.rs (StatusFlags)
       - game/combat.rs (armor + knockback parts only)
-      - potions.rs (effects part only)
-      - totem.rs
+      - game/totem.rs
       - health.rs (damage_types loading)
     note: "PART 2: PlayerHealth.hurt, hurt_blocking, hurt_caused_by, Environment, Blocking. NOW all deps exist."
 
-  - rust: health.rs (PART 3: hooks — SKIP)
-    python: null
-    test: null
-    status: skipped
-    note: "Rust-only: HURT_SERVER, DAMAGE_PRE, DAMAGE_POST, KNOCKBACK statics. Not needed in Python."
+  # ============================================================================
+  # Phase 5: motion (after health.rs PART 2)
+  # ============================================================================
 
   - rust: motion/environment.rs
     python: quadrix/motion/environment.py
     test: tests/motion/test_environment.py
     status: pending
     lines_rust: 450
-    depends_on: [motion/fluids.rs, health.rs]
+    depends_on: [motion/fluids.rs, health.rs (PART 2)]
     assets: []
+    note: "fire_contact, cactus_contact, ignite_contact, impl MotionWorld. Calls hurt() from health.py."
 
   - rust: motion.rs
     python: quadrix/motion/core.py
     test: tests/motion/test_core.py
     status: pending
     lines_rust: 7000
-    depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs]
+    depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs, health.rs (PART 2)]
     assets:
       - .local/horizon-client-motion/movement-properties.nbt
       - .local/horizon-client-collision/cached-collision.nbt
@@ -163,7 +185,10 @@ files:
       - .local/horizon-client-motion/landing-states.json
     note: "HUGE. Slice by functions. Start with PlayerMotion, gravity, jump, walk only."
 
-  # --- Phase 2: network ---
+  # ============================================================================
+  # Phase 6: network
+  # ============================================================================
+
   - rust: player_sync.rs
     python: quadrix/player_sync.py
     test: tests/test_player_sync.py
