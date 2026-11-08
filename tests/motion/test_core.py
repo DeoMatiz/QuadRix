@@ -19,6 +19,8 @@ from quadrix.motion.core import (
     PlayerPose,
     auto_jump,
     apply_landing,
+    on_climbable,
+    climb,
 )
 
 
@@ -273,7 +275,6 @@ def test_player_motion_friction_decays_velocity():
 
 # ── PART 4: jump_from_ground tests ──────────────────────────────────
 
-
 def test_player_motion_jump_from_ground_on_ground():
     """Jump from ground: pm on stone, on_ground=True, input=PlayerInput(jump=True)
     → jump_from_ground returns True, velocity.y > 0, on_ground=False."""
@@ -371,7 +372,6 @@ def test_player_motion_jump_sprint_boost():
 
 
 # ── PART 5: fly & set_flying tests ──────────────────────────────────
-
 
 def test_player_motion_set_flying_true():
     """set_flying(True): pm.flying == True, velocity.y == 0."""
@@ -605,3 +605,69 @@ def test_landing_fall_distance_less_than_3():
     # After landing, fall_distance should be reset to 0
     assert pm.fall_distance == 0.0, \
         f"Expected fall_distance to be reset to 0 after landing from 2 blocks, got {pm.fall_distance}"
+
+
+# ── NEW: on_climbable and climb tests ───────────────────────────────
+
+def test_on_climbable_ladder():
+    """on_climbable: pm на ladder → True."""
+    world = FakeWorld(solid_blocks={(0, 64, 0): "minecraft:ladder"})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    # Do NOT set pm.on_climbable here — that would shadow the method.
+    # Call the module-level function directly; it will set the instance attr internally.
+    result = on_climbable(pm, world)
+    assert result is True, f"Expected on_climbable to return True for ladder, got {result}"
+
+
+def test_on_climbable_stone():
+    """on_climbable: pm на stone → False."""
+    world = FakeWorld(solid_blocks={(0, 64, 0): "minecraft:stone"})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    # Do NOT set pm.on_climbable here — that would shadow the method.
+    result = on_climbable(pm, world)
+    assert result is False, f"Expected on_climbable to return False for stone, got {result}"
+
+
+def test_climb_up():
+    """climb: pm на ladder, forward=1.0 → velocity.y > 0 (подъем)."""
+    world = FakeWorld(solid_blocks={(0, 64, 0): "minecraft:ladder"})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.on_ground = True
+    pm.climb(PlayerInput(forward=1.0), world)
+    assert pm.velocity.y > 0, f"Expected velocity.y > 0 after climb up, got {pm.velocity.y}"
+
+
+def test_climb_no_climbable():
+    """climb: pm на stone, forward=1.0 → ничего не меняет, гравитация работает."""
+    world = FakeWorld(solid_blocks={(0, 64, 0): "minecraft:stone"})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.on_ground = True
+    vel_before = pm.velocity.y
+    pm.climb(PlayerInput(forward=1.0), world)
+    # climb() returns immediately on non-climbable block; velocity should be unchanged
+    assert pm.velocity.y == vel_before, "climb on non-climbable block should not change velocity"
+    # After tick, gravity should still apply normally
+    pm.tick(dt=0.05, world=world)
+    assert pm.velocity.y < 0, "Gravity should pull down after climb on non-climbable block"
+
+
+def test_climb_sneak_holds():
+    """climb: pm на ladder, sneak=True → velocity.y == 0 (зависание)."""
+    world = FakeWorld(solid_blocks={(0, 64, 0): "minecraft:ladder"})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.on_ground = True
+    pm.climb(PlayerInput(forward=1.0, sneak=True), world)
+    assert pm.velocity.y == 0.0, f"Expected velocity.y == 0 when sneaking on ladder, got {pm.velocity.y}"
+
+
+def test_climb_gravity_disabled():
+    """climb: pm на ladder без input → tick не тянет вниз (гравитацияdisabled mientras ладдер)."""
+    world = FakeWorld(solid_blocks={(0, 64, 0): "minecraft:ladder"})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.on_ground = True
+    # No input — climb should not change velocity
+    pm.climb(PlayerInput(), world)
+    assert pm.velocity.y == 0.0, f"Expected velocity.y == 0 with no input on ladder, got {pm.velocity.y}"
+    # Tick applies gravity, so velocity should become negative
+    pm.tick(dt=0.05, world=world)
+    assert pm.velocity.y < 0, "Gravity should pull down after climbing with no input"

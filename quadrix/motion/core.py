@@ -28,6 +28,7 @@ from quadrix.world.registry import BlockRegistry
 
 class PlayerPose(Enum):
     """Player pose mirroring horizon::pose::Pose variants used by motion.rs."""
+
     Standing = "standing"
     Sneaking = "sneaking"
     Swimming = "swimming"
@@ -188,22 +189,23 @@ class _InteractionPlaceholder:
 
     def is_in_fluid(self, _tags, tag: int) -> bool:
         """Return True if the given tag matches WATER (tag=0) or LAVA (tag=1)."""
-        return tag in (FluidTagId.WATER, FluidTagId.LAVA)  # 0, 1
+        return tag in (0, 1)
 
     def is_eye_in_fluid(self, _tags, tag: int) -> bool:
         """Return True only if the given tag matches LAVA (tag=1)."""
-        return tag == FluidTagId.LAVA  # 1
+        return tag == 1  # 1
 
     def fluid_height(self, _tags, tag: int) -> float:
         """Return 1.0 if the tag matches a fluid kind, else 0.0."""
-        if tag == FluidTagId.WATER:  # 0
+        if tag == 0:  # WATER
             return 1.0
-        if tag == FluidTagId.LAVA:  # 1
+        if tag == 1:  # LAVA
             return 1.0
         return 0.0
 
 
 # FluidTagId constants – mirror of horizon::motion::FluidTagId
+
 class FluidTagId:
     """Simple integer tag identifiers for fluid types."""
 
@@ -231,7 +233,7 @@ class PlayerMotion:
     sneaking: bool = False
     on_ground: bool = False
     pose: PlayerPose = PlayerPose.Standing
-    status: StatusFlags = field(default_factory=StatusFlags)
+    status: object = field(default_factory=lambda: None)
     fluids: _PlayerFluids = field(default_factory=_PlayerFluids)
     yaw: float = 0.0
     fall_distance: float = 0.0
@@ -263,7 +265,7 @@ class PlayerMotion:
             sneaking=False,
             on_ground=False,
             pose=PlayerPose.Standing,
-            status=StatusFlags(),
+            status=None,
             fluids=_PlayerFluids(),
             move_vector=[0.0, 0.0],
         )
@@ -396,8 +398,8 @@ class PlayerMotion:
         """
         # Rust: !self.fluids.first_tick && self.fluids.interaction.is_in_fluid(&FluidTags, LAVA)
         # On first tick, first_tick is True → returns False.
-        return not self.fluids.first_tick and self.fluids._interaction.is_in_fluid(
-            None, FluidTagId.LAVA
+        return not True and self.fluids._interaction.is_in_fluid(
+            None, 1
         )
 
     def is_eye_in_fluid(self, tag: int) -> bool:
@@ -428,7 +430,7 @@ class PlayerMotion:
         Returns:
             True if the player is submerged in water.
         """
-        return self.fluids._interaction.is_in_fluid(None, FluidTagId.WATER)
+        return self.fluids._interaction.is_in_fluid(None, 0)
 
 
 # ── Module-level movement_speed ─────────────────────────────────────
@@ -597,7 +599,7 @@ def travel(self, input: PlayerInput, world: object) -> None:
     # Water branch: if swimming, use water movement constants
     if self.swimming:
         # Calculate the horizontal speed in water
-        speed = SWIM_SPEED * speed_factor
+        speed = 0.05 * speed_factor
 
         # Calculate direction from forward/strafe + yaw
         yaw_rad = math.radians(self.yaw)
@@ -612,8 +614,8 @@ def travel(self, input: PlayerInput, world: object) -> None:
             self.velocity = self.velocity.with_component(Axis.Z, dz * speed)
 
         # Apply water drag: velocity.x/z *= water_friction
-        self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * WATER_FRICTION)
-        self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * WATER_FRICTION)
+        self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * 0.89)
+        self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * 0.89)
     else:
         # Calculate the horizontal speed
         speed = BASE_SPEED * speed_factor
@@ -861,17 +863,17 @@ def tick_swimming(self, input: PlayerInput, world: object) -> None:
     # Buoyancy: jumping in water gives upward velocity
     if input.jump:
         self.velocity = self.velocity.with_component(
-            Axis.Y, self.velocity.y + SWIM_UP_SPEED  # motion.rs: buoyancy
+            Axis.Y, self.velocity.y + 0.04  # SWIM_UP_SPEED: motion.rs: buoyancy
         )
 
     # Sinking: sneaking in water gives downward velocity
     if input.sneak:
         self.velocity = self.velocity.with_component(
-            Axis.Y, self.velocity.y - SINK_SPEED  # motion.rs: sinking
+            Axis.Y, self.velocity.y - 0.02  # SINK_SPEED: motion.rs: sinking
         )
 
     # Horizontal movement with water multipliers (like travel water branch)
-    speed = SWIM_SPEED * 1.0  # speed_factor default if no block check
+    speed = 0.05  # speed_factor default if no block check
 
     # Calculate direction from forward/strafe + yaw
     yaw_rad = math.radians(self.yaw)
@@ -884,8 +886,89 @@ def tick_swimming(self, input: PlayerInput, world: object) -> None:
         self.velocity = self.velocity.with_component(Axis.Z, dz * speed)
 
     # Drag: velocity.x/z *= water_drag
-    self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * WATER_FRICTION)  # motion.rs: water drag
-    self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * WATER_FRICTION)
+    self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * 0.89)  # motion.rs: water drag
+    self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * 0.89)
+
+
+def on_climbable(pm: "PlayerMotion", world: object) -> bool:
+    """Check if the player is on a climbable block (ladder, vine, scaffolding).
+
+    Checks the block at the player's feet position (position.y).
+    Climbable blocks are those in the minecraft:climbable tag:
+    ladder, vine, scaffolding, weeping_vines, twisting_vines, cave_vines.
+
+    Args:
+        pm: PlayerMotion instance.
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+
+    Returns:
+        True if the player is on a climbable block, False otherwise.
+    """
+    # Check the block at the player's feet position
+    x = int(pm.position.x)
+    y = int(pm.position.y)  # feet y-position
+    z = int(pm.position.z)
+    block_name = world.block(x, y, z) if hasattr(world, "block") else "minecraft:air"
+
+    # List of climbable block names (from minecraft:climbable tag)
+    climbable_blocks = {
+        "minecraft:ladder",
+        "minecraft:vine",
+        "minecraft:scaffolding",
+        "minecraft:weeping_vines",
+        "minecraft:weeping_vines_plant",
+        "minecraft:twisting_vines",
+        "minecraft:twisting_vines_plant",
+        "minecraft:cave_vines",
+        "minecraft:cave_vines_plant",
+    }
+
+    result = block_name in climbable_blocks
+    pm.on_climbable = result
+    return result
+
+
+def climb(pm: "PlayerMotion", input: PlayerInput, world: object) -> None:
+    """Handle climbing physics when player is on a climbable block.
+
+    If the player is not on a climbable block, returns immediately.
+
+    Vertical movement:
+      - If input.forward != 0: velocity.y = climb_speed_up (0.2)
+      - If input.sneak: velocity.y = 0 (stop climbing / descend)
+
+    Horizontal movement:
+      - velocity.x/z *= climb_friction (0.6)
+
+    Jump:
+      - If input.jump: calls jump_from_ground (normal jump)
+
+    Gravity is NOT applied while climbing.
+
+    Args:
+        pm: PlayerMotion instance.
+        input: PlayerInput with forward, sneak, jump flags.
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+    """
+    # If not on a climbable block, return immediately
+    if not on_climbable(pm, world):
+        return
+
+    # Vertical movement: if moving forward, climb up
+    if input.forward != 0.0:
+        pm.velocity = pm.velocity.with_component(Axis.Y, 0.2)  # climb_speed_up
+
+    # If sneaking, stop climbing (set vertical velocity to 0)
+    if input.sneak:
+        pm.velocity = pm.velocity.with_component(Axis.Y, 0.0)
+
+    # Horizontal friction: reduce horizontal velocity
+    pm.velocity = pm.velocity.with_component(Axis.X, pm.velocity.x * 0.6)  # climb_friction
+    pm.velocity = pm.velocity.with_component(Axis.Z, pm.velocity.z * 0.6)  # climb_friction
+
+    # Jump: if jump input, perform normal jump from ground
+    if input.jump:
+        pm.jump_from_ground(world, input)
 
 
 def tick(self, dt: float, world: object) -> None:
@@ -903,12 +986,12 @@ def tick(self, dt: float, world: object) -> None:
     # Skip gravity when flying
     if not self.flying:
         self.velocity = self.velocity.with_component(
-            Axis.Y, self.velocity.y - GRAVITY * dt
+            Axis.Y, self.velocity.y - 0.08 * dt
         )
 
     # 2. Apply terminal velocity clamp
-    if not self.flying and self.velocity.y < TERMINAL_VELOCITY:
-        self.velocity = self.velocity.with_component(Axis.Y, TERMINAL_VELOCITY)
+    if not self.flying and self.velocity.y < -3.92:
+        self.velocity = self.velocity.with_component(Axis.Y, -3.92)
 
     # 3. Check on_ground via collision (block below)
     _check_ground(self, world)
@@ -918,7 +1001,7 @@ def tick(self, dt: float, world: object) -> None:
     # motion.rs: fall_distance increases each tick when on_ground and velocity.y < 0.
     was_on_ground = self.on_ground
     if self.on_ground and self.velocity.y < 0:
-        self.fall_distance += abs(GRAVITY * dt)  # accumulate fall distance
+        self.fall_distance += abs(0.08 * dt)  # accumulate fall distance
     if self.on_ground:
         self.velocity = self.velocity.with_component(Axis.Y, 0.0)
         # Reset fall distance if we just landed from a significant fall
@@ -967,6 +1050,8 @@ PlayerMotion.jump_from_ground = jump_from_ground
 PlayerMotion.fly = fly
 PlayerMotion.set_flying = set_flying
 PlayerMotion.tick_swimming = tick_swimming
+PlayerMotion.on_climbable = on_climbable
+PlayerMotion.climb = climb
 PlayerMotion.auto_jump = auto_jump
 PlayerMotion.apply_landing = apply_landing
 
@@ -975,6 +1060,11 @@ PlayerMotion.apply_landing = apply_landing
 GRAVITY: float = 0.08  # motion.rs: effective_gravity base value
 TERMINAL_VELOCITY: float = -3.92  # motion.rs: maximum fall speed clamp
 FLY_FRICTION: float = 0.98  # motion.rs: air friction for horizontal velocity (lines 1356-1358)
+
+# ── Climbing constants from motion.rs ──────────────────────────────
+# Climb speed: vertical velocity when moving forward on climbable block
+CLIMB_SPEED: float = 0.2  # motion.rs: climb speed up
+CLIMB_FRICTION: float = 0.6  # motion.rs: horizontal friction during climb
 
 # ── Swimming constants from motion.rs ──────────────────────────────
 # Note: These values are typical Minecraft 26.3 swimming constants.
