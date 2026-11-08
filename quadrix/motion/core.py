@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict
 
-from quadrix.core.geometry import Vec3, Aabb
+from quadrix.core.geometry import Vec3, Aabb, Axis
 from quadrix.effects import StatusFlags
 from quadrix.world.nbt import read_nbt
 from quadrix.world.registry import BlockRegistry
@@ -305,6 +305,150 @@ class PlayerMotion:
         return self.fluids._interaction.fluid_height(None, tag)
 
 
+# ── Collision & movement helpers ────────────────────────────────────
+
+def _is_solid_block(block_name: str) -> bool:
+    """Return True if *block_name* is a solid block (not air, water, or lava)."""
+    return block_name != "minecraft:air" and block_name != "minecraft:cave_air" and block_name != "minecraft:void_air"
+
+
+def _move_axis(
+    pm: "PlayerMotion",
+    world: object,
+    axis: int,
+    movement: float,
+    dt: float,
+) -> float:
+    """Sweep the player along *axis* by *movement* blocks.
+
+    Args:
+        pm: PlayerMotion instance.
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+        axis: 0 = X, 1 = Y, 2 = Z.
+        movement: net movement along this axis for this tick.
+        dt: time step.
+
+    Returns:
+        The remaining movement after collision resolution (0 if blocked).
+    """
+    pos = pm.position
+    vel = pm.velocity
+    # Determine sign and step
+    step = 1.0 if movement > 0 else -1.0 if movement < 0 else 0.0
+    abs_move = abs(movement)
+
+    # Move in small incremental steps to detect collisions
+    step_size = 0.01  # fixed small step
+
+    total_moved = 0.0
+    for _ in range(max(int(abs_move / step_size) + 1, 1)):
+        # Propose new position coordinate
+        new_x = pos.x + step * step_size if axis == 0 else pos.x
+        new_y = pos.y + step * step_size if axis == 1 else pos.y
+        new_z = pos.z + step * step_size if axis == 2 else pos.z
+        test_pos = Vec3(new_x, new_y, new_z)
+
+        # Check block at proposed position
+        test_x = int(test_pos.x)
+        test_y = int(test_pos.y)
+        test_z = int(test_pos.z)
+        block_name = world.block(test_x, test_y, test_z) if hasattr(world, "block") else "minecraft:air"
+
+        if not _is_solid_block(block_name):
+            # Not solid, keep moving
+            pos = test_pos
+            total_moved += step_size
+        else:
+            # Solid block hit – stop movement and zero velocity component
+            pm.velocity = vel.with_component(Axis(axis), 0.0)
+            # For Y axis, if moving down, set on_ground
+            if axis == 1 and step < 0:
+                pm.on_ground = True
+                pm.velocity = pm.velocity.with_component(Axis(axis), 0.0)
+            return 0.0  # blocked
+
+    # All steps completed without full block
+    pm.position = pos
+    return movement - total_moved if total_moved > 0 else movement
+
+
+def _check_ground(pm: "PlayerMotion", world: object) -> None:
+    """Check if the player is standing on solid ground.
+
+    Looks at the block directly below the player's feet.
+    In Minecraft: on_ground = True if the block below is solid (not air).
+    The player's feet are at position.y (bottom of the 1.8-high bounding box).
+    """
+    x = int(pm.position.x)
+    # Player's feet y-position; check block below feet
+    y = int(pm.position.y) - 1  
+    z = int(pm.position.z)
+    block_name = world.block(x, y, z) if hasattr(world, "block") else "minecraft:air"
+    # on_ground = True when block below IS solid
+    pm.on_ground = _is_solid_block(block_name)
+
+
+# ── PlayerMotion methods ────────────────────────────────────────────
+
+def tick(self, dt: float, world: object) -> None:
+    """One tick of PlayerMotion movement.
+
+    Applies gravity, terminal velocity, collision checks, and updates position.
+
+    Args:
+        dt: time step in seconds (e.g. 0.05 for 20 ticks/sec).
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+    """
+    # 1. Apply gravity
+    self.velocity = self.velocity.with_component(
+        Axis.Y, self.velocity.y - GRAVITY * dt
+    )
+
+    # 2. Apply terminal velocity clamp
+    if self.velocity.y < TERMINAL_VELOCITY:
+        self.velocity = self.velocity.with_component(Axis.Y, TERMINAL_VELOCITY)
+
+    # 3. Check on_ground via collision (block below)
+    _check_ground(self, world)
+
+    # 4. Zero vertical velocity when on ground
+    if self.on_ground:
+        self.velocity = self.velocity.with_component(Axis.Y, 0.0)
+
+    # 5. Position += velocity * dt
+    # Integrate velocity over dt to update position
+    new_x = self.position.x + self.velocity.x * dt
+    new_y = self.position.y + self.velocity.y * dt
+    new_z = self.position.z + self.velocity.z * dt
+    self.position = Vec3(new_x, new_y, new_z)
+
+
+def move_entity(self, world: object, movement: Vec3) -> None:
+    """Move the player by *movement* vector, resolving collisions axis-aligned.
+
+    Sweeps along X, then Y, then Z axes. On collision with a solid block,
+    the corresponding velocity component is zeroed.
+
+    Args:
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+        movement: Vec3 displacement to attempt.
+    """
+    # Sweep along X axis
+    if movement.x != 0.0:
+        _move_axis(self, world, axis=0, movement=movement.x, dt=1.0)
+    # Sweep along Y axis
+    if movement.y != 0.0:
+        _move_axis(self, world, axis=1, movement=movement.y, dt=1.0)
+    # Sweep along Z axis
+    if movement.z != 0.0:
+        _move_axis(self, world, axis=2, movement=movement.z, dt=1.0)
+
+
+# Attach methods to PlayerMotion class
+PlayerMotion.tick = tick
+PlayerMotion.move_entity = move_entity
+
 # ── Convenience constant from motion.rs ───────────────────────────
 
 GRAVITY: float = 0.08  # motion.rs: effective_gravity base value
+TERMINAL_VELOCITY: float = -3.92  # motion.rs: maximum fall speed clamp
