@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from quadrix.core.geometry import Vec3, Aabb
+from quadrix.core.geometry import Vec3, Aabb, Axis
 from quadrix.motion.core import (
     EntityDimensions,
     BlockMovementProperties,
@@ -266,3 +266,177 @@ def test_player_motion_friction_decays_velocity():
     # Velocity should have decayed (be smaller in magnitude)
     assert abs(pm.velocity.z) < abs(initial_vel_z), \
         f"Velocity should decay with friction, initial={initial_vel_z}, after= {pm.velocity.z}"
+
+
+# ── PART 4: jump_from_ground tests ──────────────────────────────────
+
+
+def test_player_motion_jump_from_ground_on_ground():
+    """Jump from ground: pm on stone, on_ground=True, input=PlayerInput(jump=True)
+    → jump_from_ground returns True, velocity.y > 0, on_ground=False."""
+    world = FakeWorld(solid_blocks={(x, y, z): "minecraft:stone" for x in range(-5, 6) for y in range(60, 62) for z in range(-5, 6)})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    # Ensure on_ground is True (tick will set it, or we can set it directly)
+    pm.on_ground = True
+    result = pm.jump_from_ground(world, PlayerInput(jump=True))
+    assert result is True, "jump_from_ground should return True when on ground and jump input"
+    assert pm.velocity.y > 0, f"Expected velocity.y > 0 after jump, got {pm.velocity.y}"
+    assert pm.on_ground is False, "on_ground should be False after jump"
+
+
+def test_player_motion_jump_from_ground_in_air():
+    """Jump in air: pm on_ground=False → jump_from_ground returns False,
+    velocity.y not changed."""
+    world = FakeWorld()  # all air
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.on_ground = False
+    # Set some initial velocity.y
+    pm.velocity = pm.velocity.with_component(Axis.Y, 1.0)
+    initial_vel_y = pm.velocity.y
+    result = pm.jump_from_ground(world, PlayerInput(jump=True))
+    assert result is False, "jump_from_ground should return False when not on ground"
+    assert pm.velocity.y == initial_vel_y, "velocity.y should not change when not on ground"
+
+
+def test_player_motion_jump_from_ground_no_jump_input():
+    """Jump without input.jump: input=PlayerInput() on ground → return False,
+    velocity.y not changed."""
+    world = FakeWorld(solid_blocks={(x, y, z): "minecraft:stone" for x in range(-5, 6) for y in range(60, 62) for z in range(-5, 6)})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.on_ground = True
+    initial_vel_y = pm.velocity.y
+    result = pm.jump_from_ground(world, PlayerInput())
+    assert result is False, "jump_from_ground should return False when no jump input"
+    assert pm.velocity.y == initial_vel_y, "velocity.y should not change when no jump input"
+
+
+def test_player_motion_jump_factor_influence():
+    """jumpFactor influences jump velocity: pm on honey_block (jumpFactor=0.5)
+    → velocity.y after jump ≈ 0.42*0.5=0.21 ± eps, vs on stone → 0.42."""
+    # Load MovementResources and check honey_block vs stone jump factors
+    mr = MovementResources.load(".local/horizon-client-motion")
+    honey_props = mr.properties.get("minecraft:honey_block", None)
+    stone_props = mr.properties.get("minecraft:stone", None)
+    
+    honey_jf = honey_props.jump_factor if honey_props else 1.0
+    stone_jf = stone_props.jump_factor if stone_props else 1.0
+    
+    expected_honey_y = 0.42 * honey_jf
+    expected_stone_y = 0.42 * stone_jf
+    
+    # Check that honey_block has lower jumpFactor than stone (per NBT data)
+    assert honey_jf < stone_jf, f"Expected honey_block jumpFactor ({honey_jf}) < stone jumpFactor ({stone_jf})"
+    
+    # Test jump from honey_block - place honey_block at y=63 (below player at y=64)
+    world_honey = FakeWorld(solid_blocks={
+        (x, y, z): "minecraft:honey_block"
+        for x in range(-5, 6)
+        for y in range(63, 64)      # y=63 is below player at y=64
+        for z in range(-5, 6)
+    })
+    pm_honey = PlayerMotion.new(mr, Vec3(0, 64, 0))
+    pm_honey.on_ground = True
+    pm_honey.jump_from_ground(world_honey, PlayerInput(jump=True))
+    assert abs(pm_honey.velocity.y - expected_honey_y) < 1e-4, \
+        f"Honey block: expected velocity.y ≈ {expected_honey_y}, got {pm_honey.velocity.y}"
+    
+    # Test jump from stone - place stone at y=63 (below player at y=64)
+    world_stone = FakeWorld(solid_blocks={
+        (x, y, z): "minecraft:stone"
+        for x in range(-5, 6)
+        for y in range(63, 64)      # y=63 is below player at y=64
+        for z in range(-5, 6)
+    })
+    pm_stone = PlayerMotion.new(mr, Vec3(0, 64, 0))
+    pm_stone.on_ground = True
+    pm_stone.jump_from_ground(world_stone, PlayerInput(jump=True))
+    assert abs(pm_stone.velocity.y - expected_stone_y) < 1e-4, \
+        f"Stone: expected velocity.y ≈ {expected_stone_y}, got {pm_stone.velocity.y}"
+
+
+def test_player_motion_jump_sprint_boost():
+    """Sprint boost: input=PlayerInput(jump=True, sprint=True) →
+    horizontal velocity > 0 immediately after jump."""
+    world = FakeWorld(solid_blocks={(x, y, z): "minecraft:stone" for x in range(-5, 6) for y in range(60, 62) for z in range(-5, 6)})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.yaw = 0.0  # yaw=0 faces +z (forward in Minecraft)
+    pm.on_ground = True
+    result = pm.jump_from_ground(world, PlayerInput(jump=True, sprint=True))
+    assert result is True, "jump_from_ground should return True with sprint boost"
+    # With yaw=0, forward is +z, so velocity.z should be > 0 after sprint boost
+    assert pm.velocity.z > 0, f"Expected velocity.z > 0 after sprint jump with yaw=0, got {pm.velocity.z}"
+
+
+# ── PART 5: fly & set_flying tests ──────────────────────────────────
+
+
+def test_player_motion_set_flying_true():
+    """set_flying(True): pm.flying == True, velocity.y == 0."""
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.set_flying(True)
+    assert pm.flying is True, "Expected flying to be True after set_flying(True)"
+    assert pm.velocity.y == 0.0, f"Expected velocity.y == 0 after set_flying(True), got {pm.velocity.y}"
+
+
+def test_player_motion_fly_up():
+    """fly upwards: pm.flying=True, input=PlayerInput(jump=True), several fly → velocity.y > 0, position.y rises."""
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.flying = True
+    world = FakeWorld()  # all air, no solid blocks
+    # Multiple fly calls should accumulate vertical velocity
+    for _ in range(3):
+        pm.fly(PlayerInput(jump=True), world)
+    assert pm.velocity.y > 0, f"Expected velocity.y > 0 after fly upwards, got {pm.velocity.y}"
+    # Position should increase
+    pos_before = pm.position.y
+    for _ in range(3):
+        pm.tick(dt=0.05, world=world)
+    assert pm.position.y > pos_before, f"Expected position.y to increase after fly up, got {pm.position.y}"
+
+
+def test_player_motion_fly_down():
+    """fly downwards: pm.flying=True, input=PlayerInput(sneak=True) → velocity.y < 0."""
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.flying = True
+    world = FakeWorld()  # all air, no solid blocks
+    pm.fly(PlayerInput(sneak=True), world)
+    assert pm.velocity.y < 0, f"Expected velocity.y < 0 after fly downwards, got {pm.velocity.y}"
+
+
+def test_player_motion_gravity_not_applied_while_flying():
+    """Gravity is NOT applied when flying: pm.flying=True, tick several times without input → velocity.y ~0."""
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.flying = True
+    world = FakeWorld()  # all air
+    initial_vel_y = pm.velocity.y
+    for _ in range(10):
+        pm.tick(dt=0.05, world=world)
+    # velocity.y should remain ~0 (no gravity applied while flying)
+    assert abs(pm.velocity.y - initial_vel_y) < 1e-4, \
+        f"Expected velocity.y to remain ~0 while flying, initial={initial_vel_y}, after={pm.velocity.y}"
+
+
+def test_player_motion_fly_no_flying():
+    """fly() when not flying: does nothing, velocity.y unchanged."""
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    # flying is False by default
+    world = FakeWorld()  # all air
+    vel_before = pm.velocity.y
+    pm.fly(PlayerInput(jump=True), world)
+    assert pm.velocity.y == vel_before, \
+        f"Expected velocity.y unchanged when not flying, before={vel_before}, after={pm.velocity.y}"
+
+
+def test_player_motion_set_flying_false_returns_to_gravity():
+    """set_flying(False) from ground: returns to normal tick → gravity works again."""
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    # Start on ground with flying enabled
+    pm.flying = True
+    pm.on_ground = True
+    pm.velocity = pm.velocity.with_component(Axis.Y, 0.0)
+    # Disable flying
+    pm.set_flying(False)
+    # Now gravity should apply; velocity.y should decrease
+    world = FakeWorld()  # all air
+    pm.tick(dt=0.05, world=world)
+    assert pm.velocity.y < 0, f"Expected velocity.y < 0 after set_flying(False) with gravity, got {pm.velocity.y}"

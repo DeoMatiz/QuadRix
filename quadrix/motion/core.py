@@ -512,24 +512,161 @@ def travel(self, input: PlayerInput, world: object) -> None:
     self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * friction)
 
 
-# ── PlayerMotion methods ────────────────────────────────────────────
+def jump_factor(self, world: object) -> float:
+    """Return the jump factor for the block under the player's feet.
+
+    Looks at the block directly below the player's feet and returns its
+    ``jump_factor`` from ``MovementResources``. Defaults to 1.0 if the
+    block is not found in the registry.
+
+    Args:
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+
+    Returns:
+        Jump factor as a float (default 1.0).
+    """
+    x = int(self.position.x)
+    y = int(self.position.y) - 1  # block below feet
+    z = int(self.position.z)
+    block_name = world.block(x, y, z) if hasattr(world, "block") else "minecraft:air"
+    mr = MovementResources.load(".local/horizon-client-motion")
+    props = mr.properties.get(block_name)
+    if props is not None:
+        return props.jump_factor
+    return 1.0  # default jumpFactor
+
+
+def jump_from_ground(self, world: object, input: PlayerInput) -> bool:
+    """Attempt to jump from ground.
+
+    Checks if the player is on ground. If ``input.jump`` is True and the
+    player is on ground, sets vertical velocity to ``0.42 * jump_factor``
+    and, if sprinting, adds a horizontal boost of ~0.2 in the forward
+    direction. Sets ``on_ground = False`` and returns ``True``.
+
+    If the player is not on ground, or ``input.jump`` is False, returns
+    ``False ``without modifying velocity.
+
+    Args:
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+        input: PlayerInput with ``jump`` and ``sprint`` flags.
+
+    Returns:
+        ``True`` if the jump was performed, ``False ``otherwise.
+    """
+    if not self.on_ground:
+        return False
+    if not input.jump:
+        return False
+
+    # Get jumpFactor from the block under the player's feet
+    jump_factor = self.jump_factor(world)
+
+    # Set vertical velocity: 0.42 (jump_velocity from motion.rs) * jump_factor
+    self.velocity = self.velocity.with_component(Axis.Y, 0.42 * jump_factor)
+
+    # If sprinting, add horizontal boost of ~0.2 in the forward direction
+    if input.sprint:
+        yaw_rad = math.radians(self.yaw)
+        # Forward direction based on yaw: yaw=0 faces +z, yaw=90 faces -x
+        dx = -math.sin(yaw_rad) * 0.2
+        dz = math.cos(yaw_rad) * 0.2
+        self.velocity = self.velocity.with_component(Axis.X, self.velocity.x + dx)
+        self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z + dz)
+
+    self.on_ground = False
+    return True
+
+
+# ── PlayerMotion methods ──────────────────────────────────────────────
+
+def fly(self, input: PlayerInput, world: object) -> None:
+    """Player flight: vertical/horizontal movement with fly_friction.
+
+    If ``not self.flying``, returns immediately.
+
+    Vertical:
+      - input.jump  → velocity.y += fly_speed_up  (0.15)
+      - input.sneak → velocity.y -= fly_speed_up  (0.15)
+
+    Horizontal:
+      - velocity.x += strafe * fly_speed * cos(yaw)
+      - velocity.z += strafe * fly_speed * sin(yaw)
+      where fly_speed = 0.05 (motion.rs:572)
+
+    Air friction:
+      - velocity.x/z *= fly_friction  (0.98, motion.rs:1356-1358)
+
+    Gravity is NOT applied while flying.
+
+    Args:
+        input: PlayerInput with jump, sneak, strafe flags.
+        world: FakeWorld or real world object (unused for flight physics).
+    """
+    if not self.flying:
+        return
+
+    # Vertical movement
+    if input.jump:
+        self.velocity = self.velocity.with_component(
+            Axis.Y, self.velocity.y + 0.15  # fly_speed_up = 3.0 * flying_speed(0.05)
+        )
+    if input.sneak:
+        self.velocity = self.velocity.with_component(
+            Axis.Y, self.velocity.y - 0.15  # fly_speed_down
+        )
+
+    # Horizontal movement
+    yaw_rad = math.radians(self.yaw)
+    dx = math.cos(yaw_rad) * input.strafe * 0.05  # fly_speed
+    dz = math.sin(yaw_rad) * input.strafe * 0.05  # fly_speed
+    self.velocity = self.velocity.with_component(Axis.X, self.velocity.x + dx)
+    self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z + dz)
+
+    # Air friction: velocity.x/z *= fly_friction
+    self.velocity = self.velocity.with_component(
+        Axis.X, self.velocity.x * 0.98  # fly_friction (motion.rs:1356-1358)
+    )
+    self.velocity = self.velocity.with_component(
+        Axis.Z, self.velocity.z * 0.98  # fly_friction
+    )
+
+
+def set_flying(self, value: bool) -> None:
+    """Set the flying flag.
+
+    If value == self.flying, returns immediately.
+    When enabling flying, resets vertical velocity to 0.
+
+    Args:
+        value: True to enable flying, False to disable.
+    """
+    if value == self.flying:
+        return
+    self.flying = value
+    if value:
+        self.velocity = self.velocity.with_component(Axis.Y, 0.0)
+
 
 def tick(self, dt: float, world: object) -> None:
     """One tick of PlayerMotion movement.
 
     Applies gravity, terminal velocity, collision checks, and updates position.
 
+    Gravity is skipped when self.flying is True.
+
     Args:
         dt: time step in seconds (e.g. 0.05 for 20 ticks/sec).
         world: FakeWorld or real world object with ``block(x, y, z) -> str``.
     """
-    # 1. Apply gravity
-    self.velocity = self.velocity.with_component(
-        Axis.Y, self.velocity.y - GRAVITY * dt
-    )
+    # Skip gravity when flying
+    if not self.flying:
+        self.velocity = self.velocity.with_component(
+            Axis.Y, self.velocity.y - GRAVITY * dt
+        )
 
     # 2. Apply terminal velocity clamp
-    if self.velocity.y < TERMINAL_VELOCITY:
+    if not self.flying and self.velocity.y < TERMINAL_VELOCITY:
         self.velocity = self.velocity.with_component(Axis.Y, TERMINAL_VELOCITY)
 
     # 3. Check on_ground via collision (block below)
@@ -574,8 +711,13 @@ PlayerMotion.move_entity = move_entity
 PlayerMotion.travel = travel
 PlayerMotion.movement_speed = movement_speed
 PlayerMotion.get_friction = get_friction
+PlayerMotion.jump_factor = jump_factor
+PlayerMotion.jump_from_ground = jump_from_ground
+PlayerMotion.fly = fly
+PlayerMotion.set_flying = set_flying
 
 # ── Convenience constant from motion.rs ───────────────────────────
 
 GRAVITY: float = 0.08  # motion.rs: effective_gravity base value
 TERMINAL_VELOCITY: float = -3.92  # motion.rs: maximum fall speed clamp
+FLY_FRICTION: float = 0.98  # motion.rs: air friction for horizontal velocity (lines 1356-1358)
