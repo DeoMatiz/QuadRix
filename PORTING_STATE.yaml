@@ -5,7 +5,7 @@ branch: main
 target_dir: quadrix/
 entry_point: quadrix.py
 package_name: quadrix
-display_name: QuadRix            # capital Q, capital R
+display_name: QuadRix
 env_prefix: QUADRIX_
 
 rust_root: horizon/crates/horizon-client/src/
@@ -26,13 +26,19 @@ minecraft_cache: .local/minecraft/
 
 last_session: 2026-11-08
 
-# Order matters. Do not port a file until its depends_on are done.
-# Statuses: pending | done | skipped | blocked
+# ============================================================================
+# СТАТУСЫ:
+#   done    — pytest зелёный, файл закрыт
+#   pending — не начат или PARTIAL (см. note)
+#   skipped — Rust-only, не нужно в Python
+#   blocked — зависит от неготового файла
+# ============================================================================
+
 files:
 
-  # ============================================================================
-  # Phase 0: base (types, math, NBT)
-  # ============================================================================
+  # ==========================================================================
+  # PHASE 0 — base (types, math, NBT, registry)
+  # ==========================================================================
 
   - rust: horizon-core/src/geometry/mod.rs
     python: quadrix/core/geometry.py
@@ -44,8 +50,7 @@ files:
     note: >
       Vec3, Aabb, Direction, Axis, BlockHit, java_min/java_max,
       floor_i32, clamp, next_up/next_down.
-      ⚠️ Aabb.center() is BROKEN (field instead of method). Test only covers
-      what works. Fix later — does not block other files.
+      ⚠️ Aabb.center() BROKEN (field instead of method) — fix later, does not block.
 
   - rust: horizon-world/src/nbt.rs
     python: quadrix/world/nbt.py
@@ -54,7 +59,7 @@ files:
     lines_rust: ~1300
     lines_python: ~600
     depends_on: []
-    note: "NBT reader. Verified on real movement-properties.nbt (3 keys: blocks, DataVersion, states)."
+    note: "read_nbt(data: bytes), write_nbt. Verified on movement-properties.nbt, block-registry.nbt."
 
   - rust: horizon-world/src/registry.rs
     python: quadrix/world/registry.py
@@ -63,19 +68,22 @@ files:
     lines_rust: ~500
     lines_python: ~700
     depends_on: [horizon-world/src/nbt.rs]
-    note: "BlockRegistry. Verified on real block-registry.nbt (35723 states, state 0 = minecraft:air)."
+    note: "BlockRegistry. 35723 states, state 0 = minecraft:air."
 
-  # ============================================================================
-  # Phase 1: physics — fluids
-  # ============================================================================
+  # ==========================================================================
+  # PHASE 1 — fluids
+  # ==========================================================================
 
   - rust: entities/fluids.rs
     python: quadrix/entities/fluids.py
     test: tests/entities/fluids/test_fluids.py
     status: done
     lines_rust: 500
+    lines_python: ~400
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
-    note: "EntityFluidInteraction, FluidState, FluidTags. ⚠️ fluid_flow() is PLACEHOLDER — must be fixed before motion/fluids.rs uses it."
+    note: >
+      EntityFluidInteraction, FluidState, FluidTags.
+      ⚠️ fluid_flow() PLACEHOLDER — нужно заменить на порт horizon-world/src/fluid_flow.rs.
 
   - rust: motion/fluids.rs
     python: quadrix/motion/fluids.py
@@ -84,11 +92,22 @@ files:
     lines_rust: 600
     lines_python: ~600
     depends_on: [entities/fluids.rs]
-    note: "MotionWorld aggregate (14 tests). Uses Protocol for missing deps (PlayerMotion, SceneCollisions). fluid_flow() may still be placeholder in entities/fluids.py."
+    note: "MotionWorld aggregate (14 tests). Зависит от fluid_flow() (см. placeholder выше)."
 
-  # ============================================================================
-  # Phase 2: health — PART 1 (types + PlayerHealth basics)
-  # ============================================================================
+  - rust: horizon-world/src/fluid_flow.rs
+    python: quadrix/world/fluid_flow.py
+    test: tests/world/test_fluid_flow.py
+    status: pending
+    lines_rust: ~400
+    depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
+    note: >
+      Заменяет placeholder fluid_flow() в entities/fluids.py.
+      Нужен для motion/fluids.rs (течения воды/лавы) и motion.rs (swimming).
+      ВАЖНО: сделать до PART 5 motion.rs (swimming).
+
+  # ==========================================================================
+  # PHASE 2 — health PART 1 (types + PlayerHealth basics)
+  # ==========================================================================
 
   - rust: health.rs (PART 1: types + PlayerHealth basics)
     python: quadrix/health.py
@@ -97,35 +116,35 @@ files:
     lines_rust: ~700
     lines_python: ~1000
     depends_on: [horizon-world/src/registry.rs]
-    note: "PART 1: HealthEvent, HurtSource, Knock, BlockOutcome, HurtRecord, AttackRecord, HealthResources, PlayerHealth basics. ⚠️ hurt field is a dict, not State — PART 2 must adapt."
+    note: "HealthEvent, HurtSource, Knock, BlockOutcome, HurtRecord, AttackRecord, HealthResources, PlayerHealth basics."
 
   - rust: health.rs (PART 3: hooks — SKIP)
     python: null
     test: null
     status: skipped
-    note: "Rust-only: HURT_SERVER, DAMAGE_PRE, DAMAGE_POST, KNOCKBACK statics. Not needed in Python."
+    note: "Rust-only: HURT_SERVER, DAMAGE_PRE, DAMAGE_POST, KNOCKBACK statics."
 
-  # ============================================================================
-  # Phase 3: dependencies of health.rs PART 2
-  # ============================================================================
+  # ==========================================================================
+  # PHASE 3 — health PART 2 dependencies
+  # ==========================================================================
 
-  - rust: horizon-client-render/src/effects.rs (StatusFlags)
+  - rust: horizon-client-render/src/effects.rs (StatusFlags only)
     python: quadrix/effects.py
     test: tests/test_effects.py
     status: done
     lines_rust: ~650
     lines_python: ~150
     depends_on: [health.rs (PART 1)]
-    note: "StatusFlags struct: resistance, fire_resistance, absorption, regeneration. 12 tests."
+    note: "StatusFlags (resistance, fire_resistance, absorption, regeneration). 12 tests."
 
   - rust: game/combat.rs (armor + knockback parts only)
     python: quadrix/combat.py
     test: tests/test_combat.py
     status: done
-    lines_rust: ~800
+    lines_rust: ~800 (partial)
     lines_python: ~200
     depends_on: [health.rs (PART 1)]
-    note: "armor_reduction, knockback_strength, hurt_armor. Verified: armor_reduction(20, 8, 10) = 3.0, knockback_strength(0) = 0.4."
+    note: "armor_reduction, knockback_strength, hurt_armor. armor_reduction(20,8,10)=3.0, knockback_strength(0)=0.4. 17 tests."
 
   - rust: game/totem.rs
     python: quadrix/totem.py
@@ -133,7 +152,7 @@ files:
     status: done
     lines_rust: ~200
     lines_python: ~150
-    depends_on: [health.rs (PART 1), horizon-client-render/src/effects.rs]
+    depends_on: [health.rs (PART 1), effects.rs]
     note: "try_use_totem, TOTEM_EFFECTS. 11 tests."
 
   - rust: health.rs (damage_types loading)
@@ -142,53 +161,420 @@ files:
     status: done
     lines_rust: ~150
     depends_on: [horizon-world/src/nbt.rs]
-    note: "Loads .local/horizon-client-health/{catalog,types,tags,ids}.json. 50 types, 37 tests total. Hex float decoded via struct.unpack."
+    note: "Loads .local/horizon-client-health/{catalog,types,tags,ids}.json. 50 types."
 
-  # ============================================================================
-  # Phase 4: health.rs PART 2 (hurt / die) — after all deps done
-  # ============================================================================
+  # ==========================================================================
+  # PHASE 4 — health PART 2 (hurt/die) — ЗАКРЫТ
+  # ==========================================================================
 
   - rust: health.rs (PART 2: hurt / die)
     python: quadrix/health.py
     test: tests/test_health.py
     status: done
     lines_rust: ~800
-    note: "PlayerHealth.hurt, Environment, Blocking. 78 tests passed. Фикс: убран дублирующий _after_armor/_after_magic из _hurt_server."
+    depends_on:
+      - health.rs (PART 1)
+      - effects.rs
+      - combat.rs
+      - totem.rs
+      - health.rs (damage_types loading)
+    note: >
+      PlayerHealth.hurt, hurt_blocking, hurt_caused_by, Environment, Blocking.
+      78/78 passed. Фикс: убран дублирующий _after_armor/_after_magic из _hurt_server.
 
-  # ============================================================================
-  # Phase 5: motion (after health.rs PART 2)
-  # ============================================================================
+  # ==========================================================================
+  # PHASE 5 — motion
+  # ==========================================================================
 
   - rust: motion/environment.rs
     python: quadrix/motion/environment.py
     test: tests/motion/test_environment.py
-    status: done
+    status: pending                 # PARTIAL: только fire_contact + cactus_contact
     lines_rust: 450
     lines_python: ~50
     depends_on: [motion/fluids.rs, health.rs (PART 2)]
-    note: "fire_contact, cactus_contact. 4 tests passed. ignite_contact и impl MotionWorld — ещё pending (добавить в следующей сессии)."
+    note: >
+      PARTIAL: fire_contact, cactus_contact (4 tests). Осталось:
+      ignite_contact(ticks, player, random, multiplier), impl MotionWorld:
+      tick_environment_damage, tick_remaining_fire, environment_hurt,
+      server_hazards_tick, apply_fire_contact, jump_phase, bubble_column_inside.
 
   - rust: motion.rs
     python: quadrix/motion/core.py
     test: tests/motion/test_core.py
-    status: pending
-    parts_done: [1, 2, 3]
+    status: done
+    lines_rust: 7000
+    depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs, health.rs (PART 2)]
+    assets:
+      - .local/horizon-client-motion/movement-properties.nbt
+      - .local/horizon-client-collision/cached-collision.nbt
+      - .local/horizon-client-motion/landing-definitions.json
+      - .local/horizon-client-motion/landing-states.json
+    parts_done: [1, 2, 3, 4, 5]
     parts_total: 5
-    test_status: "20 passed (PART 1+2+3)"
+    test_status: "31 passed (PART 1-5)"
     note: >
       PART 1/5: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
-      PART 2/5: tick (гравитация, terminal, on_ground), move_entity (sweep X/Y/Z).
-      PART 3/5: travel (walk/sprint/sneak, friction из MovementResources), PlayerInput.
-      Осталось: jump_from_ground (PART 4), fly (PART 5).
+      PART 2/5: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep X/Y/Z).
+      PART 3/5: travel (walk/sprint/sneak, friction), PlayerInput.
+      PART 4/5: jump_from_ground (jumpFactor из .nbt), sprint boost.
+      PART 5/5: fly, set_flying, flying mode (гравитация отключена).
+      Базовый PlayerMotion закрыт. НЕ входит (отдельные сессии): swimming,
+      auto_jump, pose, landing, climb, scaffolding, elytra, SceneCollisions,
+      полноценный collision по VoxelShape.
 
-  # ============================================================================
-  # Phase 6: network
-  # ============================================================================
+  # ==========================================================================
+  # PHASE 5.1 — motion.rs extensions (после PART 5)
+  # ==========================================================================
+
+  - rust: motion.rs (swimming + water physics)
+    python: quadrix/motion/swimming.py
+    test: tests/motion/test_swimming.py
+    status: pending
+    lines_rust: ~800
+    depends_on: [motion.rs (PART 1-5), horizon-world/src/fluid_flow.rs]
+    note: >
+      Swimming, water movement, buoyancy, water sprint, underwater drag.
+      Извлечь из motion.rs (там это в travel/tick, но с fluid branch).
+
+  - rust: motion.rs (auto_jump + pose + landing)
+    python: quadrix/motion/auto_jump.py
+    test: tests/motion/test_auto_jump.py
+    status: pending
+    lines_rust: ~400
+    depends_on: [motion.rs (PART 1-5)]
+    assets:
+      - .local/horizon-client-motion/landing-definitions.json
+      - .local/horizon-client-motion/landing-states.json
+    note: "Auto-jump, PlayerPose (standing/sneaking/swimming/fall_flying), landing heights."
+
+  - rust: motion.rs (climb / ladder / scaffolding)
+    python: quadrix/motion/climb.py
+    test: tests/motion/test_climb.py
+    status: pending
+    lines_rust: ~300
+    depends_on: [motion.rs (PART 1-5), entities/fluids.rs]
+    note: "Climbing ladders/vines/scaffolding, climbing_speed."
+
+  # ==========================================================================
+  # PHASE 5.2 — collision world (для move_entity)
+  # ==========================================================================
+
+  - rust: horizon-world/src/collision/block_collision.rs
+    python: quadrix/world/collision/block_collision.py
+    test: tests/world/collision/test_block_collision.py
+    status: pending
+    lines_rust: ~600
+    depends_on: [horizon-world/src/registry.rs, horizon-core/src/geometry/mod.rs]
+    assets:
+      - .local/horizon-client-collision/cached-collision.nbt
+      - .local/horizon-client-collision/block-registry.nbt
+    note: "Block collision shapes (VoxelShape per block state). Используется в move_entity sweep."
+
+  - rust: horizon-world/src/collision/entity_collision.rs
+    python: quadrix/world/collision/entity_collision.py
+    test: tests/world/collision/test_entity_collision.py
+    status: pending
+    lines_rust: ~400
+    depends_on: [horizon-world/src/collision/block_collision.rs]
+    note: "Entity-vs-block collision (Aabb sweep по shape)."
+
+  # ==========================================================================
+  # PHASE 6 — network (player_sync зависит от protocol/packets/play.rs)
+  # ==========================================================================
+
+  - rust: horizon-protocol/src/packets/play.rs
+    python: quadrix/protocol/packets/play.py
+    test: tests/protocol/test_play.py
+    status: pending
+    lines_rust: ~4000 (155 KB)
+    depends_on: [horizon-core/src/geometry/mod.rs]
+    note: >
+      HUGE. Все play-пакеты. Разбить на серии:
+      PART 1 — PacketId enum + decoding framework
+      PART 2 — movement/position/tick пакеты
+      PART 3 — entity/player sync
+      PART 4 — chat/command
+      PART 5 — inventory/slots
+      PART 6 — chunk/world
+      Без него player_sync.rs невозможен.
 
   - rust: player_sync.rs
     python: quadrix/player_sync.py
     test: tests/test_player_sync.py
-    status: pending
+    status: blocked
     lines_rust: 90
     depends_on: [horizon-protocol/src/packets/play.rs]
-    assets: []
+    note: "90 строк, но полностью зависит от play.rs. После play.rs — 1 сессия."
+
+  - rust: horizon-protocol/src/packets/handshake.rs
+    python: quadrix/protocol/packets/handshake.py
+    test: tests/protocol/test_handshake.py
+    status: pending
+    lines_rust: 30
+    depends_on: [horizon-core/src/geometry/mod.rs]
+    note: "Handshake пакет. Маленький, можно после play.rs."
+
+  - rust: horizon-protocol/src/packets/login.rs
+    python: quadrix/protocol/packets/login.py
+    test: tests/protocol/test_login.py
+    status: pending
+    lines_rust: 150
+    depends_on: [horizon-protocol/src/packets/handshake.rs]
+    note: "Login start, encryption request/response, login success."
+
+  - rust: horizon-protocol/src/packets/status.rs
+    python: quadrix/protocol/packets/status.py
+    test: tests/protocol/test_status.py
+    status: pending
+    lines_rust: 40
+    depends_on: [horizon-protocol/src/packets/handshake.rs]
+    note: "Server list ping."
+
+  - rust: horizon-protocol/src/packets/configuration.rs
+    python: quadrix/protocol/packets/configuration.py
+    test: tests/protocol/test_configuration.py
+    status: pending
+    lines_rust: 400
+    depends_on: [horizon-protocol/src/packets/login.rs]
+    note: "Configuration state пакеты (registry data, resource pack, finish config)."
+
+  - rust: horizon-protocol/src/buf.rs
+    python: quadrix/protocol/buf.py
+    test: tests/protocol/test_buf.py
+    status: pending
+    lines_rust: ~800
+    depends_on: []
+    note: "Byte buffer, varint/varlong, string read/write, packet framing."
+
+  - rust: horizon-protocol/src/ids.rs
+    python: quadrix/protocol/ids.py
+    test: tests/protocol/test_ids.py
+    status: pending
+    lines_rust: ~600
+    depends_on: []
+    note: "Packet ID enum (все пакеты). Таблица ID → name."
+
+  # ==========================================================================
+  # PHASE 7 — items / inventory (зависимости render'а и game)
+  # ==========================================================================
+
+  - rust: horizon-items/src/items.rs
+    python: quadrix/items/items.py
+    test: tests/items/test_items.py
+    status: pending
+    lines_rust: ~3000
+    depends_on: [horizon-core/src/geometry/mod.rs]
+    note: "Item registry (id, properties). ItemStack базово."
+
+  - rust: horizon-items/src/item_data.rs
+    python: quadrix/items/item_data.py
+    test: tests/items/test_item_data.py
+    status: pending
+    lines_rust: ~2000
+    depends_on: [quadrix/items/items.py]
+    note: "Item components (damage, enchant, custom_data)."
+
+  - rust: horizon-items/src/enchant.rs
+    python: quadrix/items/enchant.py
+    test: tests/items/test_enchant.py
+    status: pending
+    lines_rust: ~1500
+    depends_on: [quadrix/items/items.py]
+    note: "Enchantment registry, enchantment application."
+
+  - rust: horizon-world/src/simple_container.rs
+    python: quadrix/world/simple_container.py
+    test: tests/world/test_simple_container.py
+    status: pending
+    lines_rust: ~700
+    depends_on: [quadrix/items/items.py]
+    note: "Container (inventory slots)."
+
+  # ==========================================================================
+  # PHASE 8 — effects / potions / food (расширения)
+  # ==========================================================================
+
+  - rust: horizon-client-render/src/effects.rs (полный, не только StatusFlags)
+    python: quadrix/effects/effects.py
+    test: tests/effects/test_effects.py
+    status: pending
+    lines_rust: ~650
+    depends_on: [quadrix/health.py]
+    note: "ActiveEffect, effect registry, effect application. Расширение quadrix/effects.py."
+
+  - rust: horizon-core/src/potions.rs
+    python: quadrix/items/potions.py
+    test: tests/items/test_potions.py
+    status: pending
+    lines_rust: ~400
+    depends_on: [quadrix/effects/effects.py]
+    note: "Potion registry."
+
+  - rust: horizon-world/src/food.rs
+    python: quadrix/world/food.py
+    test: tests/world/test_food.py
+    status: pending
+    lines_rust: ~800
+    depends_on: [quadrix/health.py]
+    note: "Food data (hunger, saturation, exhaustion)."
+
+  # ==========================================================================
+  # PHASE 9 — player_sync dependent (после play.rs)
+  # ==========================================================================
+
+  - rust: player_sync.rs (см. Phase 6, blocked)
+
+  - rust: horizon-client/src/player_sync.rs
+    python: quadrix/player_sync.py
+    test: tests/test_player_sync.py
+    status: blocked
+    depends_on: [horizon-protocol/src/packets/play.rs]
+    note: "Порт самого client-side player_sync (позиция игрока, тики)."
+
+  # ==========================================================================
+  # PHASE 10 — chunk / world loading (нужно для реального клиента)
+  # ==========================================================================
+
+  - rust: horizon-world/src/chunk.rs
+    python: quadrix/world/chunk.py
+    test: tests/world/test_chunk.py
+    status: pending
+    lines_rust: ~1000
+    depends_on: [horizon-world/src/registry.rs, horizon-world/src/nbt.rs]
+    note: "Chunk (sections, paletted storage, block entities)."
+
+  - rust: horizon-world/src/chunk_status.rs
+    python: quadrix/world/chunk_status.py
+    test: tests/world/test_chunk_status.py
+    status: pending
+    lines_rust: ~100
+    depends_on: [quadrix/world/chunk.py]
+    note: "Chunk load status enum."
+
+  - rust: horizon-world/src/heightmap.rs
+    python: quadrix/world/heightmap.py
+    test: tests/world/test_heightmap.py
+    status: pending
+    lines_rust: ~600
+    depends_on: [quadrix/world/chunk.py]
+    note: "Heightmap (motion/light/спавн)."
+
+  - rust: horizon-world/src/world_ray.rs
+    python: quadrix/world/world_ray.py
+    test: tests/world/test_world_ray.py
+    status: pending
+    lines_rust: ~600
+    depends_on: [quadrix/world/collision/block_collision.rs, quadrix/core/geometry.py]
+    note: "Raytrace (block hit, entity hit)."
+
+  # ==========================================================================
+  # PHASE 11 — landing (нужно для правильной физики падения)
+  # ==========================================================================
+
+  - rust: motion/landing.rs (или horizon-client/src/landing.rs)
+    python: quadrix/motion/landing.py
+    test: tests/motion/test_landing.py
+    status: pending
+    lines_rust: ~500
+    depends_on: [motion.rs (PART 1-5)]
+    assets:
+      - .local/horizon-client-motion/landing-definitions.json
+      - .local/horizon-client-motion/landing-states.json
+    note: "Fall damage, landing heights, friction by landing state."
+
+  # ==========================================================================
+  # PHASE 12 — interactions (block placing / breaking) — для «клиент что-то делает»
+  # ==========================================================================
+
+  - rust: horizon-world/src/block_placement.rs
+    python: quadrix/world/block_placement.py
+    test: tests/world/test_block_placement.py
+    status: pending
+    lines_rust: ~800
+    depends_on: [quadrix/world/chunk.py, quadrix/items/items.py]
+    note: "Block placement rules (когда можно ставить блок)."
+
+  - rust: horizon-world/src/block_survival.rs
+    python: quadrix/world/block_survival.py
+    test: tests/world/test_block_survival.py
+    status: pending
+    lines_rust: ~1500
+    depends_on: [quadrix/world/block_placement.py]
+    note: "Block drops, tool requirement, break progress."
+
+  - rust: horizon-world/src/item_use.rs
+    python: quadrix/world/item_use.py
+    test: tests/world/test_item_use.py
+    status: pending
+    lines_rust: ~700
+    depends_on: [quadrix/items/items.py]
+    note: "Item use actions (right-click logic)."
+
+  - rust: horizon-world/src/block_support.rs
+    python: quadrix/world/block_support.py
+    test: tests/world/test_block_support.py
+    status: pending
+    lines_rust: ~500
+    depends_on: [quadrix/world/block_placement.py]
+    note: "Block support (что на чём держится)."
+
+  # ==========================================================================
+  # PHASE 13 — world events / sound / particles (для «клиент показывает/играет»)
+  # ==========================================================================
+
+  - rust: horizon-world/src/effect_particles.rs
+    python: quadrix/world/effect_particles.py
+    test: tests/world/test_effect_particles.py
+    status: pending
+    lines_rust: ~300
+    depends_on: [quadrix/effects/effects.py]
+    note: "Particle ID → particle type (для рендера и звука)."
+
+  - rust: horizon-core/src/sound_source.rs
+    python: quadrix/core/sound_source.py
+    test: tests/core/test_sound_source.py
+    status: pending
+    lines_rust: 30
+    depends_on: []
+    note: "SoundSource enum (master, block, hostile, player)."
+
+  # ==========================================================================
+  # SKIPPED / FORBIDDEN (по AGENTS.md)
+  # ==========================================================================
+
+  - rust: game.rs
+    status: skipped
+    note: "1 МБ. Forbidden (AGENTS.md)."
+
+  - rust: mobs.rs
+    status: skipped
+    note: "233 КБ. Forbidden."
+
+  - rust: lan/
+    status: skipped
+    note: "1.35 МБ. Forbidden."
+
+  - rust: title.rs, menu.rs
+    status: skipped
+    note: "214 КБ + 170 КБ. Forbidden."
+
+  - rust: horizon-client-render/src/*
+    status: skipped
+    note: "5.8 МБ. Render не входит в текущий scope (без GPU)."
+
+  - rust: horizon-client/src/save.rs (346 КБ)
+    status: skipped
+    note: "Save system. Не нужно для run-only клиента."
+
+  - rust: horizon-client/src/realms.rs (157 КБ)
+    status: skipped
+    note: "Realms API."
+
+  - rust: horizon-client/src/net.rs (94 КБ)
+    status: skipped
+    note: "Network host/peer logic. Только для LAN/сервер."
+
+  - rust: horizon-server/*
+    status: skipped
+    note: "Полноценный сервер — не нужен для клиента."
