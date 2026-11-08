@@ -116,7 +116,7 @@ files:
     lines_rust: ~650
     lines_python: ~150
     depends_on: [health.rs (PART 1)]
-    note: "StatusFlags struct: resistance, fire_resistance, absorption, regeneration. 12 tests. Verified: resistance_amplifier(StatusFlags(resistance=1)) == 1."
+    note: "StatusFlags struct: resistance, fire_resistance, absorption, regeneration. 12 tests."
 
   - rust: game/combat.rs (armor + knockback parts only)
     python: quadrix/combat.py
@@ -134,7 +134,7 @@ files:
     lines_rust: ~200
     lines_python: ~150
     depends_on: [health.rs (PART 1), horizon-client-render/src/effects.rs]
-    note: "try_use_totem, TOTEM_EFFECTS (regeneration, absorption, fire_resistance). 11 tests."
+    note: "try_use_totem, TOTEM_EFFECTS. 11 tests."
 
   - rust: health.rs (damage_types loading)
     python: quadrix/health.py
