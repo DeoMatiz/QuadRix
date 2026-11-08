@@ -172,16 +172,14 @@ files:
     python: quadrix/motion/core.py
     test: tests/motion/test_core.py
     status: pending
-    lines_rust: 7000
-    depends_on: [...]
-    assets: [...]
-    parts_done: [1, 2]
+    parts_done: [1, 2, 3]
     parts_total: 5
-    test_status: "14 passed (PART 1+2)"
+    test_status: "20 passed (PART 1+2+3)"
     note: >
       PART 1/5: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
-      PART 2/5: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep по X/Y/Z).
-      Осталось: travel (PART 3), jump_from_ground (PART 4), fly (PART 5).
+      PART 2/5: tick (гравитация, terminal, on_ground), move_entity (sweep X/Y/Z).
+      PART 3/5: travel (walk/sprint/sneak, friction из MovementResources), PlayerInput.
+      Осталось: jump_from_ground (PART 4), fly (PART 5).
 
   # ============================================================================
   # Phase 6: network
