@@ -81,7 +81,9 @@ files:
     lines_rust: 500
     lines_python: ~400
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
-    note: "EntityFluidInteraction, FluidState, FluidTags. fluid_flow() теперь из quadrix/world/fluid_flow.py (5 tests)."
+    note: >
+      EntityFluidInteraction, FluidState, FluidTags.
+      fluid_flow() теперь из quadrix/world/fluid_flow.py (реальная реализация).
 
   - rust: motion/fluids.rs
     python: quadrix/motion/fluids.py
@@ -90,7 +92,7 @@ files:
     lines_rust: 600
     lines_python: ~600
     depends_on: [entities/fluids.rs]
-    note: "MotionWorld aggregate (14 tests). Зависит от fluid_flow() (см. placeholder выше)."
+    note: "MotionWorld aggregate (14 tests). Использует fluid_flow из quadrix/world/fluid_flow.py."
 
   - rust: horizon-world/src/fluid_flow.rs
     python: quadrix/world/fluid_flow.py
@@ -99,10 +101,12 @@ files:
     lines_rust: ~400
     lines_python: ~150
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
-    note: "water/lava flow direction, two-source balance, falling deflection. 5 tests passed. Заменяет placeholder fluid_flow() в entities/fluids.py."
+    note: >
+      water/lava flow direction, two-source balance, falling deflection.
+      5 tests passed. Заменил placeholder fluid_flow() в entities/fluids.py.
 
   # ==========================================================================
-  # PHASE 2 — health PART 1 (types + PlayerHealth basics)
+  # PHASE 2 — health PART 1
   # ==========================================================================
 
   - rust: health.rs (PART 1: types + PlayerHealth basics)
@@ -185,60 +189,48 @@ files:
   - rust: motion/environment.rs
     python: quadrix/motion/environment.py
     test: tests/motion/test_environment.py
-    status: pending                 # PARTIAL: только fire_contact + cactus_contact
+    status: done
     lines_rust: 450
-    lines_python: ~50
+    lines_python: ~250
     depends_on: [motion/fluids.rs, health.rs (PART 2)]
-    note: >
-      PARTIAL: fire_contact, cactus_contact (4 tests). Осталось:
-      ignite_contact(ticks, player, random, multiplier), impl MotionWorld:
-      tick_environment_damage, tick_remaining_fire, environment_hurt,
-      server_hazards_tick, apply_fire_contact, jump_phase, bubble_column_inside.
+    note: "fire_contact, cactus_contact, ignite_contact, tick_remaining_fire, environment_hurt, tick_environment_damage, server_hazards_tick, apply_fire_contact, jump_phase, bubble_column_inside. 9 tests."
 
   - rust: motion.rs
     python: quadrix/motion/core.py
     test: tests/motion/test_core.py
     status: done
     lines_rust: 7000
+    lines_python: ~1500
     depends_on: [motion/fluids.rs, motion/environment.rs, entities/fluids.rs, health.rs (PART 2)]
     assets:
       - .local/horizon-client-motion/movement-properties.nbt
       - .local/horizon-client-collision/cached-collision.nbt
       - .local/horizon-client-motion/landing-definitions.json
       - .local/horizon-client-motion/landing-states.json
-    parts_done: [1, 2, 3, 4, 5]
-    parts_total: 5
-    test_status: "31 passed (PART 1-5)"
+    parts_done: [1, 2, 3, 4, 5, 6]
+    parts_total: 6
+    test_status: "35 passed (PART 1-6)"
     note: >
-      PART 1/5: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
-      PART 2/5: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep X/Y/Z).
-      PART 3/5: travel (walk/sprint/sneak, friction), PlayerInput.
-      PART 4/5: jump_from_ground (jumpFactor из .nbt), sprint boost.
-      PART 5/5: fly, set_flying, flying mode (гравитация отключена).
-      Базовый PlayerMotion закрыт. НЕ входит (отдельные сессии): swimming,
+      PART 1/6: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
+      PART 2/6: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep X/Y/Z).
+      PART 3/6: travel (walk/sprint/sneak, friction), PlayerInput.
+      PART 4/6: jump_from_ground (jumpFactor из .nbt), sprint boost.
+      PART 5/6: fly, set_flying, flying mode (гравитация отключена).
+      PART 6/6: swimming (is_in_water, tick_swimming, water drag, buoyancy, sink).
+      Базовый + swimming PlayerMotion закрыт. НЕ входит (отдельные сессии):
       auto_jump, pose, landing, climb, scaffolding, elytra, SceneCollisions,
       полноценный collision по VoxelShape.
 
   # ==========================================================================
-  # PHASE 5.1 — motion.rs extensions (после PART 5)
+  # PHASE 5.1 — motion.rs extensions (остаток)
   # ==========================================================================
-
-  - rust: motion.rs (swimming + water physics)
-    python: quadrix/motion/swimming.py
-    test: tests/motion/test_swimming.py
-    status: pending
-    lines_rust: ~800
-    depends_on: [motion.rs (PART 1-5), horizon-world/src/fluid_flow.rs]
-    note: >
-      Swimming, water movement, buoyancy, water sprint, underwater drag.
-      Извлечь из motion.rs (там это в travel/tick, но с fluid branch).
 
   - rust: motion.rs (auto_jump + pose + landing)
     python: quadrix/motion/auto_jump.py
     test: tests/motion/test_auto_jump.py
     status: pending
     lines_rust: ~400
-    depends_on: [motion.rs (PART 1-5)]
+    depends_on: [motion.rs (PART 1-6)]
     assets:
       - .local/horizon-client-motion/landing-definitions.json
       - .local/horizon-client-motion/landing-states.json
@@ -249,7 +241,7 @@ files:
     test: tests/motion/test_climb.py
     status: pending
     lines_rust: ~300
-    depends_on: [motion.rs (PART 1-5), entities/fluids.rs]
+    depends_on: [motion.rs (PART 1-6), entities/fluids.rs]
     note: "Climbing ladders/vines/scaffolding, climbing_speed."
 
   # ==========================================================================
@@ -276,7 +268,7 @@ files:
     note: "Entity-vs-block collision (Aabb sweep по shape)."
 
   # ==========================================================================
-  # PHASE 6 — network (player_sync зависит от protocol/packets/play.rs)
+  # PHASE 6 — network
   # ==========================================================================
 
   - rust: horizon-protocol/src/packets/play.rs
@@ -295,21 +287,13 @@ files:
       PART 6 — chunk/world
       Без него player_sync.rs невозможен.
 
-  - rust: player_sync.rs
-    python: quadrix/player_sync.py
-    test: tests/test_player_sync.py
-    status: blocked
-    lines_rust: 90
-    depends_on: [horizon-protocol/src/packets/play.rs]
-    note: "90 строк, но полностью зависит от play.rs. После play.rs — 1 сессия."
-
   - rust: horizon-protocol/src/packets/handshake.rs
     python: quadrix/protocol/packets/handshake.py
     test: tests/protocol/test_handshake.py
     status: pending
     lines_rust: 30
     depends_on: [horizon-core/src/geometry/mod.rs]
-    note: "Handshake пакет. Маленький, можно после play.rs."
+    note: "Handshake пакет."
 
   - rust: horizon-protocol/src/packets/login.rs
     python: quadrix/protocol/packets/login.py
@@ -351,8 +335,16 @@ files:
     depends_on: []
     note: "Packet ID enum (все пакеты). Таблица ID → name."
 
+  - rust: player_sync.rs
+    python: quadrix/player_sync.py
+    test: tests/test_player_sync.py
+    status: blocked
+    lines_rust: 90
+    depends_on: [horizon-protocol/src/packets/play.rs]
+    note: "90 строк, но полностью зависит от play.rs. После play.rs — 1 сессия."
+
   # ==========================================================================
-  # PHASE 7 — items / inventory (зависимости render'а и game)
+  # PHASE 7 — items / inventory
   # ==========================================================================
 
   - rust: horizon-items/src/items.rs
@@ -391,7 +383,7 @@ files:
   # PHASE 8 — effects / potions / food (расширения)
   # ==========================================================================
 
-  - rust: horizon-client-render/src/effects.rs (полный, не только StatusFlags)
+  - rust: horizon-client-render/src/effects.rs (полный)
     python: quadrix/effects/effects.py
     test: tests/effects/test_effects.py
     status: pending
@@ -416,20 +408,7 @@ files:
     note: "Food data (hunger, saturation, exhaustion)."
 
   # ==========================================================================
-  # PHASE 9 — player_sync dependent (после play.rs)
-  # ==========================================================================
-
-  - rust: player_sync.rs (см. Phase 6, blocked)
-
-  - rust: horizon-client/src/player_sync.rs
-    python: quadrix/player_sync.py
-    test: tests/test_player_sync.py
-    status: blocked
-    depends_on: [horizon-protocol/src/packets/play.rs]
-    note: "Порт самого client-side player_sync (позиция игрока, тики)."
-
-  # ==========================================================================
-  # PHASE 10 — chunk / world loading (нужно для реального клиента)
+  # PHASE 10 — chunk / world loading
   # ==========================================================================
 
   - rust: horizon-world/src/chunk.rs
@@ -461,11 +440,11 @@ files:
     test: tests/world/test_world_ray.py
     status: pending
     lines_rust: ~600
-    depends_on: [quadrix/world/collision/block_collision.rs, quadrix/core/geometry.py]
+    depends_on: [quadrix/world/collision/block_collision.py, quadrix/core/geometry.py]
     note: "Raytrace (block hit, entity hit)."
 
   # ==========================================================================
-  # PHASE 11 — landing (нужно для правильной физики падения)
+  # PHASE 11 — landing
   # ==========================================================================
 
   - rust: motion/landing.rs (или horizon-client/src/landing.rs)
@@ -473,14 +452,14 @@ files:
     test: tests/motion/test_landing.py
     status: pending
     lines_rust: ~500
-    depends_on: [motion.rs (PART 1-5)]
+    depends_on: [motion.rs (PART 1-6)]
     assets:
       - .local/horizon-client-motion/landing-definitions.json
       - .local/horizon-client-motion/landing-states.json
     note: "Fall damage, landing heights, friction by landing state."
 
   # ==========================================================================
-  # PHASE 12 — interactions (block placing / breaking) — для «клиент что-то делает»
+  # PHASE 12 — interactions (block placing / breaking)
   # ==========================================================================
 
   - rust: horizon-world/src/block_placement.rs
@@ -516,7 +495,7 @@ files:
     note: "Block support (что на чём держится)."
 
   # ==========================================================================
-  # PHASE 13 — world events / sound / particles (для «клиент показывает/играет»)
+  # PHASE 13 — misc (particles, sound)
   # ==========================================================================
 
   - rust: horizon-world/src/effect_particles.rs
