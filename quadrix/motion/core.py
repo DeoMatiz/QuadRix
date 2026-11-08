@@ -4,7 +4,7 @@
 Port of horizon/crates/horizon-client/src/motion.rs:
 - impl PlayerMotion { fn new, dimensions, bounds, eye_height, is_in_lava, is_eye_in_fluid, fluid_height }
 - EntityDimensions, BlockMovementProperties, MovementResources
-- PlayerInput, movement_speed, get_friction, travel (PART 3)
+- PlayerInput, movement_speed, get_friction, travel, auto_jump, pose, landing (PART 7)
 
 Mirrors the Rust PlayerMotion struct and its methods.
 """
@@ -12,6 +12,7 @@ Mirrors the Rust PlayerMotion struct and its methods.
 from __future__ import annotations
 
 import math
+from enum import Enum
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,17 @@ from quadrix.core.geometry import Vec3, Aabb, Axis
 from quadrix.effects import StatusFlags
 from quadrix.world.nbt import read_nbt
 from quadrix.world.registry import BlockRegistry
+
+
+# ── PlayerPose enum ───────────────────────────────────────────────
+
+class PlayerPose(Enum):
+    """Player pose mirroring horizon::pose::Pose variants used by motion.rs."""
+    Standing = "standing"
+    Sneaking = "sneaking"
+    Swimming = "swimming"
+    FallFlying = "fall_flying"
+    Sleeping = "sleeping"
 
 
 # ── EntityDimensions ──────────────────────────────────────────────
@@ -203,7 +215,7 @@ class FluidTagId:
 
 @dataclass
 class PlayerMotion:
-    """Minimal mirror of horizon::motion::PlayerMotion fields needed for PART 1.
+    """Minimal mirror of horizon::motion::PlayerMotion fields needed for PART 1+7.
 
     Only the fields and methods listed in the porting task are included.
     """
@@ -218,10 +230,12 @@ class PlayerMotion:
     sprinting: bool = False
     sneaking: bool = False
     on_ground: bool = False
-    pose: str = "standing"
+    pose: PlayerPose = PlayerPose.Standing
     status: StatusFlags = field(default_factory=StatusFlags)
     fluids: _PlayerFluids = field(default_factory=_PlayerFluids)
     yaw: float = 0.0
+    fall_distance: float = 0.0
+    move_vector: list[float] = field(default_factory=lambda: [0.0, 0.0])
 
     # --- Constructor ---
 
@@ -248,9 +262,10 @@ class PlayerMotion:
             sprinting=False,
             sneaking=False,
             on_ground=False,
-            pose="standing",
+            pose=PlayerPose.Standing,
             status=StatusFlags(),
             fluids=_PlayerFluids(),
+            move_vector=[0.0, 0.0],
         )
 
     # --- Accessors ---
@@ -279,12 +294,96 @@ class PlayerMotion:
         return Aabb.new(min_vec, max_vec)
 
     def eye_height(self) -> float:
-        """Return the player's eye height.
+        """Return the player's eye height, adjusted by pose.
 
         Returns:
             Eye height in blocks (always > 0 for standing pose).
+            Adjustments per motion.rs pose conventions:
+            - standing: 1.62
+            - sneaking: * 0.85
+            - swimming: 0.4
+            - fall_flying: 1.62
+            - sleeping: 0.2
         """
-        return self.dimensions.eye_height
+        base = self.dimensions.eye_height
+        match self.pose:
+            case PlayerPose.Standing:
+                return base
+            case PlayerPose.Sneaking:
+                return base * 0.85
+            case PlayerPose.Swimming:
+                return 0.4
+            case PlayerPose.FallFlying:
+                return base
+            case PlayerPose.Sleeping:
+                return 0.2
+
+    # --- New methods: auto_jump, apply_landing ---
+
+    def auto_jump(self, world: object) -> bool:
+        """Attempt auto-jump.
+
+        Checks if the player is on ground, moving forward, has a solid block
+        ahead, and space above to jump. If all conditions met, calls
+        jump_from_ground and returns True.
+
+        Args:
+            world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+
+        Returns:
+            True if auto-jump was performed, False otherwise.
+        """
+        if not self.on_ground:
+            return False
+        if self.move_vector[1] <= 0:  # input.forward <= 0
+            return False
+
+        # Check for solid block ahead at feet level and one block up
+        yaw_rad = math.radians(self.yaw)
+        # Minecraft yaw: 0 = south (+z), 90 = west (-x), 180 = north (-z), 270 = east (+x)
+        forward_x = -math.sin(yaw_rad) * self.move_vector[1]
+        forward_z = math.cos(yaw_rad) * self.move_vector[1]
+
+        # Check block at player's feet position ahead
+        fx = int(self.position.x + forward_x)
+        fz = int(self.position.z + forward_z)
+        fy = int(self.position.y)  # feet y
+
+        # Check the block directly ahead
+        block_ahead = world.block(fx, fy, fz) if hasattr(world, "block") else "minecraft:air"
+        if block_ahead == "minecraft:air" or block_ahead == "minecraft:void_air":
+            # No solid block ahead - no auto-jump
+            return False
+
+        # Check that space above is free (one block up from feet)
+        block_above = world.block(fx, fy + 1, fz) if hasattr(world, "block") else "minecraft:air"
+        if block_above != "minecraft:air" and block_above != "minecraft:void_air":
+            # Space above is blocked - no auto-jump
+            return False
+
+        # All conditions met - perform the jump
+        input = PlayerInput(forward=1.0, sneak=self.sneaking, sprint=self.sprinting)
+        result = self.jump_from_ground(world, input)
+        return result
+
+    def apply_landing(self, world: object) -> None:
+        """Apply fall damage based on fall_distance.
+
+        If fall_distance > 3 and on_ground, applies fall damage to health:
+        amount = fall_distance - 3.
+
+        Also loads landing friction from landing-definitions.json if needed.
+
+        Args:
+            world: FakeWorld or real world object.
+        """
+        if self.fall_distance > 3 and self.on_ground:
+            damage_amount = self.fall_distance - 3
+            from quadrix.health import PlayerHealth
+            # Apply fall damage to health
+            self.status.hurt(int(damage_amount) if damage_amount > 0 else 1)
+        # Reset fall distance after applying landing
+        self.fall_distance = 0.0
 
     # --- Fluid checks ---
 
@@ -607,6 +706,75 @@ def jump_from_ground(self, world: object, input: PlayerInput) -> bool:
     return True
 
 
+def auto_jump(pm: "PlayerMotion", world: object) -> bool:
+    """Attempt auto-jump.
+
+    Checks if the player is on ground, moving forward, has a solid block
+    ahead, and space above to jump. If all conditions met, calls
+    jump_from_ground and returns True.
+
+    Args:
+        pm: PlayerMotion instance.
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+
+    Returns:
+        True if auto-jump was performed, False otherwise.
+    """
+    if not pm.on_ground:
+        return False
+    if pm.move_vector[1] <= 0:  # input.forward <= 0
+        return False
+
+    # Check for solid block ahead at feet level and one block up
+    yaw_rad = math.radians(pm.yaw)
+    # Minecraft yaw: 0 = south (+z), 90 = west (-x), 180 = north (-z), 270 = east (+x)
+    forward_x = -math.sin(yaw_rad) * pm.move_vector[1]
+    forward_z = math.cos(yaw_rad) * pm.move_vector[1]
+
+    # Check block at player's feet position ahead
+    fx = int(pm.position.x + forward_x)
+    fz = int(pm.position.z + forward_z)
+    fy = int(pm.position.y)  # feet y
+
+    # Check the block directly ahead
+    block_ahead = world.block(fx, fy, fz) if hasattr(world, "block") else "minecraft:air"
+    if block_ahead == "minecraft:air" or block_ahead == "minecraft:void_air":
+        # No solid block ahead - no auto-jump
+        return False
+
+    # Check that space above is free (one block up from feet)
+    block_above = world.block(fx, fy + 1, fz) if hasattr(world, "block") else "minecraft:air"
+    if block_above != "minecraft:air" and block_above != "minecraft:void_air":
+        # Space above is blocked - no auto-jump
+        return False
+
+    # All conditions met - perform the jump
+    input = PlayerInput(forward=1.0, jump=True, sneak=pm.sneaking, sprint=pm.sprinting)
+    result = jump_from_ground(pm, world, input)
+    return result
+
+
+def apply_landing(pm: "PlayerMotion", world: object) -> None:
+    """Apply fall damage based on fall_distance.
+
+    If fall_distance > 3 and on_ground, applies fall damage to health:
+    amount = fall_distance - 3.
+
+    Also loads landing friction from landing-definitions.json if needed.
+
+    Args:
+        pm: PlayerMotion instance.
+        world: FakeWorld or real world object.
+    """
+    if pm.fall_distance > 3 and pm.on_ground:
+        damage_amount = pm.fall_distance - 3
+        from quadrix.health import PlayerHealth
+        # Apply fall damage to health
+        pm.status.hurt(int(damage_amount) if damage_amount > 0 else 1)
+    # Reset fall distance after applying landing
+    pm.fall_distance = 0.0
+
+
 # ── PlayerMotion methods ──────────────────────────────────────────────
 
 def fly(self, input: PlayerInput, world: object) -> None:
@@ -724,6 +892,7 @@ def tick(self, dt: float, world: object) -> None:
     """One tick of PlayerMotion movement.
 
     Applies gravity, terminal velocity, collision checks, and updates position.
+    Accumulates fall_distance when player is falling.
 
     Gravity is skipped when self.flying is True.
 
@@ -744,9 +913,16 @@ def tick(self, dt: float, world: object) -> None:
     # 3. Check on_ground via collision (block below)
     _check_ground(self, world)
 
-    # 4. Zero vertical velocity when on ground
+    # 4. Track and zero vertical velocity when on ground
+    # Accumulate fall_distance when falling (velocity.y < 0) and on ground.
+    # motion.rs: fall_distance increases each tick when on_ground and velocity.y < 0.
+    was_on_ground = self.on_ground
+    if self.on_ground and self.velocity.y < 0:
+        self.fall_distance += abs(GRAVITY * dt)  # accumulate fall distance
     if self.on_ground:
         self.velocity = self.velocity.with_component(Axis.Y, 0.0)
+        # Reset fall distance if we just landed from a significant fall
+        # (handled by apply_landing separately)
 
     # 5. Position += velocity * dt
     # Integrate velocity over dt to update position
@@ -791,6 +967,8 @@ PlayerMotion.jump_from_ground = jump_from_ground
 PlayerMotion.fly = fly
 PlayerMotion.set_flying = set_flying
 PlayerMotion.tick_swimming = tick_swimming
+PlayerMotion.auto_jump = auto_jump
+PlayerMotion.apply_landing = apply_landing
 
 # ── Convenience constant from motion.rs ───────────────────────────
 

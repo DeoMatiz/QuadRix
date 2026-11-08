@@ -16,6 +16,9 @@ from quadrix.motion.core import (
     PlayerMotion,
     PlayerInput,
     FluidTagId,
+    PlayerPose,
+    auto_jump,
+    apply_landing,
 )
 
 
@@ -491,3 +494,114 @@ def test_water_drag():
     # Velocity should have decayed with water drag (0.89 per tick)
     assert abs(pm.velocity.x) < 1.0, \
         f"Expected velocity.x to decay with water drag, initial=1.0, after={pm.velocity.x}"
+
+
+# ── PART 7: PlayerPose, auto_jump, apply_landing tests ───────────────────────
+
+
+def test_player_pose_default():
+    """pose default: pm.pose == PlayerPose.standing."""
+    mr = MovementResources.load(".local/horizon-client-motion")
+    pm = PlayerMotion.new(mr, Vec3(0, 64, 0))
+    assert pm.pose == PlayerPose.Standing
+
+
+def test_player_pose_eye_height_standing():
+    """eye_height по pose: standing returns base eye height."""
+    mr = MovementResources.load(".local/horizon-client-motion")
+    pm = PlayerMotion.new(mr, Vec3(0, 64, 0))
+    pm.pose = PlayerPose.Standing
+    assert pm.eye_height() == 1.62
+
+
+def test_player_pose_eye_height_sneaking():
+    """eye_height по pose: sneaking returns reduced eye height."""
+    mr = MovementResources.load(".local/horizon-client-motion")
+    pm = PlayerMotion.new(mr, Vec3(0, 64, 0))
+    pm.pose = PlayerPose.Sneaking
+    # Standing eye_height is 1.62, sneaking multiplies by 0.85
+    assert pm.eye_height() == pytest.approx(1.62 * 0.85, abs=1e-4)
+
+
+def test_player_pose_eye_height_swimming():
+    """eye_height по pose: swimming returns 0.4."""
+    mr = MovementResources.load(".local/horizon-client-motion")
+    pm = PlayerMotion.new(mr, Vec3(0, 64, 0))
+    pm.pose = PlayerPose.Swimming
+    assert pm.eye_height() == 0.4
+
+
+def test_auto_jump_with_obstacle():
+    """auto_jump: pm на земле, input.forward=1, впереди solid-блок → auto_jump True, velocity.y > 0."""
+    # Create a world with a solid block ahead (yaw=0 faces +z, so block at z=1)
+    world = FakeWorld(solid_blocks={
+        (0, 64, 1): "minecraft:stone",  # block directly ahead at yaw=0
+    })
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.on_ground = True
+    pm.move_vector = [0.0, 1.0]  # moving forward
+    pm.yaw = 0.0  # yaw=0 faces +z
+    result = auto_jump(pm, world)
+    assert result is True, f"Expected auto_jump to return True, got {result}"
+    assert pm.velocity.y > 0, f"Expected velocity.y > 0 after auto_jump, got {pm.velocity.y}"
+
+
+def test_auto_jump_no_obstacle():
+    """auto_jump без препятствия: впереди air → auto_jump False."""
+    # World with air ahead
+    world = FakeWorld()  # all air
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.on_ground = True
+    pm.move_vector = [0.0, 1.0]  # moving forward
+    pm.yaw = 0.0  # yaw=0 faces +z
+    result = auto_jump(pm, world)
+    assert result is False, f"Expected auto_jump to return False when no obstacle, got {result}"
+
+
+def test_landing_fall_distance_greater_than_3():
+    """landing: pm падает с 10 блоков, fall_distance > 3 → fall_distance сбрасывается после.apply_landing."""
+    mr = MovementResources.load(".local/horizon-client-motion")
+    pm = PlayerMotion.new(mr, Vec3(0, 60, 0))
+    # Set fall_distance to 10 (simulating a 10-block fall)
+    pm.fall_distance = 10.0
+    
+    # Create a world with solid ground
+    world = FakeWorld(solid_blocks={
+        (x, 50, z): "minecraft:stone"
+        for x in range(-5, 6)
+        for z in range(-5, 6)
+    })
+    
+    # Apply landing - should reset fall_distance
+    initial_fall_distance = pm.fall_distance
+    apply_landing(pm, world)
+    
+    # After landing, fall_distance should be reset to 0
+    assert pm.fall_distance == 0.0, \
+        f"Expected fall_distance to be reset to 0 after landing from 10 blocks, got {pm.fall_distance}"
+    assert pm.fall_distance < initial_fall_distance, \
+        f"Expected fall_distance to decrease after landing, initial={initial_fall_distance}, final={pm.fall_distance}"
+
+
+def test_landing_fall_distance_less_than_3():
+    """landing: падение с 2 блоков → fall_distance сбрасывается, ущерб не применяется."""
+    mr = MovementResources.load(".local/horizon-client-motion")
+    pm = PlayerMotion.new(mr, Vec3(0, 60, 0))
+    
+    # Set fall_distance to 2 (less than 3)
+    pm.fall_distance = 2.0
+    
+    # Create a world with solid ground
+    world = FakeWorld(solid_blocks={
+        (x, 50, z): "minecraft:stone"
+        for x in range(-5, 6)
+        for z in range(-5, 6)
+    })
+    
+    # Apply landing - should reset fall_distance (no damage since < 3)
+    initial_fall_distance = pm.fall_distance
+    apply_landing(pm, world)
+    
+    # After landing, fall_distance should be reset to 0
+    assert pm.fall_distance == 0.0, \
+        f"Expected fall_distance to be reset to 0 after landing from 2 blocks, got {pm.fall_distance}"
