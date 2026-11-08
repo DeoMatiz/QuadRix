@@ -68,16 +68,79 @@ files:
     status: done
     lines_rust: 500
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
-    assets: [.local/horizon-client-motion/movement-properties.nbt]
-    note: "EntityFluidInteraction, FluidState, FluidTags"
+    note: "EntityFluidInteraction, FluidState, FluidTags. ⚠️ fluid_flow() is PLACEHOLDER."
 
   - rust: motion/fluids.rs
     python: quadrix/motion/fluids.py
     test: tests/motion/test_fluids.py
-    status: pending
+    status: done
     lines_rust: 600
+    lines_python: ~600
     depends_on: [entities/fluids.rs]
-    assets: [.local/horizon-client-motion/movement-properties.nbt]
+    note: "MotionWorld aggregate (14 tests). Uses Protocol for missing deps (PlayerMotion, SceneCollisions). fluid_flow() may still be placeholder in entities/fluids.py."
+
+  # --- Phase 0.5: health (needed by motion/environment.rs) ---
+  - rust: health.rs (PART 1: types + PlayerHealth basics)
+    python: quadrix/health.py
+    test: tests/test_health.py
+    status: done
+    lines_rust: ~700
+    lines_python: ~1000
+    depends_on: [horizon-world/src/registry.rs]
+    note: "PART 1: HealthEvent, HurtSource, Knock, BlockOutcome, HurtRecord, AttackRecord, HealthResources, PlayerHealth basics. ⚠️ hurt field is a dict, not State — PART 2 must adapt."
+
+  # --- Phase 0.6: dependencies of health.rs PART 2 ---
+  - rust: game/combat.rs (armor + knockback parts only)
+    python: quadrix/combat.py
+    test: tests/test_combat.py
+    status: done
+    lines_rust: ~800
+    lines_python: ~200
+    depends_on: [health.rs (PART 1)]
+    note: "armor_reduction, knockback_strength, hurt_armor. Verified: armor_reduction(20, 8, 10) = 3.0, knockback_strength(0) = 0.4."
+    
+  - rust: potions.rs (effects part only)
+    python: quadrix/potions.py
+    test: tests/test_potions.py
+    status: pending
+    lines_rust: ~600 (only effects part)
+    depends_on: [health.rs (PART 1)]
+    note: "ONLY: resistance, fire_resistance, absorption, regeneration. These are the pieces health.rs PART 2 calls. Skip the rest of potions.rs (brewing, applying effects to entities — port later)."
+
+  - rust: totem.rs
+    python: quadrix/totem.py
+    test: tests/test_totem.py
+    status: pending
+    lines_rust: ~200
+    depends_on: [health.rs (PART 1)]
+    note: "totem of undying: death protection + effects. Small file."
+
+  - rust: health.rs (damage_types loading)
+    python: quadrix/health.py
+    test: tests/test_health.py
+    status: pending
+    lines_rust: ~150 (HealthResources.damage loading only)
+    depends_on: [horizon-world/src/nbt.rs]
+    note: "Loads .local/horizon-client-health/damage-types.nbt. Needed by hurt() to know damage type tags (is_fire, bypasses_armor, etc.)."
+
+  - rust: health.rs (PART 2: hurt / die)
+    python: quadrix/health.py
+    test: tests/test_health.py
+    status: pending
+    lines_rust: ~800
+    depends_on:
+      - health.rs (PART 1)
+      - game/combat.rs (armor + knockback parts only)
+      - potions.rs (effects part only)
+      - totem.rs
+      - health.rs (damage_types loading)
+    note: "PART 2: PlayerHealth.hurt, hurt_blocking, hurt_caused_by, Environment, Blocking. NOW all deps exist."
+
+  - rust: health.rs (PART 3: hooks — SKIP)
+    python: null
+    test: null
+    status: skipped
+    note: "Rust-only: HURT_SERVER, DAMAGE_PRE, DAMAGE_POST, KNOCKBACK statics. Not needed in Python."
 
   - rust: motion/environment.rs
     python: quadrix/motion/environment.py
