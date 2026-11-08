@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import json
 import math
+import struct
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -177,6 +179,219 @@ class PlayerFloatIds:
     absorption: int
 
 
+# ─── DamageType / DamageCatalog ───────────────────────────────────────
+@dataclass
+class DamageType:
+    """Port of horizon-world's damage_source::Definition (damage type data).
+
+    Fields:
+        id: canonical damage type name (e.g. "minecraft:fall")
+        message_id: translation key used in death messages
+        exhaustion: exhaustion applied to the attacker
+        scaling: one of never / when_caused_by_living_non_player / always
+        effects: one of hurt / burning / drowning / freezing / poking / thorns
+        death_message_type: default / fall_variants / intentional_game_design
+        tags: damage type tags this type belongs to
+    """
+    id: str
+    message_id: str
+    exhaustion: float
+    scaling: str
+    effects: str
+    death_message_type: str
+    tags: list[str] = field(default_factory=list)
+
+
+def _decode_health_json(value: Any) -> Any:
+    """Decode one entry of the prepared health JSON files.
+
+    types.json and tags.json store each value as a JSON-encoded string, so a
+    second json.loads is needed. Plain objects/lists pass through unchanged.
+    """
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _read_health_json(path: Path) -> Any:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _decode_hex_float(text: str) -> float:
+    """Decode a big-endian IEEE-754 float stored as 8 hex characters."""
+    return struct.unpack(">f", bytes.fromhex(text))[0]
+
+
+def _tag_value_list(raw: Any) -> list[str]:
+    """Normalise a damage type tag entry to a list of member names.
+
+    Prepared files wrap the members in {"values": [...]}; plain lists are also
+    accepted. Nested references keep their leading '#' until resolved.
+    """
+    raw = _decode_health_json(raw)
+    if isinstance(raw, dict):
+        values = raw.get("values", [])
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = []
+    return [value for value in values if isinstance(value, str)]
+
+
+def _resolve_tag(name: str, tags: dict[str, list[str]], seen: Optional[set[str]] = None) -> list[str]:
+    """Recursively expand '#' tag references, preserving order without duplicates."""
+    if name.startswith("#"):
+        name = name[1:]
+    if seen is None:
+        seen = set()
+    if name in seen:
+        return []
+    seen = seen | {name}
+
+    resolved: list[str] = []
+    for value in tags.get(name, []):
+        if value.startswith("#"):
+            resolved.extend(_resolve_tag(value, tags, seen))
+        else:
+            resolved.append(value)
+
+    # Deduplicate while keeping first-seen order.
+    result: list[str] = []
+    for value in resolved:
+        if value not in result:
+            result.append(value)
+    return result
+
+
+def _build_damage_catalog(
+    catalog_data: Any,
+    types_data: Any,
+    tags_data: Any,
+) -> "DamageCatalog":
+    """Build a DamageCatalog from catalog.json, types.json and tags.json."""
+    types_by_name: dict[str, DamageType] = {}
+    ordered: list[DamageType] = []
+
+    for entry in catalog_data.get("types", []):
+        name = str(entry["id"])
+        exhaustion_bits = str(entry.get("exhaustion", "00000000"))
+        exhaustion = _decode_hex_float(exhaustion_bits)
+
+        message_id = str(entry.get("message_id", ""))
+        scaling = str(entry.get("scaling", "when_caused_by_living_non_player"))
+        effects = str(entry.get("effects", "hurt"))
+        death_message_type = str(entry.get("death_message_type", "default"))
+
+        # types.json carries the same codec fields; use it as a fallback for
+        # any field the catalog omitted (and for optional per-type tags).
+        override = types_data.get(name) if isinstance(types_data, dict) else None
+        explicit_tags: list[str] = []
+        if override is not None:
+            override = _decode_health_json(override)
+            if isinstance(override, dict):
+                message_id = str(override.get("message_id", message_id))
+                scaling = str(override.get("scaling", scaling))
+                effects = str(override.get("effects", effects))
+                death_message_type = str(
+                    override.get("death_message_type", death_message_type)
+                )
+                raw_tags = override.get("tags", [])
+                if isinstance(raw_tags, list):
+                    explicit_tags = [tag for tag in raw_tags if isinstance(tag, str)]
+
+        damage_type = DamageType(
+            id=name,
+            message_id=message_id,
+            exhaustion=exhaustion,
+            scaling=scaling,
+            effects=effects,
+            death_message_type=death_message_type,
+            tags=explicit_tags,
+        )
+        types_by_name[name] = damage_type
+        ordered.append(damage_type)
+
+    # Any type present only in types.json still belongs in the catalog.
+    if isinstance(types_data, dict):
+        for name in types_data:
+            if name in types_by_name:
+                continue
+            override = _decode_health_json(types_data[name])
+            if not isinstance(override, dict):
+                continue
+            damage_type = DamageType(
+                id=name,
+                message_id=str(override.get("message_id", "")),
+                exhaustion=float(override.get("exhaustion", 0.0)),
+                scaling=str(override.get("scaling", "when_caused_by_living_non_player")),
+                effects=str(override.get("effects", "hurt")),
+                death_message_type=str(override.get("death_message_type", "default")),
+                tags=[tag for tag in override.get("tags", []) if isinstance(tag, str)],
+            )
+            types_by_name[name] = damage_type
+            ordered.append(damage_type)
+
+    # Normalise every tag entry and record which tags each type belongs to.
+    tags: dict[str, list[str]] = {}
+    if isinstance(tags_data, dict):
+        for tag_name, raw in tags_data.items():
+            tags[tag_name] = _tag_value_list(raw)
+
+    for tag_name in tags:
+        for member in _resolve_tag(tag_name, tags):
+            damage_type = types_by_name.get(member)
+            if damage_type is not None and tag_name not in damage_type.tags:
+                damage_type.tags.append(tag_name)
+
+    return DamageCatalog(types=ordered, tags=tags)
+
+
+class DamageCatalog:
+    """Port of horizon-world's damage_source::Catalog.
+
+    Stores the damage type definitions and the resolved tag-name -> members
+    mapping. Lookups are by canonical name.
+
+    Methods:
+        get(name) -> DamageType
+        has(name) -> bool
+        by_tag(tag) -> list[DamageType]
+        has_tag(name, tag) -> bool
+    """
+
+    def __init__(self, types: list[DamageType], tags: dict[str, list[str]]):
+        self.types = types
+        self.tags = tags
+        self._by_name = {damage_type.id: damage_type for damage_type in types}
+        self._tag_members = {
+            tag: _resolve_tag(tag, tags) for tag in tags
+        }
+
+    def get(self, name: str) -> DamageType:
+        return self._by_name[name]
+
+    def has(self, name: str) -> bool:
+        return name in self._by_name
+
+    def by_tag(self, tag: str) -> list[DamageType]:
+        members = self._tag_members.get(tag)
+        if members is None:
+            members = _resolve_tag(tag, self.tags)
+        result: list[DamageType] = []
+        for name in members:
+            damage_type = self._by_name.get(name)
+            if damage_type is not None:
+                result.append(damage_type)
+        return result
+
+    def has_tag(self, name: str, tag: str) -> bool:
+        members = self._tag_members.get(tag)
+        if members is None:
+            members = _resolve_tag(tag, self.tags)
+        return name in members
+
+
 # ─── HealthResources ──────────────────────────────────────────────────
 class HealthResources:
     """Port of HealthResources struct from health.rs line 162.
@@ -198,78 +413,76 @@ class HealthResources:
     @classmethod
     def load(cls, root: Path) -> "HealthResources":
         """Load HealthResources from .local/horizon-client-health/ directory.
-        
-        Reads player-float-ids.json and damage catalog JSON files.
-        If files don't exist, returns default/empty values.
-        
+
+        Reads the prepared files:
+            ids.json      - player float IDs for health and absorption
+            catalog.json  - damage type definitions (hex float exhaustion)
+            types.json    - damage type codec values (JSON-encoded strings)
+            tags.json     - damage type tags (JSON-encoded strings)
+
         Args:
             root: Path to the .local/horizon-client-health/ directory
-            
+
         Returns:
-            A new HealthResources instance, or defaults if files not found
+            A new HealthResources instance with a populated DamageCatalog.
         """
-        import json
-        
-        # Try to read player-float-ids.json
-        ids_path = root / "player-float-ids.json"
-        if ids_path.exists():
-            try:
-                with open(ids_path, "r") as f:
-                    ids_data = json.load(f)
-                health_id = int(ids_data.get("health", 0))
-                absorption_id = int(ids_data.get("absorption", 0))
-                ids = PlayerFloatIds(health=health_id, absorption=absorption_id)
-            except (json.JSONDecodeError, KeyError, ValueError):
-                ids = PlayerFloatIds(health=0, absorption=0)
-        else:
-            # Default IDs if file doesn't exist
-            ids = PlayerFloatIds(health=0, absorption=0)
-        
-        # Try to read damage catalog
-        damage_path = root / "damage_catalog.json"
-        if damage_path.exists():
-            try:
-                with open(damage_path, "r") as f:
-                    damage_data = json.load(f)
-                # Ensure it's a dict
-                if isinstance(damage_data, dict):
-                    damage = damage_data
-                else:
-                    damage = {}
-            except (json.JSONDecodeError, ValueError):
-                damage = {}
-        else:
-            # Empty catalog if file doesn't exist
-            damage = {}
-        
+        root = Path(root)
+
+        ids_data = _read_health_json(root / "ids.json")
+        ids = PlayerFloatIds(
+            health=int(ids_data.get("health", 0)),
+            absorption=int(ids_data.get("absorption", 0)),
+        )
+
+        catalog_data = _read_health_json(root / "catalog.json")
+
+        types_path = root / "types.json"
+        types_data = _read_health_json(types_path) if types_path.exists() else {}
+
+        tags_path = root / "tags.json"
+        tags_data = _read_health_json(tags_path) if tags_path.exists() else {}
+
+        damage = _build_damage_catalog(catalog_data, types_data, tags_data)
         return cls(damage=damage, ids=ids)
 
     def with_packs(
         self, root: Path, overlay: Optional[Dict[str, Any]] = None, reload: bool = False
     ) -> "HealthResources":
-        """Return a new HealthResources with potentially reloaded damage catalog.
-        
+        """Return a new HealthResources with potentially reloaded damage data.
+
         Args:
             root: Path to the .local/horizon-client-health/ directory
-            overlay: Optional pack overlay configuration
-            reload: Whether to reload the damage catalog from disk
-            
+            overlay: Optional pack overlay configuration (unused by this port)
+            reload: Whether to reload tags against the frozen registry
+
         Returns:
             A new HealthResources instance
         """
-        import json
-        
-        damage = self.damage
-        if reload and damage:
-            damage_path = root / "damage_catalog.json"
-            if damage_path.exists():
-                try:
-                    with open(damage_path, "r") as f:
-                        damage = json.load(f)
-                except (json.JSONDecodeError, ValueError):
-                    pass  # Keep original damage catalog
-        
-        return HealthResources(damage=damage, ids=self.ids)
+        root = Path(root)
+
+        if reload and isinstance(self.damage, DamageCatalog):
+            # MinecraftServer.reloadResources retains the frozen damage
+            # registry and only rebuilds tags.
+            tags_path = root / "tags.json"
+            tags_data = _read_health_json(tags_path) if tags_path.exists() else {}
+            catalog_data = {
+                "types": [
+                    {
+                        "id": damage_type.id,
+                        "message_id": damage_type.message_id,
+                        "exhaustion": struct.pack(">f", damage_type.exhaustion).hex(),
+                        "scaling": damage_type.scaling,
+                        "effects": damage_type.effects,
+                        "death_message_type": damage_type.death_message_type,
+                    }
+                    for damage_type in self.damage.types
+                ]
+            }
+            damage = _build_damage_catalog(catalog_data, {}, tags_data)
+            return HealthResources(damage=damage, ids=self.ids)
+
+        loaded = HealthResources.load(root)
+        return HealthResources(damage=loaded.damage, ids=self.ids)
 
     def landing_source(self, source: str) -> str:
         """Get the damage type ID for a landing damage source.

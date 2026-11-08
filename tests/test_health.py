@@ -14,6 +14,8 @@ from quadrix.health import (
     HealthResources,
     PlayerFloatIds,
     PlayerHealth,
+    DamageType,
+    DamageCatalog,
 )
 
 
@@ -368,3 +370,60 @@ class TestPlayerHealth:
         assert player.dead is False
         player.dead = True
         assert player.dead is True
+
+
+HEALTH_ROOT = Path(".local/horizon-client-health")
+
+
+class TestDamageTypes:
+    """Test damage_types loading from .local/horizon-client-health."""
+
+    def test_loads_all_types_and_tags(self):
+        """HealthResources.load reads the real catalog.json and tags.json."""
+        r = HealthResources.load(HEALTH_ROOT)
+        assert len(r.damage.types) == 51
+        assert len(r.damage.tags) == 36
+        assert isinstance(r.damage, DamageCatalog)
+
+    def test_fall_effects(self):
+        """minecraft:fall has the hurt effect."""
+        r = HealthResources.load(HEALTH_ROOT)
+        assert r.damage.get("minecraft:fall").effects == "hurt"
+
+    def test_on_fire_effects(self):
+        """minecraft:on_fire has the burning effect."""
+        r = HealthResources.load(HEALTH_ROOT)
+        assert r.damage.get("minecraft:on_fire").effects == "burning"
+
+    def test_fall_exhaustion(self):
+        """minecraft:fall has zero exhaustion (hex float 00000000)."""
+        r = HealthResources.load(HEALTH_ROOT)
+        assert r.damage.get("minecraft:fall").exhaustion == 0.0
+
+    def test_arrow_exhaustion_hex_float(self):
+        """minecraft:arrow's 3dcccccd hex bits decode to float32 0.1."""
+        r = HealthResources.load(HEALTH_ROOT)
+        assert r.damage.get("minecraft:arrow").exhaustion == pytest.approx(0.1)
+
+    def test_bypasses_armor_tag(self):
+        """minecraft:bypasses_armor resolves to damage types."""
+        r = HealthResources.load(HEALTH_ROOT)
+        members = r.damage.by_tag("minecraft:bypasses_armor")
+        assert len(members) > 0
+        assert r.damage.has_tag("minecraft:fall", "minecraft:bypasses_armor") is True
+        assert r.damage.has_tag("minecraft:arrow", "minecraft:bypasses_armor") is False
+
+    def test_player_float_ids(self):
+        """ids.json supplies health=9 and absorption=17."""
+        r = HealthResources.load(HEALTH_ROOT)
+        assert r.ids.health == 9
+        assert r.ids.absorption == 17
+
+    def test_has_and_get(self):
+        """DamageCatalog.has/get and per-type tags work."""
+        r = HealthResources.load(HEALTH_ROOT)
+        assert r.damage.has("minecraft:fall") is True
+        assert r.damage.has("minecraft:not_a_real_type") is False
+        fall = r.damage.get("minecraft:fall")
+        assert isinstance(fall, DamageType)
+        assert "minecraft:bypasses_armor" in fall.tags
