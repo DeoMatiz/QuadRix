@@ -4,11 +4,14 @@
 Port of horizon/crates/horizon-client/src/motion.rs:
 - impl PlayerMotion { fn new, dimensions, bounds, eye_height, is_in_lava, is_eye_in_fluid, fluid_height }
 - EntityDimensions, BlockMovementProperties, MovementResources
+- PlayerInput, movement_speed, get_friction, travel (PART 3)
 
-Mirrors the Rust PlayerMotion struct and its basic methods.
+Mirrors the Rust PlayerMotion struct and its methods.
 """
 
 from __future__ import annotations
+
+import math
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +60,21 @@ class BlockMovementProperties:
     speed_factor: float = 1.0
     friction: float = 0.6
     jump_factor: float = 1.0
+
+
+# ── PlayerInput ───────────────────────────────────────────────────
+
+@dataclass
+class PlayerInput:
+    """Input state for PlayerMotion.travel().
+
+    Mirrors the local player input forwarded from the client.
+    """
+    forward: float = 0.0
+    strafe: float = 0.0
+    jump: bool = False
+    sneak: bool = False
+    sprint: bool = False
 
 
 # ── MovementResources ─────────────────────────────────────────────
@@ -203,6 +221,7 @@ class PlayerMotion:
     pose: str = "standing"
     status: StatusFlags = field(default_factory=StatusFlags)
     fluids: _PlayerFluids = field(default_factory=_PlayerFluids)
+    yaw: float = 0.0
 
     # --- Constructor ---
 
@@ -305,6 +324,20 @@ class PlayerMotion:
         return self.fluids._interaction.fluid_height(None, tag)
 
 
+# ── Module-level movement_speed ─────────────────────────────────────
+
+def movement_speed(_pm: "PlayerMotion") -> float:
+    """Return the base horizontal movement speed.
+
+    Args:
+        _pm: PlayerMotion instance (required for consistency with other methods).
+
+    Returns:
+        Base speed in blocks/tick (0.1 per motion.rs).
+    """
+    return 0.1  # motion.rs: base movement speed
+
+
 # ── Collision & movement helpers ────────────────────────────────────
 
 def _is_solid_block(block_name: str) -> bool:
@@ -388,6 +421,97 @@ def _check_ground(pm: "PlayerMotion", world: object) -> None:
     pm.on_ground = _is_solid_block(block_name)
 
 
+def get_friction(self, world: object) -> float:
+    """Return the friction coefficient for the block under the player's feet.
+
+    Looks at the block at position.y - epsilon (i.e. directly below the feet).
+    Uses MovementResources.friction from the block under the player.
+    Defaults to 0.6 if the block is not found in MovementResources.
+
+    Args:
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+
+    Returns:
+        Friction value as a float (default 0.6).
+    """
+    # Block directly below the player's feet (at y - 0.001 to get the block at feet level)
+    x = int(self.position.x)
+    y = int(self.position.y) - 1  # feet position
+    z = int(self.position.z)
+    block_name = world.block(x, y, z) if hasattr(world, "block") else "minecraft:air"
+
+    # Get movement properties for this block
+    mr = MovementResources.load(".local/horizon-client-motion")
+    props = mr.properties.get(block_name)
+    if props is not None:
+        return props.friction
+    return 0.6  # default friction
+
+
+def travel(self, input: PlayerInput, world: object) -> None:
+    """Player motion travel: horizontal movement based on input, yaw, and block properties.
+
+    Calculates horizontal speed and direction, updates velocity, and applies friction.
+
+    The horizontal speed formula:
+        speed = base_speed * speed_factor * (sprint ? sprint_multiplier : 1.0) * (sneak ? sneak_multiplier : 1.0)
+
+    where base_speed = 0.1 (from motion.rs), speed_factor comes from the block under the feet,
+    and sprint_multiplier / sneak_multiplier are Minecraft constants.
+
+    After movement, friction is applied: velocity.x *= friction, velocity.z *= friction.
+
+    Args:
+        input: PlayerInput with forward, strafe, jump, sneak, sprint flags.
+        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+    """
+    # Constants from motion.rs
+    BASE_SPEED: float = 0.1  # motion.rs: effective base speed
+    SPRINT_MULTIPLIER: float = 1.168  # sprint speed multiplier
+    SNEAK_MULTIPLIER: float = 0.5  # sneak speed multiplier
+    FRICTION_DEFAULT: float = 0.6  # default friction
+
+    # Get the block under the player's feet
+    x = int(self.position.x)
+    y = int(self.position.y) - 1  # feet position
+    z = int(self.position.z)
+    block_name = world.block(x, y, z) if hasattr(world, "block") else "minecraft:air"
+
+    # Get movement properties for this block
+    mr = MovementResources.load(".local/horizon-client-motion")
+    props = mr.properties.get(block_name)
+    if props is not None:
+        speed_factor = props.speed_factor
+        friction = props.friction
+    else:
+        speed_factor = 1.0
+        friction = FRICTION_DEFAULT
+
+    # Calculate the horizontal speed
+    speed = BASE_SPEED * speed_factor
+    if input.sprint:
+        speed *= SPRINT_MULTIPLIER
+    if input.sneak:
+        speed *= SNEAK_MULTIPLIER
+
+    # Calculate direction from forward/strafe + yaw
+    yaw_rad = math.radians(self.yaw)
+    # Direction vector: forward/strafe relative to yaw
+    # Minecraft yaw: 0 = south (+z), 90 = west (-x), 180 = north (-z), 270 = east (+x)
+    dx = -math.sin(yaw_rad) * input.forward + math.cos(yaw_rad) * input.strafe
+    dz = math.cos(yaw_rad) * input.forward + math.sin(yaw_rad) * input.strafe
+
+    # Update velocity components
+    # If there's any movement input, set the velocity; otherwise preserve existing velocity
+    if input.forward != 0.0 or input.strafe != 0.0 or input.sprint or input.sneak:
+        self.velocity = self.velocity.with_component(Axis.X, dx * speed)
+        self.velocity = self.velocity.with_component(Axis.Z, dz * speed)
+
+    # Apply friction after movement: velocity.x *= friction, velocity.z *= friction
+    self.velocity = self.velocity.with_component(Axis.X, self.velocity.x * friction)
+    self.velocity = self.velocity.with_component(Axis.Z, self.velocity.z * friction)
+
+
 # ── PlayerMotion methods ────────────────────────────────────────────
 
 def tick(self, dt: float, world: object) -> None:
@@ -447,6 +571,9 @@ def move_entity(self, world: object, movement: Vec3) -> None:
 # Attach methods to PlayerMotion class
 PlayerMotion.tick = tick
 PlayerMotion.move_entity = move_entity
+PlayerMotion.travel = travel
+PlayerMotion.movement_speed = movement_speed
+PlayerMotion.get_friction = get_friction
 
 # ── Convenience constant from motion.rs ───────────────────────────
 

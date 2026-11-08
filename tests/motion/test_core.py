@@ -14,18 +14,17 @@ from quadrix.motion.core import (
     BlockMovementProperties,
     MovementResources,
     PlayerMotion,
+    PlayerInput,
     FluidTagId,
 )
 
 
 # ── Fake world for unit tests ──────────────────────────────────────
 
-
 class FakeWorld:
     """Minimal fake world for PlayerMotion tick/move_entity tests.
 
     Provides ``block(x, y, z) -> str``; returns ``"minecraft:air"`` by default.
-    Solid blocks are anything that is not air, cave_air, or void_air.
     """
 
     def __init__(self, solid_blocks: dict | None = None) -> None:
@@ -115,7 +114,6 @@ def test_player_motion_gravity_constant():
 
 # ── PART 2: tick & move_entity tests ───────────────────────────────
 
-
 def test_player_motion_tick_gravity():
     """Gravity accelerates player downward; velocity.y ≈ -GRAVITY * dt after one tick."""
     world = FakeWorld()  # all air
@@ -138,7 +136,7 @@ def test_player_motion_tick_terminal_velocity():
 
 def test_player_motion_tick_lands_on_ground():
     """Player falling onto solid ground: on_ground becomes True, velocity.y == 0 after landing.
-    
+
     Solid blocks at y <= 50 (player starts at y=70, falls ~20 blocks to land).
     """
     # Solid blocks at y <= 50 (player starts at y=70, needs to fall ~20 blocks to land)
@@ -167,3 +165,104 @@ def test_player_motion_move_entity_against_wall():
     assert pm.position.x < 1.0
     # Horizontal velocity should be zero after collision
     assert pm.velocity.x == 0.0
+
+
+# ── PART 3: travel, movement_speed, get_friction tests ─────────────
+
+def test_player_motion_movement_speed():
+    """movement_speed() returns the base speed of 0.1."""
+    mr = MovementResources.load(".local/horizon-client-motion")
+    pm = PlayerMotion.new(mr, Vec3(0, 64, 0))
+    speed = pm.movement_speed()
+    assert speed == 0.1
+
+
+def test_player_motion_get_friction():
+    """get_friction() returns the friction for the block under the player's feet."""
+    mr = MovementResources.load(".local/horizon-client-motion")
+    pm = PlayerMotion.new(mr, Vec3(0, 64, 0))
+    # On cactus, friction should be 0.6
+    world = FakeWorld()
+    world._solid = {(0, -1, 0): "minecraft:cactus"}
+    friction = pm.get_friction(world)
+    assert friction == pytest.approx(0.6, abs=1e-6)
+
+
+def test_player_motion_travel_forward_yaw_zero():
+    """Travel with forward=1.0, yaw=0 moves in +z direction (yaw=0 usually +z).
+
+    After travel, tick several times to integrate position.
+    """
+    world = FakeWorld(solid_blocks={(x, y, z): "minecraft:stone" for x in range(-5, 6) for y in range(60, 62) for z in range(-5, 6)})
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm.travel(PlayerInput(forward=1.0), world)
+    # Tick several times to integrate position from the set velocity
+    for _ in range(3):
+        pm.tick(dt=0.05, world=world)
+    # After tick(s), position should have changed
+    assert pm.position.z != 0.0 or pm.position.x != 0.0, f"Expected position to change after ticks, got {pm.position}"
+    # Velocity should be non-zero (set by travel)
+    assert pm.velocity.x != 0.0 or pm.velocity.z != 0.0, "Expected non-zero velocity after travel"
+
+
+def test_player_motion_sprint_faster_than_walk():
+    """Sprint speed is greater than walk speed with same input.
+
+    After travel+tick, sprint position should be greater than walk position.
+    """
+    world = FakeWorld(solid_blocks={(x, y, z): "minecraft:stone" for x in range(-5, 6) for y in range(60, 62) for z in range(-5, 6)})
+    
+    pm_walk = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm_walk.travel(PlayerInput(forward=1.0, sprint=False), world)
+    for _ in range(10):
+        pm_walk.tick(dt=0.05, world=world)
+    walk_pos = pm_walk.position.z
+    
+    pm_sprint = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm_sprint.travel(PlayerInput(forward=1.0, sprint=True), world)
+    for _ in range(10):
+        pm_sprint.tick(dt=0.05, world=world)
+    sprint_pos = pm_sprint.position.z
+    
+    assert sprint_pos > walk_pos, f"Sprint position ({sprint_pos}) should be greater than walk position ({walk_pos})"
+
+
+def test_player_motion_sneak_slower_than_walk():
+    """Sneak speed is less than walk speed with same input.
+
+    After travel+tick, sneak position should be less than walk position.
+    """
+    world = FakeWorld(solid_blocks={(x, y, z): "minecraft:stone" for x in range(-5, 6) for y in range(60, 62) for z in range(-5, 6)})
+    
+    pm_walk = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm_walk.travel(PlayerInput(forward=1.0, sneak=False), world)
+    for _ in range(10):
+        pm_walk.tick(dt=0.05, world=world)
+    walk_pos = pm_walk.position.z
+    
+    pm_sneak = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    pm_sneak.travel(PlayerInput(forward=1.0, sneak=True), world)
+    for _ in range(10):
+        pm_sneak.tick(dt=0.05, world=world)
+    sneak_pos = pm_sneak.position.z
+    
+    assert sneak_pos < walk_pos, f"Sneak position ({sneak_pos}) should be less than walk position ({walk_pos})"
+
+
+def test_player_motion_friction_decays_velocity():
+    """After releasing input, velocity.x/z exponentially decays with friction=0.6 per tick."""
+    world = FakeWorld()  # all air, no solid blocks
+    pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0))
+    
+    # Start with some velocity by traveling with input
+    pm.travel(PlayerInput(forward=1.0, sprint=False), world)
+    _ = pm.tick(dt=0.05, world=world)  # integrate once
+    initial_vel_z = pm.velocity.z
+    
+    # Next tick with no input: friction should decay velocity
+    pm.travel(PlayerInput(), world)
+    _ = pm.tick(dt=0.05, world=world)  # integrate with friction applied
+    
+    # Velocity should have decayed (be smaller in magnitude)
+    assert abs(pm.velocity.z) < abs(initial_vel_z), \
+        f"Velocity should decay with friction, initial={initial_vel_z}, after= {pm.velocity.z}"
