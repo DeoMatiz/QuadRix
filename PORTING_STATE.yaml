@@ -81,9 +81,7 @@ files:
     lines_rust: 500
     lines_python: ~400
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
-    note: >
-      EntityFluidInteraction, FluidState, FluidTags.
-      ⚠️ fluid_flow() PLACEHOLDER — нужно заменить на порт horizon-world/src/fluid_flow.rs.
+    note: "EntityFluidInteraction, FluidState, FluidTags. fluid_flow() теперь из quadrix/world/fluid_flow.py (5 tests)."
 
   - rust: motion/fluids.rs
     python: quadrix/motion/fluids.py
@@ -97,13 +95,11 @@ files:
   - rust: horizon-world/src/fluid_flow.rs
     python: quadrix/world/fluid_flow.py
     test: tests/world/test_fluid_flow.py
-    status: pending
+    status: done
     lines_rust: ~400
+    lines_python: ~150
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
-    note: >
-      Заменяет placeholder fluid_flow() в entities/fluids.py.
-      Нужен для motion/fluids.rs (течения воды/лавы) и motion.rs (swimming).
-      ВАЖНО: сделать до PART 5 motion.rs (swimming).
+    note: "water/lava flow direction, two-source balance, falling deflection. 5 tests passed. Заменяет placeholder fluid_flow() в entities/fluids.py."
 
   # ==========================================================================
   # PHASE 2 — health PART 1 (types + PlayerHealth basics)
