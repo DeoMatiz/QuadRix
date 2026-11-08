@@ -55,9 +55,11 @@ files:
   - rust: horizon-world/src/registry.rs
     python: quadrix/world/registry.py
     test: tests/world/test_registry.py
-    status: pending
+    status: done
+    lines_rust: ~500
+    lines_python: ~700
     depends_on: [horizon-world/src/nbt.rs]
-    note: "BlockRegistry, reads block-registry.nbt"
+    note: "BlockRegistry. Verified on real block-registry.nbt (35723 states, state 0 = minecraft:air)."
 
   # --- Phase 1: physics ---
   - rust: entities/fluids.rs
