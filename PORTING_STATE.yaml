@@ -65,7 +65,7 @@ files:
   - rust: entities/fluids.rs
     python: quadrix/entities/fluids.py
     test: tests/entities/fluids/test_fluids.py
-    status: pending
+    status: done
     lines_rust: 500
     depends_on: [horizon-world/src/nbt.rs, horizon-world/src/registry.rs]
     assets: [.local/horizon-client-motion/movement-properties.nbt]
