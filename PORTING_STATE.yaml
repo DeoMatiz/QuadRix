@@ -266,10 +266,13 @@ files:
   - rust: horizon-world/src/collision/entity_collision.rs
     python: quadrix/world/collision/entity_collision.py
     test: tests/world/collision/test_entity_collision.py
-    status: pending
+    status: done
     lines_rust: ~400
+    lines_python: ~200
     depends_on: [horizon-world/src/collision/block_collision.rs]
-    note: "Entity-vs-block collision (Aabb sweep по shape)."
+    note: >
+      collide_aabb / sweep / clip_movement. Aabb sweep по VoxelShape, slide по осям,
+      slab останавливает на 0.5 (не full cube). 6 tests.
 
   # ==========================================================================
   # PHASE 6 — network
