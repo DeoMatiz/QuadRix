@@ -354,14 +354,21 @@ files:
   - rust: horizon-protocol/src/packets/configuration.rs
     python: quadrix/protocol/packets/configuration.py
     test: tests/protocol/test_packets_configuration.py
-    status: pending
+    status: done
     lines_rust: 400
+    lines_python: ~500
     depends_on: [horizon-protocol/src/buf.rs, horizon-protocol/src/ids.rs, horizon-protocol/src/packets/login.rs]
     note: >
-      Configuration state пакеты: ClientInformation, PluginMessage, Disconnect,
-      FinishConfiguration, KeepAlive, Ping, ResetChat, RegistryData,
-      RemoveResourcePack, AddResourcePack, StoreCookie, Transfer, FeatureFlags,
-      UpdateTags, KnownPacks. Следующая сессия.
+      Clientbound: CookieRequest, CustomPayload, Disconnect, FinishConfiguration,
+      KeepAlive, Ping, ResetChat, RegistryData, ResourcePackPop, ResourcePackPush,
+      StoreCookie, Transfer, UpdateEnabledFeatures, UpdateTags, SelectKnownPacks,
+      ClearDialog, ServerLinks, ShowDialog, CodeOfConduct.
+      Serverbound: ClientInformation, CookieResponse, CustomPayload,
+      FinishConfiguration, KeepAlive, Pong, ResourcePack, SelectKnownPacks,
+      AcceptCodeOfConduct, CustomClickAction. 17 tests.
+      ⚠️ TagEntry.ids = List<VarInt>, не long array (как в Rust).
+      ⚠️ ClickPayload = VarInt-длина + network NBT, End=None.
+      ⚠️ Пустые варианты разведены подклассами Empty (иначе @dataclass схлопнул бы ID).
 
   - rust: horizon-protocol/src/packets/play.rs
     python: quadrix/protocol/packets/play.py
