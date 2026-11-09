@@ -420,12 +420,41 @@ files:
   - rust: horizon-protocol/src/crypto.rs
     python: quadrix/protocol/crypto.py
     test: tests/protocol/test_crypto.py
-    status: pending
-    lines_rust: ~1200 (включая rsa.rs, secure_chat.rs)
+    status: done
+    lines_rust: ~400
+    lines_python: ~500
     depends_on: [horizon-protocol/src/buf.rs]
     note: >
-      Encryption (AES/CFB8), RSA keypair, Mojang auth. Нужен для реального
-      подключения к серверу. Портировать после play.rs PART 2-3.
+      Cfb8 (AES/CFB8 stateful, два контекста на объект как в connection.rs),
+      CFB8Encryptor/Decryptor, MinecraftCipher/Cipher, generate_secret,
+      random_bytes, java_hex_digest, server_hash (ISO-8859-1 → SHA-1), md5,
+      offline_uuid. Через cryptography (hazmat). decrypt строго проверяет
+      PKCS#1 00 02 FF.. 00 (OpenSSL 3 implicit rejection). 18 tests на векторах
+      NIST SP 800-38A, FIPS-197, Notch/jeb_/simon, PKCS#1/#8, OpenSSL SPKI.
+      requirements.txt: + cryptography>=42.0.
+
+  - rust: horizon-protocol/src/rsa.rs
+    python: quadrix/protocol/crypto.py
+    test: tests/protocol/test_crypto.py
+    status: done
+    lines_rust: ~1200
+    lines_python: ~200 (часть crypto.py)
+    depends_on: [horizon-protocol/src/buf.rs]
+    note: >
+      RsaPublicKey.from_der/encrypt/verify/size, RsaPrivateKey.generate/from_der/
+      public_der/decrypt/sign, SignatureHash (SHA1/SHA256), E=65537, alias RsaKeyPair.
+      Через cryptography.hazmat.primitives.asymmetric.rsa. Не самописный RSA.
+
+  - rust: horizon-protocol/src/secure_chat.rs
+    python: quadrix/protocol/secure_chat.py
+    test: tests/protocol/test_secure_chat.py
+    status: pending
+    lines_rust: ~1200 (42 КБ)
+    depends_on: [horizon-protocol/src/crypto.rs, horizon-protocol/src/packets/play.rs (PART 4 chat)]
+    note: >
+      Secure chat 1.19+: signed chat, message chains, session keys, message
+      signatures, last seen. Нужен для чата с online-mode серверами 1.19+.
+      Портировать после play.rs PART 4 (chat).
 
   - rust: horizon-protocol/src/connection.rs
     python: quadrix/protocol/connection.py
