@@ -380,27 +380,24 @@ files:
       - horizon-protocol/src/buf.rs
       - horizon-protocol/src/ids.rs
       - horizon-protocol/src/packets/configuration.rs
-    parts_done: [1, 2, 3, 4]
+    parts_done: [1, 2, 3, 4, 5]
     parts_total: 6
-    test_status: "57 passed (PART 1-4), protocol total 161 passed"
+    test_status: "70 passed (PART 1-5), protocol total 174 passed"
     note: >
       PART 1/6: PacketId framework. 8 tests.
       PART 2/6: movement/position/tick. 16 tests.
-      PART 3/6: entity/player sync (~25 clientbound + 5 serverbound). 16 tests.
-      PART 4/6: chat/command.
-        Clientbound: SystemChat, PlayerChat, DisguisedChat, DeleteChat,
-        Commands (+63 ARGUMENT_TYPES + acyclic), CommandSuggestions,
-        SetTitleText, SetSubtitleText, SetActionBarText, SetTitlesAnimation,
-        ClearTitles, SetPlayerTeam, SetScore, ResetScore, ServerData,
-        CustomChatCompletions, TabList.
-        Serverbound: Chat (last_seen, не bitset), ChatCommand (только command),
-        ChatAck, ChatCommandSigned (отдельный), ChatSessionUpdate,
-        CommandSuggestion. 17 tests.
-      ⚠️ Rust расходится с vanilla: Chat — last_seen (Fixed3), не message_count/bitset.
-      ChatCommand — только command Str, подписанная версия = ChatCommandSigned.
-      SetScore (не SetPlayerScore). CommandSuggestions в packet_enum! Rust нет —
-      реализовано по vanilla + комментарий.
-      PART 5/6: inventory/slots (~600 строк)
+      PART 3/6: entity/player sync. 16 tests.
+      PART 4/6: chat/command. 17 tests.
+      PART 5/6: inventory/containers.
+        Clientbound: ContainerClose, ContainerSetContent, ContainerSetData,
+        ContainerSetSlot, MerchantOffers (+NetOffer, NetCost), OpenScreen,
+        SetCursorItem, SetPlayerInventory, Cooldown.
+        Serverbound: ContainerClick (+Hashed), ContainerButtonClick, ContainerClose,
+        ContainerSlotStateChanged, RenameItem, EditBook, SetCreativeModeSlot,
+        SelectTrade. 13 tests.
+      ⚠️ Rust: поля container/state (не window_id/state_id), Cooldown (не SetCooldown).
+      ⚠️ Hashed (HashedStack, item.rs:1135) — самодостаточная wire-форма,
+      items.rs не требует. Non-empty component patches → ProtocolError.
       PART 6/6: chunk/world (~500 строк)
 
   - rust: player_sync.rs
