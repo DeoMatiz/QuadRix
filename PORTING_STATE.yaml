@@ -373,25 +373,27 @@ files:
   - rust: horizon-protocol/src/packets/play.rs
     python: quadrix/protocol/packets/play.py
     test: tests/protocol/test_play.py
-    status: pending                 # PART 1/6
+    status: pending
     lines_rust: ~4000 (155 KB)
     lines_python: ~600 (PART 1)
     depends_on:
       - horizon-protocol/src/buf.rs
       - horizon-protocol/src/ids.rs
       - horizon-protocol/src/packets/configuration.rs
-    parts_done: [1]
+    parts_done: [1, 2]
     parts_total: 6
-    test_status: "8 passed (PART 1), protocol total 68 passed"
+    test_status: "24 passed (PART 1-2), protocol total 84 passed"
     note: >
-      PART 1/6: PacketId framework. ClientboundPlayPacket (144 ID), ServerboundPlayPacket
-      (69 ID), ID_TO_CLASS / CLASS_TO_ID для обоих направлений, decode_clientbound /
-      decode_serverbound / encode_*.
-      Реализованы payload'ы: KeepAlive (client+server), Disconnect (NBT, НЕ JSON —
-      ⚠️ в login был JSON, в play NBT), BundleDelimiter, ClientTickEnd, PlayerLoaded
-      (все пустые — разные подклассы Empty).
-      Остальные 213 ID — raise Unsupported("play.rs PART 2+: <packet>").
-      PART 2/6: movement/position/tick (~800 строк)
+      PART 1/6: PacketId framework (144+69 ID, ID_TO_CLASS / CLASS_TO_ID, decode/encode,
+      Unsupported для нереализованных). 8 tests.
+      PART 2/6: movement/position/tick.
+        Clientbound: GameEvent, PlayerLookAt (+LookAtEntity), PlayerPosition,
+        PlayerRotation, SetChunkCacheCenter, SetHealth, SetHeldSlot, SetTime
+        (+ClockState), TeleportEntity, TickingState, TickingStep, PlayerAbilities.
+        Serverbound: MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatus,
+        PlayerAbilitiesRequest, PlayerAction, PlayerCommand, PlayerInput, SetCarriedItem.
+      ⚠️ Rust использует flags:u8 для SyncPlayerPosition/TeleportEntity, а не
+      отдельные bool. SetTime содержит ClockState[] (не только time_of_day).
       PART 3/6: entity/player sync (~1000 строк) — после него player_sync.rs
       PART 4/6: chat/command (~600 строк)
       PART 5/6: inventory/slots (~600 строк)
