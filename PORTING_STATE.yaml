@@ -405,10 +405,17 @@ files:
   - rust: player_sync.rs
     python: quadrix/player_sync.py
     test: tests/test_player_sync.py
-    status: blocked
+    status: done
     lines_rust: 90
-    depends_on: [horizon-protocol/src/packets/play.rs (PART 3-4)]
-    note: "90 строк, но полностью зависит от play.rs. После play.rs PART 3-4 — 1 сессия."
+    lines_python: ~250
+    depends_on: [horizon-protocol/src/packets/play.rs (PART 2-3)]
+    note: >
+      sync_client_to_server (выбор MovePlayerPos/PosRot/Rot/Status по изменениям
+      позиции, yaw, pitch, on_ground), apply_server_position (PlayerPosition),
+      apply_teleport (TeleportEntity с delta/rotate flags, сброс velocity).
+      11 tests.
+      ⚠️ В Rust входящий пакет — PlayerPosition, не SyncPlayerPosition
+      (в play.py класса SyncPlayerPosition нет).
 
   - rust: horizon-protocol/src/crypto.rs
     python: quadrix/protocol/crypto.py
