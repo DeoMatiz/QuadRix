@@ -379,6 +379,38 @@ files:
     depends_on: [horizon-protocol/src/packets/play.rs]
     note: "90 строк, но полностью зависит от play.rs. После play.rs — 1 сессия."
 
+  - rust: horizon-protocol/src/packets/handshake.rs
+    python: quadrix/protocol/packets/handshake.py
+    test: tests/protocol/test_packets_small.py
+    status: done
+    lines_rust: 30
+    lines_python: ~40
+    depends_on: [horizon-protocol/src/buf.rs, horizon-protocol/src/ids.rs]
+    note: "Intention (HandshakePacket alias), Intent constants (STATUS=1, LOGIN=2)."
+
+  - rust: horizon-protocol/src/packets/status.rs
+    python: quadrix/protocol/packets/status.py
+    test: tests/protocol/test_packets_small.py
+    status: done
+    lines_rust: 40
+    lines_python: ~50
+    depends_on: [horizon-protocol/src/buf.rs, horizon-protocol/src/ids.rs]
+    note: "StatusRequest (Empty), StatusResponse (json), Ping (общий для PingRequest/PongResponse)."
+
+  - rust: horizon-protocol/src/packets/login.rs
+    python: quadrix/protocol/packets/login.py
+    test: tests/protocol/test_packets_small.py
+    status: done
+    lines_rust: ~150
+    lines_python: ~250
+    depends_on: [horizon-protocol/src/buf.rs, horizon-protocol/src/ids.rs]
+    note: >
+      ServerHello (uuid: u128 обязательный, 0=offline), LoginFinished (GameProfile),
+      LoginDisconnect (json), Compression, CustomQuery, CookieRequest,
+      CustomQueryAnswer, CookieResponse, Key. 12 tests total (на все три файла).
+      ⚠️ Имена в Rust отличаются от vanilla: HandshakePacket→Intention,
+      LoginStart→ServerHello, LoginSuccess→LoginFinished.
+
   # ==========================================================================
   # PHASE 7 — items / inventory
   # ==========================================================================
