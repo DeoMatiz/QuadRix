@@ -1,7 +1,8 @@
-# Порт horizon-protocol/src/packets/play.rs — PART 1 (framework).
+# Порт horizon-protocol/src/packets/play.rs —
+# PART 1 (framework) + PART 2 (движение/позиция/тики).
 #
 # play.rs — самое большое состояние протокола (мир, сущности, инвентарь,
-# чат, чанки). Здесь портируется только КАРКАС:
+# чат, чанки). PART 1 дал КАРКАС:
 #   * полные таблицы ID clientbound и serverbound (из ids.py, как
 #     packet_enum! в Rust);
 #   * диспетчеризация decode/encode по ID и по типу пакета;
@@ -10,10 +11,18 @@
 #   * три простых serverbound-пакета: ClientTickEnd, KeepAlive,
 #     PlayerLoaded.
 #
-# Остальные payload'ы сознательно НЕ портируются в PART 1. Для каждого
+# PART 2 заменил заглушки реальными @dataclass + encode/decode для
+# движения/позиции/тиков (см. раздел «PART 2» ниже): GameEvent,
+# PlayerLookAt, PlayerPosition, PlayerRotation, SetChunkCacheCenter,
+# SetHealth, SetHeldSlot, SetTime, TeleportEntity, TickingState,
+# TickingStep, PlayerAbilities, MovePlayerPos/PosRot/Rot/Status,
+# PlayerAbilitiesRequest, PlayerAction, PlayerCommand, PlayerInput,
+# SetCarriedItem.
+#
+# Остальные payload'ы (PART 3-6) сознательно НЕ портируются. Для каждого
 # такого ID создаётся отдельный класс-заглушка: его read/write сразу
 # бросают именованный Unsupported("play.rs PART 2+: <packet>"). Это не
-# pass и не NotImplementedError — PART 2-6 просто заменят заглушку на
+# pass и не NotImplementedError — PART 3-6 просто заменят заглушку на
 # настоящий @dataclass, не меняя dispatch.
 #
 # Важные детали Rust, сохранённые дословно:
@@ -29,10 +38,29 @@
 
 from __future__ import annotations
 
-from typing import Dict, Tuple, Type
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple, Type
 
 from quadrix.protocol import ids
-from quadrix.protocol.buf import ProtocolError, Reader, Writer
+from quadrix.protocol.buf import (
+    Bool,
+    Byte,
+    Double,
+    Float,
+    Int,
+    List,
+    Long,
+    Opt,
+    Pos,
+    ProtocolError,
+    Reader,
+    Short,
+    UByte,
+    VarInt,
+    VarLong,
+    Vec3d,
+    Writer,
+)
 from quadrix.protocol.ids import Direction, State, id_of
 from quadrix.protocol.packets.configuration import Disconnect, KeepAlive
 from quadrix.protocol.packets.handshake import (
@@ -52,6 +80,31 @@ __all__ = [
     # реализованные serverbound
     "ClientTickEnd",
     "PlayerLoaded",
+    # PART 2: движение/позиция/тики — clientbound
+    "GameEvent",
+    "LookAtEntity",
+    "PlayerLookAt",
+    "PlayerPosition",
+    "PlayerRotation",
+    "SetChunkCacheCenter",
+    "SetHealth",
+    "SetHeldSlot",
+    "ClockState",
+    "SetTime",
+    "TeleportEntity",
+    "TickingState",
+    "TickingStep",
+    "PlayerAbilities",
+    # PART 2: движение/позиция/тики — serverbound
+    "MovePlayerPos",
+    "MovePlayerPosRot",
+    "MovePlayerRot",
+    "MovePlayerStatus",
+    "PlayerAbilitiesRequest",
+    "PlayerAction",
+    "PlayerCommand",
+    "PlayerInput",
+    "SetCarriedItem",
     # таблицы
     "ID_TO_CLASS",
     "CLASS_TO_ID",
@@ -138,18 +191,535 @@ def _unsupported_packet(packet_name: str) -> Type[_Packet]:
     )
 
 
-# ── Реализованные ID (3 clientbound + 3 serverbound) ─────────────────
+# ── PART 2: движение, позиция и тики (play.rs) ───────────────────────
+#
+# Источник — play.rs. Имена полей и вариантов сохранены дословно.
+# Где задание ожидало «более удобные» имена, победил Rust:
+#   * MovePlayerPos / MovePlayerPosRot / MovePlayerRot / MovePlayerStatus
+#     несут `flags: u8` (ServerboundMovePlayerPacket: 1 — на земле,
+#     2 — горизонтальная коллизия), а не `on_ground: bool`;
+#   * PlayerInput несёт `flags: u8` (forward 1, backward 2, left 4,
+#     right 8, jump 16, shift 32, sprint 64), а не семь отдельных bool;
+#   * у SetTime не world_age/time_of_day, а `game_time` + `clocks`
+#     (ClockState по каждому мировому такту);
+#   * PlayerPosition — это ClientboundPlayerPositionPacket с
+#     `teleport`/`position`/`delta`/`yaw`/`pitch`/`relatives`;
+#   * PlayerLookAt.from в Rust — ключевое слово Python, поэтому поле
+#     названо `from_` (единственное переименование, поведение то же).
+#
+# Энтити-синк (PART 3), чат (PART 4), инвентарь (PART 5) и чанки
+# (PART 6) не трогаются: их ID по-прежнему остаются заглушками
+# Unsupported. Исключение — SetHeldSlot/SetCarriedItem (выбор слота в
+# хотбаре), они из списка PART 2.
+
+# ---- clientbound -------------------------------------------------------
+
+
+@dataclass
+class GameEvent(_Packet):
+    """ClientboundGameEventPacket: тип события (u8) и его параметр (f32)."""
+
+    event: int
+    param: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "GameEvent":
+        return cls(UByte.read(r), Float.read(r))
+
+    def write(self, w: Writer) -> None:
+        UByte.write(self.event, w)
+        Float.write(self.param, w)
+
+
+@dataclass
+class LookAtEntity(_Packet):
+    """Цель PlayerLookAt по сущности: её id и anchor (0 ноги, 1 глаза)."""
+
+    id: int
+    anchor: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "LookAtEntity":
+        return cls(VarInt.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        VarInt.write(self.anchor, w)
+
+
+@dataclass
+class PlayerLookAt(_Packet):
+    """ClientboundPlayerLookAtPacket: повернуть игрока из anchor `from`
+    к точке `target` (или, если known, к сущности `entity`)."""
+
+    from_: int
+    target: Tuple[float, float, float]
+    entity: Optional[LookAtEntity]
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerLookAt":
+        return cls(
+            VarInt.read(r),
+            Vec3d.read(r),
+            Opt(LookAtEntity).read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.from_, w)
+        Vec3d.write(self.target, w)
+        Opt(LookAtEntity).write(self.entity, w)
+
+
+@dataclass
+class PlayerPosition(_Packet):
+    """ClientboundPlayerPositionPacket: абсолютная позиция/углы игрока.
+
+    Упаковка Relative: какие из полей относительные (см. relatives).
+    """
+
+    teleport: int
+    position: Tuple[float, float, float]
+    delta: Tuple[float, float, float]
+    yaw: float
+    pitch: float
+    relatives: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerPosition":
+        return cls(
+            VarInt.read(r),
+            Vec3d.read(r),
+            Vec3d.read(r),
+            Float.read(r),
+            Float.read(r),
+            Int.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.teleport, w)
+        Vec3d.write(self.position, w)
+        Vec3d.write(self.delta, w)
+        Float.write(self.yaw, w)
+        Float.write(self.pitch, w)
+        Int.write(self.relatives, w)
+
+
+@dataclass
+class PlayerRotation(_Packet):
+    """ClientboundPlayerRotationPacket: yaw/pitch и флаги относительности."""
+
+    yaw: float
+    relative_yaw: bool
+    pitch: float
+    relative_pitch: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerRotation":
+        return cls(
+            Float.read(r),
+            Bool.read(r),
+            Float.read(r),
+            Bool.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Float.write(self.yaw, w)
+        Bool.write(self.relative_yaw, w)
+        Float.write(self.pitch, w)
+        Bool.write(self.relative_pitch, w)
+
+
+@dataclass
+class SetChunkCacheCenter(_Packet):
+    """ClientboundSetChunkCacheCenterPacket: центр кеша чанков (x, z)."""
+
+    x: int
+    z: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetChunkCacheCenter":
+        return cls(VarInt.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.x, w)
+        VarInt.write(self.z, w)
+
+
+@dataclass
+class SetHealth(_Packet):
+    """ClientboundSetHealthPacket: здоровье, еда и насыщение (синк)."""
+
+    health: float
+    food: int
+    saturation: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetHealth":
+        return cls(Float.read(r), VarInt.read(r), Float.read(r))
+
+    def write(self, w: Writer) -> None:
+        Float.write(self.health, w)
+        VarInt.write(self.food, w)
+        Float.write(self.saturation, w)
+
+
+@dataclass
+class SetHeldSlot(_Packet):
+    """ClientboundSetHeldSlotPacket: выбранный слот хотбара (VarInt)."""
+
+    slot: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetHeldSlot":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.slot, w)
+
+
+@dataclass
+class ClockState(_Packet):
+    """ClockNetworkState одного мирового такта (registry id).
+
+    WorldClock.STREAM_CODEC — plain registry id, без off-by-one.
+    """
+
+    clock: int
+    total_ticks: int
+    partial_tick: float
+    rate: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "ClockState":
+        return cls(
+            VarInt.read(r),
+            VarLong.read(r),
+            Float.read(r),
+            Float.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.clock, w)
+        VarLong.write(self.total_ticks, w)
+        Float.write(self.partial_tick, w)
+        Float.write(self.rate, w)
+
+
+@dataclass
+class SetTime(_Packet):
+    """ClientboundSetTimePacket: игровое время и состояния мировых часов."""
+
+    game_time: int
+    clocks: list[ClockState]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetTime":
+        return cls(Long.read(r), List(ClockState).read(r))
+
+    def write(self, w: Writer) -> None:
+        Long.write(self.game_time, w)
+        List(ClockState).write(self.clocks, w)
+
+
+@dataclass
+class TeleportEntity(_Packet):
+    """ClientboundTeleportEntityPacket: позиция/углы сущности.
+
+    `relatives` — упаковка Relative, `on_ground` — признак опоры.
+    """
+
+    id: int
+    position: Tuple[float, float, float]
+    delta: Tuple[float, float, float]
+    yaw: float
+    pitch: float
+    relatives: int
+    on_ground: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "TeleportEntity":
+        return cls(
+            VarInt.read(r),
+            Vec3d.read(r),
+            Vec3d.read(r),
+            Float.read(r),
+            Float.read(r),
+            Int.read(r),
+            Bool.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        Vec3d.write(self.position, w)
+        Vec3d.write(self.delta, w)
+        Float.write(self.yaw, w)
+        Float.write(self.pitch, w)
+        Int.write(self.relatives, w)
+        Bool.write(self.on_ground, w)
+
+
+@dataclass
+class TickingState(_Packet):
+    """ClientboundTickingStatePacket: частота тиков и заморозка уровня."""
+
+    rate: float
+    frozen: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "TickingState":
+        return cls(Float.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        Float.write(self.rate, w)
+        Bool.write(self.frozen, w)
+
+
+@dataclass
+class TickingStep(_Packet):
+    """ClientboundTickingStepPacket: сколько тиков отшагнуть (`/tick step`)."""
+
+    steps: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "TickingStep":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.steps, w)
+
+
+@dataclass
+class PlayerAbilities(_Packet):
+    """ClientboundPlayerAbilitiesPacket: флаги (i8), скорости полёта/ходьбы."""
+
+    flags: int
+    flying_speed: float
+    walking_speed: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerAbilities":
+        return cls(Byte.read(r), Float.read(r), Float.read(r))
+
+    def write(self, w: Writer) -> None:
+        Byte.write(self.flags, w)
+        Float.write(self.flying_speed, w)
+        Float.write(self.walking_speed, w)
+
+
+# ---- serverbound -------------------------------------------------------
+
+
+@dataclass
+class MovePlayerPos(_Packet):
+    """ServerboundMovePlayerPacket.Pos: x/y/z + flags (1 на земле)."""
+
+    x: float
+    y: float
+    z: float
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "MovePlayerPos":
+        return cls(
+            Double.read(r),
+            Double.read(r),
+            Double.read(r),
+            UByte.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Double.write(self.x, w)
+        Double.write(self.y, w)
+        Double.write(self.z, w)
+        UByte.write(self.flags, w)
+
+
+@dataclass
+class MovePlayerPosRot(_Packet):
+    """ServerboundMovePlayerPacket.PosRot: x/y/z, yaw/pitch и flags."""
+
+    x: float
+    y: float
+    z: float
+    yaw: float
+    pitch: float
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "MovePlayerPosRot":
+        return cls(
+            Double.read(r),
+            Double.read(r),
+            Double.read(r),
+            Float.read(r),
+            Float.read(r),
+            UByte.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Double.write(self.x, w)
+        Double.write(self.y, w)
+        Double.write(self.z, w)
+        Float.write(self.yaw, w)
+        Float.write(self.pitch, w)
+        UByte.write(self.flags, w)
+
+
+@dataclass
+class MovePlayerRot(_Packet):
+    """ServerboundMovePlayerPacket.Rot: только yaw/pitch и flags."""
+
+    yaw: float
+    pitch: float
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "MovePlayerRot":
+        return cls(Float.read(r), Float.read(r), UByte.read(r))
+
+    def write(self, w: Writer) -> None:
+        Float.write(self.yaw, w)
+        Float.write(self.pitch, w)
+        UByte.write(self.flags, w)
+
+
+@dataclass
+class MovePlayerStatus(_Packet):
+    """ServerboundMovePlayerPacket.StatusOnly: только flags."""
+
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "MovePlayerStatus":
+        return cls(UByte.read(r))
+
+    def write(self, w: Writer) -> None:
+        UByte.write(self.flags, w)
+
+
+@dataclass
+class PlayerAbilitiesRequest(_Packet):
+    """ServerboundPlayerAbilitiesPacket: только флаг полёта (2), i8."""
+
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerAbilitiesRequest":
+        return cls(Byte.read(r))
+
+    def write(self, w: Writer) -> None:
+        Byte.write(self.flags, w)
+
+
+@dataclass
+class PlayerAction(_Packet):
+    """ServerboundPlayerActionPacket: action, позиция, сторона, sequence.
+
+    `direction` — 3D data value (0..5), `pos` — упакованный BlockPos.
+    """
+
+    action: int
+    pos: Tuple[int, int, int]
+    direction: int
+    sequence: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerAction":
+        return cls(
+            VarInt.read(r),
+            Pos.read(r),
+            UByte.read(r),
+            VarInt.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.action, w)
+        Pos.write(self.pos, w)
+        UByte.write(self.direction, w)
+        VarInt.write(self.sequence, w)
+
+
+@dataclass
+class PlayerCommand(_Packet):
+    """ServerboundPlayerCommandPacket: id, action и data (все VarInt)."""
+
+    id: int
+    action: int
+    data: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerCommand":
+        return cls(VarInt.read(r), VarInt.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        VarInt.write(self.action, w)
+        VarInt.write(self.data, w)
+
+
+@dataclass
+class PlayerInput(_Packet):
+    """ServerboundPlayerInputPacket: flags (forward 1 ... sprint 64)."""
+
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerInput":
+        return cls(UByte.read(r))
+
+    def write(self, w: Writer) -> None:
+        UByte.write(self.flags, w)
+
+
+@dataclass
+class SetCarriedItem(_Packet):
+    """ServerboundSetCarriedItemPacket: выбранный слот хотбара (Short)."""
+
+    slot: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetCarriedItem":
+        return cls(Short.read(r))
+
+    def write(self, w: Writer) -> None:
+        Short.write(self.slot, w)
+
+
+# ── Реализованные ID (3 clientbound + 3 serverbound в PART 1) ────────
 
 _CLIENTBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
     "bundle_delimiter": BundleDelimiter,
     "disconnect": Disconnect,
     "keep_alive": KeepAlive,
+    # PART 2
+    "game_event": GameEvent,
+    "player_look_at": PlayerLookAt,
+    "player_position": PlayerPosition,
+    "player_rotation": PlayerRotation,
+    "set_chunk_cache_center": SetChunkCacheCenter,
+    "set_health": SetHealth,
+    "set_held_slot": SetHeldSlot,
+    "set_time": SetTime,
+    "teleport_entity": TeleportEntity,
+    "ticking_state": TickingState,
+    "ticking_step": TickingStep,
+    "player_abilities": PlayerAbilities,
 }
 
 _SERVERBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
     "keep_alive": KeepAlive,
     "client_tick_end": ClientTickEnd,
     "player_loaded": PlayerLoaded,
+    # PART 2
+    "move_player_pos": MovePlayerPos,
+    "move_player_pos_rot": MovePlayerPosRot,
+    "move_player_rot": MovePlayerRot,
+    "move_player_status_only": MovePlayerStatus,
+    "player_abilities": PlayerAbilitiesRequest,
+    "player_action": PlayerAction,
+    "player_command": PlayerCommand,
+    "player_input": PlayerInput,
+    "set_carried_item": SetCarriedItem,
 }
 
 
