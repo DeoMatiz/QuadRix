@@ -410,7 +410,6 @@ files:
         идут raw-passthrough (аналог Unknown). 14 новых тестов PART 6 +
         test_play_rs_fully_implemented.
 
-
   - rust: player_sync.rs
     python: quadrix/player_sync.py
     test: tests/test_player_sync.py
@@ -490,10 +489,21 @@ files:
   - rust: horizon-items/src/items.rs
     python: quadrix/items/items.py
     test: tests/items/test_items.py
-    status: pending
+    status: done
     lines_rust: ~3000
+    lines_python: ~400
     depends_on: [horizon-core/src/geometry/mod.rs]
-    note: "Item registry (id, properties). ItemStack базово."
+    note: >
+      ToolRule, ItemInfo (Rust field names), ItemComponentMap, ItemStack
+      (item/count/damage/extra + helpers), Items registry, load_items,
+      ITEM_REGISTRY, fire_starter_*. 1658 items из
+      .local/horizon-client/26.3/items.json (через horizon_world::item_defaults).
+      Network order — command-registries.json["items"].
+      15 tests (5 required + 10 extra).
+      ⚠️ ItemId enum в Rust НЕТ — items keyed by Arc<str>. Items.order =
+      BTreeMap sorted by name. ItemStack helpers (next_damage, damage_per_hit,
+      same_item с components) — из item_data.rs (следующая сессия).
+      Component parsing (wire added/removed) — в item_data.rs.
 
   - rust: horizon-items/src/item_data.rs
     python: quadrix/items/item_data.py
