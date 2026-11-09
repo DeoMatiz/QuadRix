@@ -342,10 +342,17 @@ files:
   - rust: horizon-protocol/src/buf.rs
     python: quadrix/protocol/buf.py
     test: tests/protocol/test_buf.py
-    status: pending
+    status: done
     lines_rust: ~800
+    lines_python: ~900
     depends_on: []
-    note: "Byte buffer, varint/varlong, string read/write, packet framing."
+    note: >
+      Reader/Writer, varint/varlong, string (32767 + UTF-16 count), UUID,
+      block_pos (x26/z26/y12), ChunkPos, SectionPos, angles (i8, как в Rust),
+      BitSet, LpVec3, Codec-классы, network NBT (локально, world/nbt.py не
+      трогали), PacketFrame. 23 tests. Регрессий в world/core нет (116 passed).
+      ⚠️ DeepSeek отметил: world/nbt.py::write_network может давать лишний байт
+      Compound — проверить в отдельной сессии, если понадобится.
 
   - rust: horizon-protocol/src/ids.rs
     python: quadrix/protocol/ids.py
