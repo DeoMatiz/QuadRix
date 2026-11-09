@@ -207,9 +207,9 @@ files:
       - .local/horizon-client-collision/cached-collision.nbt
       - .local/horizon-client-motion/landing-definitions.json
       - .local/horizon-client-motion/landing-states.json
-    parts_done: [1, 2, 3, 4, 5, 6, 7, 8]
+    parts_done: [1, 2, 3, 4, 5, 6, 7, 8, upgrade_move_entity]
     parts_total: 8
-    test_status: "49 passed (PART 1-8)"
+    test_status: "52 passed (PART 1-8 + upgrade move_entity)"
     note: >
       PART 1/8: PlayerMotion basics, EntityDimensions, MovementResources (1800 blocks).
       PART 2/8: tick (гравитация 0.08, terminal -3.92, on_ground), move_entity (sweep X/Y/Z).
@@ -221,6 +221,19 @@ files:
       PART 8/8: climb / ladder / scaffolding (on_climbable, climb, climb_friction).
       Базовый motion.rs закрыт. НЕ входит (отдельные сессии): elytra, riptide,
       SceneCollisions, полноценный collision по VoxelShape (см. collision/*.rs).
+    UPGRADE: move_entity теперь использует entity_collision.sweep (VoxelShape),
+      а не упрощённый block-is-solid. 52 tests total.
+
+  - rust: motion.rs (upgrade move_entity)
+    python: quadrix/motion/core.py
+    test: tests/motion/test_core.py
+    status: done
+    depends_on: [motion.rs (PART 1-8), horizon-world/src/collision/entity_collision.rs]
+    note: >
+      move_entity теперь использует entity_collision.sweep (VoxelShape), а не
+      упрощённый block-is-solid. Slab останавливает на 0.5 (не на 1.0),
+      wall даёт точные 0.7, падение на slab даёт y=0.5. 52 passed, 49 старых
+      остались зелёными.
 
   # ==========================================================================
   # PHASE 5.1 — motion.rs extensions (остаток)
