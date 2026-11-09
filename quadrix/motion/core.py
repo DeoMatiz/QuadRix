@@ -20,6 +20,7 @@ from typing import Dict
 
 from quadrix.core.geometry import Vec3, Aabb, Axis
 from quadrix.effects import StatusFlags
+from quadrix.world.collision.entity_collision import sweep
 from quadrix.world.nbt import read_nbt
 from quadrix.world.registry import BlockRegistry
 
@@ -1019,24 +1020,46 @@ def tick(self, dt: float, world: object) -> None:
 
 
 def move_entity(self, world: object, movement: Vec3) -> None:
-    """Move the player by *movement* vector, resolving collisions axis-aligned.
+    """Move the player by *movement* vector, resolving collisions by sweep.
 
-    Sweeps along X, then Y, then Z axes. On collision with a solid block,
-    the corresponding velocity component is zeroed.
+    Порт ``entity_move::move_entity`` (horizon-world) без побочных хуков:
+    смещение разрешается настоящим sweep'ом по VoxelShape блоков через
+    :func:`quadrix.world.collision.entity_collision.sweep`, поэтому плиты,
+    ступени, заборы и прочие неполные кубы обрезают движение по своей форме,
+    а не как полный куб.
+
+    Компонента скорости обнуляется по каждой оси, где sweep укоротил
+    смещение (как ``collision_flags.horizontal`` / ``vertical`` в Rust).
+    Движение вниз, упёршееся в форму, поднимает ``on_ground``.
 
     Args:
-        world: FakeWorld or real world object with ``block(x, y, z) -> str``.
+        world: FakeWorld или реальный мир с ``block(x, y, z) -> str`` и
+            ``registry`` (:class:`BlockRegistry`).
         movement: Vec3 displacement to attempt.
     """
-    # Sweep along X axis
-    if movement.x != 0.0:
-        _move_axis(self, world, axis=0, movement=movement.x, dt=1.0)
-    # Sweep along Y axis
-    if movement.y != 0.0:
-        _move_axis(self, world, axis=1, movement=movement.y, dt=1.0)
-    # Sweep along Z axis
-    if movement.z != 0.0:
-        _move_axis(self, world, axis=2, movement=movement.z, dt=1.0)
+    if movement.length_squared() == 0.0:
+        # Нулевое движение, как в Rust: ни форм, ни флагов.
+        return
+
+    resolved = sweep(world, self.bounds(), movement)
+
+    # Сдвигаем позицию ровно на разрешённое смещение.
+    self.position = self.position.add_vector(resolved)
+
+    velocity = self.velocity
+    # Ось, упёршаяся в форму, гасит свою компоненту скорости.
+    if resolved.x != movement.x:
+        velocity = velocity.with_component(Axis.X, 0.0)
+    if resolved.z != movement.z:
+        velocity = velocity.with_component(Axis.Z, 0.0)
+    if resolved.y != movement.y:
+        velocity = velocity.with_component(Axis.Y, 0.0)
+
+    # Движение вниз остановлено формой → стоим на ней (Entity.setOnGround).
+    if movement.y < 0.0 and resolved.y != movement.y:
+        self.on_ground = True
+
+    self.velocity = velocity
 
 
 # Attach methods to PlayerMotion class

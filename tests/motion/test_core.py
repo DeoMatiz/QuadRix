@@ -6,6 +6,8 @@ Verifies PlayerMotion basics and MovementResources loading from .local data.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from quadrix.core.geometry import Vec3, Aabb, Axis
@@ -22,18 +24,44 @@ from quadrix.motion.core import (
     on_climbable,
     climb,
 )
+from quadrix.world.collision.block_collision import (
+    CachedCollisionRegistry,
+    load_cached_collision,
+)
+from quadrix.world.registry import BlockRegistry, load_registry
 
 
 # ── Fake world for unit tests ──────────────────────────────────────
+
+_COLLISION_DIR = (
+    Path(__file__).resolve().parents[2] / ".local" / "horizon-client-collision"
+)
+_collision_cache: tuple[BlockRegistry, CachedCollisionRegistry] | None = None
+
+
+def _collision_data() -> tuple[BlockRegistry, CachedCollisionRegistry]:
+    """Загрузить (один раз) реестр блоков и кэш форм из .local."""
+    global _collision_cache
+    if _collision_cache is None:
+        registry = load_registry(_COLLISION_DIR / "block-registry.nbt")
+        cached = load_cached_collision(
+            registry, _COLLISION_DIR / "cached-collision.nbt"
+        )
+        _collision_cache = (registry, cached)
+    return _collision_cache
+
 
 class FakeWorld:
     """Minimal fake world for PlayerMotion tick/move_entity tests.
 
     Provides ``block(x, y, z) -> str``; returns ``"minecraft:air"`` by default.
+    Also exposes the real ``BlockRegistry`` + ``CachedCollisionRegistry`` so
+    ``move_entity`` can sweep against true VoxelShapes (slabs, stairs, ...).
     """
 
     def __init__(self, solid_blocks: dict | None = None) -> None:
         self._solid = solid_blocks or {}
+        self.registry, self.cached_collision = _collision_data()
 
     def block(self, x: int, y: int, z: int) -> str:
         return self._solid.get((x, y, z), "minecraft:air")
@@ -671,3 +699,61 @@ def test_climb_gravity_disabled():
     # Tick applies gravity, so velocity should become negative
     pm.tick(dt=0.05, world=world)
     assert pm.velocity.y < 0, "Gravity should pull down after climbing with no input"
+
+
+# ── PART 9: move_entity через настоящий sweep по VoxelShape ──────────
+# Упрощённый collision считал блок «solid или нет» полным кубом, поэтому
+# плита (0.5) обрезала движение как целый блок. Новые тесты фиксируют
+# истинную форму из .local/horizon-client-collision/cached-collision.nbt.
+
+def test_move_entity_stops_at_slab_side():
+    """Игрок идёт в плиту: sweep останавливает на грани 0.5, а не на 1.0.
+
+    Игрок стоит на земле (ноги y=0), плита в (1, 0, 0) занимает x 1..2 и
+    y 0..0.5. Коробка игрока 0.6 шириной упирается в грань x=1 ровно в
+    x = 1 - 0.3 = 0.7. Старый упрощённый симметричный шаг проскочил бы
+    дальше (к x≈0.99), потому что видел в клетке (1,0,0) «solid».
+    """
+    world = FakeWorld({(1, 0, 0): "minecraft:stone_slab"})
+    pm = PlayerMotion.new(
+        MovementResources.load(".local/horizon-client-motion"), Vec3(0, 0, 0)
+    )
+    pm.move_entity(world, Vec3(1, 0, 0))
+    assert pm.position.x == pytest.approx(0.7, abs=1e-6)
+    assert pm.position.x < 0.8
+    assert pm.velocity.x == 0.0
+
+
+def test_move_entity_wall_exact_distance():
+    """Игрок идёт в стену: ровно 0.7 от центра до грани x=1 (полный куб)."""
+    world = FakeWorld(
+        {
+            (1, y, z): "minecraft:stone"
+            for y in range(60, 70)
+            for z in range(-5, 6)
+        }
+    )
+    pm = PlayerMotion.new(
+        MovementResources.load(".local/horizon-client-motion"), Vec3(0, 64, 0)
+    )
+    pm.move_entity(world, Vec3(2, 0, 0))
+    assert pm.position.x == pytest.approx(0.7, abs=1e-6)
+    assert pm.position.x < 1.0
+    assert pm.velocity.x == 0.0
+
+
+def test_move_entity_falls_onto_slab_top():
+    """Падение на плиту: ноги останавливаются на y=0.5, а не на y=0.
+
+    Игрок падает с y=3 на плиту (0, 0, 0) высотой 0.5. Полный куб старой
+    логики остановил бы его на y=0.
+    """
+    world = FakeWorld({(0, 0, 0): "minecraft:stone_slab"})
+    pm = PlayerMotion.new(
+        MovementResources.load(".local/horizon-client-motion"), Vec3(0, 3, 0)
+    )
+    pm.move_entity(world, Vec3(0, -3, 0))
+    assert pm.position.y == pytest.approx(0.5, abs=1e-6)
+    assert pm.position.y > 0.0
+    assert pm.velocity.y == 0.0
+    assert pm.on_ground is True
