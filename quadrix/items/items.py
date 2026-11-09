@@ -247,8 +247,18 @@ class ItemStack:
         return self.item
 
     def same_item(self, other: "ItemStack") -> bool:
-        """``ItemStack.isSameItem``: сравнение только типов предмета."""
-        return self.item == other.item
+        """Сравнение предмета и компонент (не только типа).
+
+        Ваниль ``ItemStack.isSameItem`` сравнивает лишь id; здесь по заданию
+        учитываются и компоненты (``damage`` + ``extra``) — то же, что
+        ``same_item_same_components`` и Rust ``isSameItemSameComponents``
+        (item_data.rs:434). Количество, как и в Rust, не сравнивается.
+        """
+        return (
+            self.item == other.item
+            and self.damage == other.damage
+            and self.data() == other.data()
+        )
 
     def same_item_same_components(self, other: "ItemStack") -> bool:
         """``ItemStack.isSameItemSameComponents`` (item_data.rs:434)."""
@@ -271,6 +281,73 @@ class ItemStack:
 
     def __len__(self) -> int:
         return self.count
+
+    # -- прочность и стекаемость (component_durability.rs, item_use_catalog.rs,
+    #    stations.rs; APPEND этой сессии) --
+
+    def data_mut(self) -> ItemComponentMap:
+        """``ItemStack::data_mut`` (item_data.rs:294): extra, создавая коробку."""
+        if self.extra is None:
+            self.extra = ItemComponentMap()
+        return self.extra
+
+    def max_damage(self) -> int:
+        """``Info.max_damage`` предмета (0 — не ломается)."""
+        info = ITEM_REGISTRY.get(self.item)
+        return info.max_damage if info is not None else 0
+
+    def is_damageable(self) -> bool:
+        """``ItemStack.isDamageableItem`` (stations.rs:170).
+
+        Есть прочность и нет ``minecraft:unbreakable``.
+        """
+        info = ITEM_REGISTRY.get(self.item)
+        if info is None or info.max_damage <= 0:
+            return False
+        if self.extra is not None and "minecraft:unbreakable" in self.extra:
+            return False
+        return True
+
+    def is_damaged(self) -> bool:
+        """``DurabilityStack.is_damaged`` (item_durability.rs:40)."""
+        return self.is_damageable() and self.damage > 0
+
+    def is_broken(self) -> bool:
+        """``DurabilityStack.is_broken`` (item_durability.rs:43)."""
+        return self.is_damageable() and self.damage >= self.max_damage()
+
+    def next_damage_will_break(self) -> bool:
+        """``DurabilityStack.next_damage_will_break`` (item_durability.rs:46)."""
+        return self.is_damageable() and self.damage >= self.max_damage() - 1
+
+    def damage_per_hit(self) -> int:
+        """Прочность, снимаемая за удар.
+
+        ``ItemStack.postHurtEnemy``: ``weapon.item_damage_per_attack``;
+        у оружия без него (и у не-оружия) — 1 (items.rs:928).
+        """
+        info = ITEM_REGISTRY.get(self.item)
+        if info is not None and info.weapon_damage is not None:
+            return info.weapon_damage
+        return 1
+
+    def next_damage(self) -> int:
+        """Повреждение после следующего удара (``damage + damage_per_hit``).
+
+        Ограничено ``max_damage``, как ``set_damage`` (item_durability.rs:34).
+        Непрочный предмет не меняется.
+        """
+        if not self.is_damageable():
+            return self.damage
+        return min(self.damage + self.damage_per_hit(), self.max_damage())
+
+    def is_stackable(self) -> bool:
+        """``ItemUseStack.is_stackable`` (item_use_catalog.rs:83)."""
+        info = ITEM_REGISTRY.get(self.item)
+        max_stack = info.max_stack if info is not None else 1
+        if max_stack <= 1:
+            return False
+        return not (self.is_damageable() and self.is_damaged())
 
 
 # ---------------------------------------------------------------------------
