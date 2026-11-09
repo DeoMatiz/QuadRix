@@ -380,25 +380,26 @@ files:
       - horizon-protocol/src/buf.rs
       - horizon-protocol/src/ids.rs
       - horizon-protocol/src/packets/configuration.rs
-    parts_done: [1, 2, 3]
+    parts_done: [1, 2, 3, 4]
     parts_total: 6
-    test_status: "40 passed (PART 1-3), protocol total 100 passed"
+    test_status: "57 passed (PART 1-4), protocol total 161 passed"
     note: >
-      PART 1/6: PacketId framework (144+69 ID). 8 tests.
-      PART 2/6: movement/position/tick (~12 пакетов). 16 tests.
-      PART 3/6: entity/player sync (~25 clientbound + 5 serverbound).
-        Clientbound: AddEntity, Animate, DamageEvent, EntityEvent,
-        EntityPositionSync, HurtAnimation, MoveEntityPos/PosRot/Rot,
-        MoveVehicle, PlayerInfoUpdate/Remove, ProjectilePower, RemoveEntities,
-        RotateHead, SetCamera, SetEntityData, SetEntityLink, SetEntityMotion,
-        SetEquipment, SetPassengers, SwingAnimation, TakeItemEntity,
-        UpdateAttributes + EntityData values, VecDelta, PositionPath,
-        ItemStack, Property, Particle, Profile.
-        Serverbound: Interact, PaddleBoat, ClientCommand, PickItemFromEntity,
-        MoveVehicleRequest.
-      ⚠️ ItemStack = Rust Slot wire-shape (count, item, positive, negative, removed).
-      Non-empty component patches → ProtocolError (items.rs ещё pending).
-      PART 4/6: chat/command (~600 строк)
+      PART 1/6: PacketId framework. 8 tests.
+      PART 2/6: movement/position/tick. 16 tests.
+      PART 3/6: entity/player sync (~25 clientbound + 5 serverbound). 16 tests.
+      PART 4/6: chat/command.
+        Clientbound: SystemChat, PlayerChat, DisguisedChat, DeleteChat,
+        Commands (+63 ARGUMENT_TYPES + acyclic), CommandSuggestions,
+        SetTitleText, SetSubtitleText, SetActionBarText, SetTitlesAnimation,
+        ClearTitles, SetPlayerTeam, SetScore, ResetScore, ServerData,
+        CustomChatCompletions, TabList.
+        Serverbound: Chat (last_seen, не bitset), ChatCommand (только command),
+        ChatAck, ChatCommandSigned (отдельный), ChatSessionUpdate,
+        CommandSuggestion. 17 tests.
+      ⚠️ Rust расходится с vanilla: Chat — last_seen (Fixed3), не message_count/bitset.
+      ChatCommand — только command Str, подписанная версия = ChatCommandSigned.
+      SetScore (не SetPlayerScore). CommandSuggestions в packet_enum! Rust нет —
+      реализовано по vanilla + комментарий.
       PART 5/6: inventory/slots (~600 строк)
       PART 6/6: chunk/world (~500 строк)
 
