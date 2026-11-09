@@ -1471,3 +1471,302 @@ def test_part4_replaces_unsupported_stubs():
         packet_id = id_of(name, State.PLAY, Direction.SERVERBOUND)
         assert SERVERBOUND_ID_TO_CLASS[packet_id] is cls, name
 
+
+# ═════════════════════════════════════════════════════════════════════
+# PART 5 — инвентарь, слоты и контейнеры (play.rs)
+# ═════════════════════════════════════════════════════════════════════
+
+
+from quadrix.protocol.packets.play import (  # noqa: E402 — PART 5 блок
+    ContainerButtonClick,
+    ContainerClick,
+    ContainerClose,
+    ContainerSetContent,
+    ContainerSetData,
+    ContainerSetSlot,
+    ContainerSlotStateChanged,
+    Cooldown,
+    EditBook,
+    Hashed,
+    MerchantOffers,
+    NetCost,
+    NetOffer,
+    OpenScreen,
+    RenameItem,
+    SelectTrade,
+    SetCreativeModeSlot,
+    SetCursorItem,
+    SetPlayerInventory,
+)
+
+
+def test_clientbound_container_set_content_round_trip():
+    # Сверить с Rust: ContainerSetContent { container, state,
+    # items: Vec<Option<Stack>> => List<Slot>, carried: Option<Stack> }.
+    packet = ContainerSetContent(
+        container=0, state=1, items=[None] * 46, carried=None
+    )
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "container_set_content", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert packet_id == 18
+    # container 0, state 1, размер списка 46, 46 пустых слотов, курсор пуст.
+    assert body == bytes([packet_id, 0, 1, 46]) + b"\x00" * 47
+    assert len(packet.items) == 46
+    assert packet.carried is None
+
+
+def test_clientbound_container_set_slot_and_data_round_trip():
+    slot = ContainerSetSlot(container=0, state=1, slot=36, item=None)
+    data = ContainerSetData(container=0, id=1, value=100)
+
+    slot_id, slot_body = round_trip(Clientbound, slot)
+    data_id, data_body = round_trip(Clientbound, data)
+
+    assert slot_id == id_of(
+        "container_set_slot", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert slot_id == 20
+    # container 0, state 1, slot Short 36, пустой предмет.
+    assert slot_body == bytes([slot_id, 0, 1]) + struct.pack(">h", 36) + b"\x00"
+    assert data_id == id_of(
+        "container_set_data", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert data_id == 19
+    # container 0, property Short 1, value Short 100.
+    assert data_body == bytes([data_id, 0]) + struct.pack(">hh", 1, 100)
+    assert slot.item is None
+    assert data.value == 100
+
+
+def test_serverbound_container_click_round_trip():
+    # Rust ContainerClick: container, state, slot Short, button i8,
+    # input VarInt, changed (slot, Option<Hashed>), carried Option<Hashed>.
+    packet = ContainerClick(
+        container=0,
+        state=1,
+        slot=36,
+        button=0,
+        input=0,
+        changed=[(36, Hashed(item=1, count=1))],
+        carried=None,
+    )
+
+    packet_id, body = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of("container_click", State.PLAY, Direction.SERVERBOUND)
+    assert packet_id == 18
+    assert body[1] == 0  # container
+    assert body[2] == 1  # state
+    assert body[3:5] == struct.pack(">h", 36)  # slot
+    assert body[5] == 0  # button i8
+    assert body[6] == 0  # input VarInt
+    assert body[7] == 1  # changed: одна запись
+    assert body[8:10] == struct.pack(">h", 36)  # slot изменения
+    assert body[10] == 1  # Hashed присутствует
+    assert packet.changed == [(36, Hashed(item=1, count=1))]
+    assert packet.carried is None
+
+
+def test_serverbound_set_creative_mode_slot_round_trip():
+    packet = SetCreativeModeSlot(slot=36, item=None)
+
+    packet_id, body = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of(
+        "set_creative_mode_slot", State.PLAY, Direction.SERVERBOUND
+    )
+    assert packet_id == 57
+    assert body == bytes([packet_id]) + struct.pack(">h", 36) + b"\x00"
+    assert packet.slot == 36 and packet.item is None
+
+
+def test_serverbound_container_button_click_round_trip():
+    packet = ContainerButtonClick(container=0, button=1)
+
+    packet_id, body = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of(
+        "container_button_click", State.PLAY, Direction.SERVERBOUND
+    )
+    assert packet_id == 17
+    assert body == bytes([packet_id, 0, 1])
+    assert packet.button == 1
+
+
+def test_serverbound_rename_item_round_trip():
+    packet = RenameItem(name="Меч-кладенец")
+
+    packet_id, body = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of("rename_item", State.PLAY, Direction.SERVERBOUND)
+    assert packet_id == 49
+    # STRING_UTF8: длина — в байтах UTF-8.
+    assert body[1] == len(packet.name.encode("utf-8"))
+    assert packet.name == "Меч-кладенец"
+
+
+def test_clientbound_open_screen_round_trip():
+    title = compound(text=string("Сундук"))
+    packet = OpenScreen(container=2, menu=0, title=title)
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of("open_screen", State.PLAY, Direction.CLIENTBOUND)
+    assert packet_id == 60
+    assert body[1] == 2  # container VarInt
+    assert body[2] == 0  # menu VarInt (тип меню)
+    assert body[3] == int(TagType.Compound)  # title — сырой NBT
+    assert packet.title == title
+
+
+def test_serverbound_edit_book_round_trip():
+    packet = EditBook(
+        slot=0,
+        pages=["Первая", "Вторая"],
+        title="Дневник",
+    )
+
+    packet_id, body = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of("edit_book", State.PLAY, Direction.SERVERBOUND)
+    assert packet_id == 24
+    assert body[1] == 0  # slot VarInt
+    assert body[2] == 2  # число страниц
+    assert body[3] == len("Первая".encode("utf-8"))
+    assert packet.pages == ["Первая", "Вторая"]
+    assert packet.title == "Дневник"
+
+    # Без подписи title отсутствует (Opt).
+    untitled = EditBook(slot=40, pages=[], title=None)
+    round_trip(Serverbound, untitled)
+    assert untitled.title is None
+
+
+def test_clientbound_container_close_and_cursor_and_inventory_round_trip():
+    close = ContainerClose(container=3)
+    cursor = SetCursorItem(item=None)
+    inventory = SetPlayerInventory(
+        slot=36, item=ItemStack(item=1, count=1)
+    )
+
+    close_id, close_body = round_trip(Clientbound, close)
+    cursor_id, cursor_body = round_trip(Clientbound, cursor)
+    inventory_id, inventory_body = round_trip(Clientbound, inventory)
+
+    assert close_id == id_of(
+        "container_close", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert close_body == bytes([close_id, 3])
+    assert cursor_id == id_of(
+        "set_cursor_item", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert cursor_body == bytes([cursor_id, 0])
+    assert inventory_id == id_of(
+        "set_player_inventory", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert inventory_body == bytes([inventory_id, 36, 1, 1, 0, 0])
+    assert inventory.item == ItemStack(item=1, count=1)
+
+
+def test_clientbound_cooldown_and_merchant_offers_round_trip():
+    cooldown = Cooldown(group="minecraft:use_cooldown", duration=40)
+    offer = NetOffer(
+        cost_a=NetCost(item=1, count=2),
+        result=ItemStack(item=5, count=1),
+        cost_b=None,
+        out_of_stock=False,
+        uses=0,
+        max_uses=7,
+        xp=1,
+        special_price=0,
+        price_multiplier=1.0,
+        demand=0,
+    )
+    offers = MerchantOffers(
+        container=1,
+        offers=[offer],
+        level=1,
+        xp=3,
+        show_progress=True,
+        can_restock=False,
+    )
+
+    cooldown_id, cooldown_body = round_trip(Clientbound, cooldown)
+    offers_id, offers_body = round_trip(Clientbound, offers)
+
+    assert cooldown_id == id_of("cooldown", State.PLAY, Direction.CLIENTBOUND)
+    assert cooldown_id == 22
+    assert cooldown_body[1] == len("minecraft:use_cooldown")
+    assert cooldown_body[-1] == 40
+    assert offers_id == id_of(
+        "merchant_offers", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert offers_id == 53
+    assert offers_body[1] == 1  # container
+    assert offers_body[2] == 1  # число предложений
+    assert offers.offers[0].max_uses == 7
+    assert offers.can_restock is False
+
+
+def test_serverbound_container_slot_state_and_select_trade_round_trip():
+    toggle = ContainerSlotStateChanged(slot=3, container=1, enabled=True)
+    trade = SelectTrade(item=2)
+
+    toggle_id, toggle_body = round_trip(Serverbound, toggle)
+    trade_id, trade_body = round_trip(Serverbound, trade)
+
+    assert toggle_id == id_of(
+        "container_slot_state_changed", State.PLAY, Direction.SERVERBOUND
+    )
+    assert toggle_body == bytes([toggle_id, 3, 1, 1])
+    assert trade_id == id_of("select_trade", State.PLAY, Direction.SERVERBOUND)
+    assert trade_id == 52
+    assert trade_body == bytes([trade_id, 2])
+
+
+def test_nonexistent_patches_are_rejected():
+    # Непустые патчи компонентов невозможны: items.rs ещё pending.
+    packet = ContainerSetSlot(
+        container=0,
+        state=1,
+        slot=0,
+        item=ItemStack(item=1, count=1, added=((5, object()),)),
+    )
+    with pytest.raises(ProtocolError):
+        Clientbound.encode(packet)
+
+
+def test_part5_replaces_unsupported_stubs():
+    expected_clientbound = {
+        "container_close": ContainerClose,
+        "container_set_content": ContainerSetContent,
+        "container_set_data": ContainerSetData,
+        "container_set_slot": ContainerSetSlot,
+        "merchant_offers": MerchantOffers,
+        "open_screen": OpenScreen,
+        "set_cursor_item": SetCursorItem,
+        "set_player_inventory": SetPlayerInventory,
+        "cooldown": Cooldown,
+    }
+    for name, cls in expected_clientbound.items():
+        packet_id = id_of(name, State.PLAY, Direction.CLIENTBOUND)
+        assert ID_TO_CLASS[packet_id] is cls, name
+
+    expected_serverbound = {
+        "container_button_click": ContainerButtonClick,
+        "container_click": ContainerClick,
+        "container_close": ContainerClose,
+        "container_slot_state_changed": ContainerSlotStateChanged,
+        "edit_book": EditBook,
+        "rename_item": RenameItem,
+        "set_creative_mode_slot": SetCreativeModeSlot,
+        "select_trade": SelectTrade,
+    }
+    for name, cls in expected_serverbound.items():
+        packet_id = id_of(name, State.PLAY, Direction.SERVERBOUND)
+        assert SERVERBOUND_ID_TO_CLASS[packet_id] is cls, name
+

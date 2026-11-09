@@ -195,6 +195,27 @@ __all__ = [
     "ChatCommandSigned",
     "ChatSessionUpdate",
     "CommandSuggestion",
+    # PART 5: инвентарь, слоты и контейнеры — clientbound
+    "ContainerClose",
+    "ContainerSetContent",
+    "ContainerSetData",
+    "ContainerSetSlot",
+    "MerchantOffers",
+    "NetOffer",
+    "NetCost",
+    "OpenScreen",
+    "SetCursorItem",
+    "SetPlayerInventory",
+    "Cooldown",
+    # PART 5: инвентарь, слоты и контейнеры — serverbound
+    "ContainerClick",
+    "ContainerButtonClick",
+    "ContainerSlotStateChanged",
+    "RenameItem",
+    "EditBook",
+    "SetCreativeModeSlot",
+    "SelectTrade",
+    "Hashed",
     # таблицы
     "ID_TO_CLASS",
     "CLASS_TO_ID",
@@ -2959,6 +2980,539 @@ class CommandSuggestion(_Packet):
         Str.write(self.text, w)
 
 
+# ── PART 5: инвентарь, слоты и контейнеры (play.rs) ──────────────────
+#
+# Источник — play.rs (и item.rs для формы Slot / Hashed). Имена полей и
+# вариантов сохранены дословно как в Rust: у ContainerSet* это `container`
+# (не window_id), `state` (не state_id); у ContainerClick — `input` (не
+# mode) и `changed` пар «(slot, Option<Hashed>)».
+#
+# Слоты (Slot) кодируются тем же `_Slot` из PART 3: count, item, затем
+# patch. Непустые патчи компонентов по-прежнему дают ProtocolError —
+# items.rs ещё не портирован, поэтому значения компонентов на проводе
+# прочитать нельзя. SetCreativeModeSlot использует DelimitedSlot, но при
+# пустом патче он побайтово совпадает со Slot, так что снова `_Slot`.
+#
+# HashedStack (item.rs:1135) — самодостаточная wire-форма (item, count,
+# пары (kind, hash), removed-виды), items.rs для неё НЕ нужен. Ею несут
+# ContainerClick (changed и carried).
+#
+# RecipeBook* / PlaceGhostRecipe / PlaceRecipe живут в recipes.rs —
+# отдельном файле, не в этом блоке. update_recipes в packet_enum! play.rs
+# отсутствует, поэтому здесь тоже нет.
+
+# ---- общие структуры инвентаря ----------------------------------------
+
+
+@dataclass(frozen=True)
+class Hashed:
+    """HashedStack (item.rs:1135): что клиент считает лежащим в слоте.
+
+    Значения компонентов заменены хешами, поэтому items.rs не нужен.
+    `added` — пары (id компонента, хеш), `removed` — id компонентов.
+    """
+
+    item: int
+    count: int
+    added: Tuple[Tuple[int, int], ...] = ()
+    removed: Tuple[int, ...] = ()
+
+    @classmethod
+    def read(cls, r: Reader) -> "Hashed":
+        item = r.varint()
+        count = r.varint()
+        n = r.count(256)
+        added = tuple((r.varint(), r.i32()) for _ in range(n))
+        n = r.count(256)
+        removed = tuple(r.varint() for _ in range(n))
+        return cls(item, count, added, removed)
+
+    def write(self, w: Writer) -> None:
+        w.varint(self.item)
+        w.varint(self.count)
+        w.varint(len(self.added))
+        for kind, digest in self.added:
+            w.varint(kind)
+            w.i32(digest)
+        w.varint(len(self.removed))
+        for kind in self.removed:
+            w.varint(kind)
+
+
+class _HashedSlot:
+    """HashedSlot (item.rs:1148): bool-флаг присутствия, затем HashedStack."""
+
+    @classmethod
+    def read(cls, r: Reader) -> Optional[Hashed]:
+        if not r.bool():
+            return None
+        return Hashed.read(r)
+
+    @classmethod
+    def write(cls, v: Optional[Hashed], w: Writer) -> None:
+        w.bool(v is not None)
+        if v is not None:
+            v.write(w)
+
+
+class _ChangedSlots:
+    """ChangedSlots (play.rs:2300): список пар (slot i16, Option<Hashed>)."""
+
+    @classmethod
+    def read(cls, r: Reader) -> list[Tuple[int, Optional[Hashed]]]:
+        n = r.count(128)
+        return [(r.i16(), _HashedSlot.read(r)) for _ in range(n)]
+
+    @classmethod
+    def write(
+        cls, v: list[Tuple[int, Optional[Hashed]]], w: Writer
+    ) -> None:
+        w.varint(len(v))
+        for slot, hashed in v:
+            w.i16(slot)
+            _HashedSlot.write(hashed, w)
+
+
+class _BookPages:
+    """BookPages (play.rs:2551): до 100 страниц по 1024 символа."""
+
+    @classmethod
+    def read(cls, r: Reader) -> list[str]:
+        n = r.varint()
+        if not 0 <= n <= 100:
+            raise ProtocolError(f"[QuadRix] {n} book pages, at most 100")
+        return [r.string(1024) for _ in range(n)]
+
+    @classmethod
+    def write(cls, v: list[str], w: Writer) -> None:
+        w.varint(len(v))
+        for page in v:
+            w.string(page)
+
+
+@dataclass(frozen=True)
+class NetCost:
+    """ItemCost.STREAM_CODEC (play.rs:99): item, count и компоненты.
+
+    Форма на проводе не несёт patch-removal count: список идёт сразу.
+    Компоненты непустые не читаются (items.rs pending) → ProtocolError.
+    """
+
+    item: int
+    count: int
+    components: Tuple[Tuple[int, object], ...] = ()
+
+    @classmethod
+    def read(cls, r: Reader) -> "NetCost":
+        item = r.varint()
+        count = r.varint()
+        n = r.count(r.remaining())
+        if n:
+            raise ProtocolError(
+                "[QuadRix] item components are not ported yet (items.rs pending)"
+            )
+        return cls(item, count)
+
+    def write(self, w: Writer) -> None:
+        if self.components:
+            raise ProtocolError(
+                "[QuadRix] item components are not ported yet (items.rs pending)"
+            )
+        w.varint(self.item)
+        w.varint(self.count)
+        w.varint(len(self.components))
+
+
+@dataclass(frozen=True)
+class NetOffer:
+    """MerchantOffer.STREAM_CODEC (play.rs:127)."""
+
+    cost_a: NetCost
+    result: ItemStack
+    cost_b: Optional[NetCost]
+    out_of_stock: bool
+    uses: int
+    max_uses: int
+    xp: int
+    special_price: int
+    price_multiplier: float
+    demand: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "NetOffer":
+        cost_a = NetCost.read(r)
+        result = _Slot.read(r)
+        if result is None:
+            raise ProtocolError("[QuadRix] empty merchant result")
+        cost_b = NetCost.read(r) if r.bool() else None
+        return cls(
+            cost_a,
+            result,
+            cost_b,
+            Bool.read(r),
+            Int.read(r),
+            Int.read(r),
+            Int.read(r),
+            Int.read(r),
+            Float.read(r),
+            Int.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        self.cost_a.write(w)
+        _Slot.write(self.result, w)
+        Bool.write(self.cost_b is not None, w)
+        if self.cost_b is not None:
+            self.cost_b.write(w)
+        Bool.write(self.out_of_stock, w)
+        Int.write(self.uses, w)
+        Int.write(self.max_uses, w)
+        Int.write(self.xp, w)
+        Int.write(self.special_price, w)
+        Float.write(self.price_multiplier, w)
+        Int.write(self.demand, w)
+
+
+class _Offers:
+    """Offers (play.rs:141): список MerchantOffer."""
+
+    @classmethod
+    def read(cls, r: Reader) -> list[NetOffer]:
+        return [NetOffer.read(r) for _ in range(r.count(r.remaining()))]
+
+    @classmethod
+    def write(cls, v: list[NetOffer], w: Writer) -> None:
+        w.varint(len(v))
+        for offer in v:
+            offer.write(w)
+
+
+# ---- clientbound: контейнеры и слоты ----------------------------------
+
+
+@dataclass
+class ContainerClose(_Packet):
+    """ClientboundContainerClosePacket: id закрываемого окна."""
+
+    container: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "ContainerClose":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+
+
+@dataclass
+class ContainerSetContent(_Packet):
+    """ClientboundContainerSetContentPacket: всё содержимое окна.
+
+    `items` — список Optional<Stack> (List<Slot>), `carried` — стек на
+    курсоре.
+    """
+
+    container: int
+    state: int
+    items: list[Optional[ItemStack]]
+    carried: Optional[ItemStack]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ContainerSetContent":
+        return cls(
+            VarInt.read(r),
+            VarInt.read(r),
+            List(_Slot).read(r),
+            _Slot.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        VarInt.write(self.state, w)
+        List(_Slot).write(self.items, w)
+        _Slot.write(self.carried, w)
+
+
+@dataclass
+class ContainerSetSlot(_Packet):
+    """ClientboundContainerSetSlotPacket: один слот окна."""
+
+    container: int
+    state: int
+    slot: int
+    item: Optional[ItemStack]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ContainerSetSlot":
+        return cls(
+            VarInt.read(r),
+            VarInt.read(r),
+            Short.read(r),
+            _Slot.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        VarInt.write(self.state, w)
+        Short.write(self.slot, w)
+        _Slot.write(self.item, w)
+
+
+@dataclass
+class ContainerSetData(_Packet):
+    """ClientboundContainerSetDataPacket: свойство окна (id/value, Short)."""
+
+    container: int
+    id: int
+    value: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "ContainerSetData":
+        return cls(VarInt.read(r), Short.read(r), Short.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        Short.write(self.id, w)
+        Short.write(self.value, w)
+
+
+@dataclass
+class MerchantOffers(_Packet):
+    """ClientboundMerchantOffersPacket: предложения торговца."""
+
+    container: int
+    offers: list[NetOffer]
+    level: int
+    xp: int
+    show_progress: bool
+    can_restock: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "MerchantOffers":
+        return cls(
+            VarInt.read(r),
+            _Offers.read(r),
+            VarInt.read(r),
+            VarInt.read(r),
+            Bool.read(r),
+            Bool.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        _Offers.write(self.offers, w)
+        VarInt.write(self.level, w)
+        VarInt.write(self.xp, w)
+        Bool.write(self.show_progress, w)
+        Bool.write(self.can_restock, w)
+
+
+@dataclass
+class OpenScreen(_Packet):
+    """ClientboundOpenScreenPacket: id окна, тип меню и заголовок (NBT)."""
+
+    container: int
+    menu: int
+    title: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "OpenScreen":
+        return cls(VarInt.read(r), VarInt.read(r), Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        VarInt.write(self.menu, w)
+        Nbt.write(self.title, w)
+
+
+@dataclass
+class SetCursorItem(_Packet):
+    """ClientboundSetCursorItemPacket: стек на курсоре (Optional<Stack>)."""
+
+    item: Optional[ItemStack]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetCursorItem":
+        return cls(_Slot.read(r))
+
+    def write(self, w: Writer) -> None:
+        _Slot.write(self.item, w)
+
+
+@dataclass
+class SetPlayerInventory(_Packet):
+    """ClientboundSetPlayerInventoryPacket: слот игрока и предмет."""
+
+    slot: int
+    item: Optional[ItemStack]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetPlayerInventory":
+        return cls(VarInt.read(r), _Slot.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.slot, w)
+        _Slot.write(self.item, w)
+
+
+@dataclass
+class Cooldown(_Packet):
+    """ClientboundCooldownPacket: группа (Ident) и длительность (VarInt)."""
+
+    group: str
+    duration: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "Cooldown":
+        return cls(Ident.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Ident.write(self.group, w)
+        VarInt.write(self.duration, w)
+
+
+# ---- serverbound: клики по контейнеру и правки слотов -----------------
+
+
+@dataclass
+class ContainerClick(_Packet):
+    """ServerboundContainerClickPacket: клик по слоту контейнера.
+
+    `input` — ContainerInput (0 pickup, 1 quick move, 2 swap, 3 clone,
+    4 throw, 5 quick craft, 6 pickup all); `changed` — пары
+    (slot, Option<Hashed>); `carried` — стек на курсоре (Option<Hashed>).
+    """
+
+    container: int
+    state: int
+    slot: int
+    button: int
+    input: int
+    changed: list[Tuple[int, Optional[Hashed]]]
+    carried: Optional[Hashed]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ContainerClick":
+        return cls(
+            VarInt.read(r),
+            VarInt.read(r),
+            Short.read(r),
+            Byte.read(r),
+            VarInt.read(r),
+            _ChangedSlots.read(r),
+            _HashedSlot.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        VarInt.write(self.state, w)
+        Short.write(self.slot, w)
+        Byte.write(self.button, w)
+        VarInt.write(self.input, w)
+        _ChangedSlots.write(self.changed, w)
+        _HashedSlot.write(self.carried, w)
+
+
+@dataclass
+class ContainerButtonClick(_Packet):
+    """ServerboundContainerButtonClickPacket: нажатие кнопки окна."""
+
+    container: int
+    button: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "ContainerButtonClick":
+        return cls(VarInt.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        VarInt.write(self.button, w)
+
+
+@dataclass
+class ContainerSlotStateChanged(_Packet):
+    """ServerboundContainerSlotStateChangedPacket: переключатель слота."""
+
+    slot: int
+    container: int
+    enabled: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "ContainerSlotStateChanged":
+        return cls(VarInt.read(r), VarInt.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.slot, w)
+        VarInt.write(self.container, w)
+        Bool.write(self.enabled, w)
+
+
+@dataclass
+class RenameItem(_Packet):
+    """ServerboundRenameItemPacket: новое имя предмета на наковальне."""
+
+    name: str
+
+    @classmethod
+    def read(cls, r: Reader) -> "RenameItem":
+        return cls(Str.read(r))
+
+    def write(self, w: Writer) -> None:
+        Str.write(self.name, w)
+
+
+@dataclass
+class EditBook(_Packet):
+    """ServerboundEditBookPacket: слот, страницы и опциональный заголовок."""
+
+    slot: int
+    pages: list[str]
+    title: Optional[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "EditBook":
+        return cls(
+            VarInt.read(r),
+            _BookPages.read(r),
+            Opt(StrN(32)).read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.slot, w)
+        _BookPages.write(self.pages, w)
+        Opt(StrN(32)).write(self.title, w)
+
+
+@dataclass
+class SetCreativeModeSlot(_Packet):
+    """ServerboundSetCreativeModeSlotPacket: слот и предмет (Short, Slot)."""
+
+    slot: int
+    item: Optional[ItemStack]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetCreativeModeSlot":
+        return cls(Short.read(r), _Slot.read(r))
+
+    def write(self, w: Writer) -> None:
+        Short.write(self.slot, w)
+        _Slot.write(self.item, w)
+
+
+@dataclass
+class SelectTrade(_Packet):
+    """ServerboundSelectTradePacket: индекс выбранного предложения."""
+
+    item: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SelectTrade":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.item, w)
+
+
 # ── Реализованные ID (3 clientbound + 3 serverbound в PART 1) ────────
 
 _CLIENTBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
@@ -3021,6 +3575,16 @@ _CLIENTBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
     "server_data": ServerData,
     "custom_chat_completions": CustomChatCompletions,
     "tab_list": TabList,
+    # PART 5: контейнеры и слоты
+    "container_close": ContainerClose,
+    "container_set_content": ContainerSetContent,
+    "container_set_data": ContainerSetData,
+    "container_set_slot": ContainerSetSlot,
+    "merchant_offers": MerchantOffers,
+    "open_screen": OpenScreen,
+    "set_cursor_item": SetCursorItem,
+    "set_player_inventory": SetPlayerInventory,
+    "cooldown": Cooldown,
 }
 
 _SERVERBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
@@ -3050,6 +3614,15 @@ _SERVERBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
     "chat_command_signed": ChatCommandSigned,
     "chat_session_update": ChatSessionUpdate,
     "command_suggestion": CommandSuggestion,
+    # PART 5: клики и правки слотов
+    "container_button_click": ContainerButtonClick,
+    "container_click": ContainerClick,
+    "container_close": ContainerClose,
+    "container_slot_state_changed": ContainerSlotStateChanged,
+    "edit_book": EditBook,
+    "rename_item": RenameItem,
+    "set_creative_mode_slot": SetCreativeModeSlot,
+    "select_trade": SelectTrade,
 }
 
 
