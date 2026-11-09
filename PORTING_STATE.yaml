@@ -252,13 +252,16 @@ files:
   - rust: horizon-world/src/collision/block_collision.rs
     python: quadrix/world/collision/block_collision.py
     test: tests/world/collision/test_block_collision.py
-    status: pending
+    status: done
     lines_rust: ~600
+    lines_python: ~300
     depends_on: [horizon-world/src/registry.rs, horizon-core/src/geometry/mod.rs]
     assets:
       - .local/horizon-client-collision/cached-collision.nbt
       - .local/horizon-client-collision/block-registry.nbt
-    note: "Block collision shapes (VoxelShape per block state). Используется в move_entity sweep."
+    note: >
+      VoxelShape per block state. stone=full_cube, slab=half-box, stairs=multi-box,
+      air/torch=empty, uncached=fallback full_cube. 9 tests.
 
   - rust: horizon-world/src/collision/entity_collision.rs
     python: quadrix/world/collision/entity_collision.py
