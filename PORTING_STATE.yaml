@@ -52,14 +52,16 @@ files:
       floor_i32, clamp, next_up/next_down.
       ⚠️ Aabb.center() BROKEN (field instead of method) — fix later, does not block.
 
-  - rust: horizon-world/src/nbt.rs
+  - rust: horizon-world/src/nbt.rs (write_network / write_named)
     python: quadrix/world/nbt.py
     test: tests/world/test_nbt.py
-    status: done
-    lines_rust: ~1300
-    lines_python: ~600
+    status: pending
     depends_on: []
-    note: "read_nbt(data: bytes), write_nbt. Verified on movement-properties.nbt, block-registry.nbt."
+    note: >
+      ⚠️ ГИПОТЕЗА DeepSeek: write_network/write_named добавляет лишний байт
+      типа Compound в payload вложенных compound'ов. Проверить на реальном
+      round-trip write→read. Не блокирует сеть (buf.py имеет локальный
+      сетевой NBT-кодек). Чинить только если понадобится запись NBT в файл.
 
   - rust: horizon-world/src/registry.rs
     python: quadrix/world/registry.py
@@ -357,10 +359,17 @@ files:
   - rust: horizon-protocol/src/ids.rs
     python: quadrix/protocol/ids.py
     test: tests/protocol/test_ids.py
-    status: pending
+    status: done
     lines_rust: ~600
+    lines_python: ~700
     depends_on: []
-    note: "Packet ID enum (все пакеты). Таблица ID → name."
+    note: >
+      Packet ID таблицы для 26.3 + адаптеры 1.21.10 / 1.21.11 / 26.1.2 / 26.2
+      (adapter/v*.rs, не *_ids.rs — те ремапы реестров). name(), name_of(),
+      id_of(), вложенные handshake/status/login/configuration/play.
+      8 tests. Все 40 таблиц старых версий сверены с Rust программно (ALL OK).
+      ⚠️ login clientbound: 0 = login_disconnect, 2 = login_finished
+      (не login_start — ошибка в моём промпте, DeepSeek исправил по Rust).
 
   - rust: player_sync.rs
     python: quadrix/player_sync.py
