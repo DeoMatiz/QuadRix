@@ -459,10 +459,20 @@ files:
   - rust: horizon-protocol/src/connection.rs
     python: quadrix/protocol/connection.py
     test: tests/protocol/test_connection.py
-    status: pending
+    status: done
     lines_rust: ~800
+    lines_python: ~900
     depends_on: [horizon-protocol/src/buf.rs, horizon-protocol/src/crypto.rs]
-    note: "TCP connection, framing, state machine (handshake→status/login→config→play)."
+    note: >
+      ConnectionState (Handshaking/Status/Login/Configuration/Play) + next_state.
+      Connection/ClientConnection: read_packet/write_packet, framing (varint len +
+      id + payload), compression (threshold, Inflater, MAX_UNCOMPRESSED),
+      enable_encryption (AES/CFB8, до-расшифровка буфера), send_handshake /
+      send_status_request / send_ping / send_login_start / send_login_acknowledged /
+      send_finish_configuration, close()/shutdown() идемпотентны, set_read_timeout,
+      Counters, decode_packet, await_packet(expected, timeout).
+      connection_pair() на socket.socketpair() — in-memory аналог Rust Pipe::pair().
+      PROTOCOL_VERSION = 777 (pinned 26.3). 26 tests.
 
   # ==========================================================================
   # PHASE 7 — items / inventory
