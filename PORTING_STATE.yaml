@@ -373,16 +373,16 @@ files:
   - rust: horizon-protocol/src/packets/play.rs
     python: quadrix/protocol/packets/play.py
     test: tests/protocol/test_play.py
-    status: pending
+    status: done
     lines_rust: ~4000 (155 KB)
-    lines_python: ~600 (PART 1)
+    lines_python: ~6638 (PART 1-6)
     depends_on:
       - horizon-protocol/src/buf.rs
       - horizon-protocol/src/ids.rs
       - horizon-protocol/src/packets/configuration.rs
-    parts_done: [1, 2, 3, 4, 5]
+    parts_done: [1, 2, 3, 4, 5, 6]
     parts_total: 6
-    test_status: "70 passed (PART 1-5), protocol total 174 passed"
+    test_status: "80 passed (PART 1-6), protocol total 184 passed"
     note: >
       PART 1/6: PacketId framework. 8 tests.
       PART 2/6: movement/position/tick. 16 tests.
@@ -398,7 +398,18 @@ files:
       ⚠️ Rust: поля container/state (не window_id/state_id), Cooldown (не SetCooldown).
       ⚠️ Hashed (HashedStack, item.rs:1135) — самодостаточная wire-форма,
       items.rs не требует. Non-empty component patches → ProtocolError.
-      PART 6/6: chunk/world (~500 строк)
+      PART 6/6: chunk/world/light/border/time/weather/recipes и остаток play.rs.
+        Все 144 clientbound + 69 serverbound ID реализованы как @dataclass;
+        0 заглушек Unsupported. Форма чанка (ChunkData/LightData) остаётся
+        сырой: heightmaps — long-массивы, buffer — байты секций, light —
+        слои по 2048; в полноценный Chunk не разбирается.
+        SetChunkCacheRadius/SetSimulationDistance — отдельные подклассы
+        DistanceBase (один Rust-структ на два ID).
+        ID, не смоделированные packet_enum! (update_recipes, debug_*,
+        player_combat_*, custom_report_details, debug_subscription_request),
+        идут raw-passthrough (аналог Unknown). 14 новых тестов PART 6 +
+        test_play_rs_fully_implemented.
+
 
   - rust: player_sync.rs
     python: quadrix/player_sync.py

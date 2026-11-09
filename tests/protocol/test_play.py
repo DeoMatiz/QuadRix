@@ -105,6 +105,39 @@ from quadrix.protocol.packets.play import (
     TakeItemEntity,
     UpdateAttributes,
     VecDelta,
+    # PART 6
+    AcceptTeleportation,
+    AddTransientBlock,
+    AwardStats,
+    BlockChangedAck,
+    BlockDestruction,
+    BlockEntityData,
+    BlockEntityInfo,
+    BlockUpdate,
+    BossAction,
+    BossEvent,
+    ChangeDifficulty,
+    ChangeGameMode,
+    ChunkBatchFinished,
+    ChunkBatchReceived,
+    ChunkData,
+    ClearDialog,
+    Explode,
+    ExplosionParticle,
+    ForgetLevelChunk,
+    LevelChunkWithLight,
+    LevelEvent,
+    LightData,
+    Particle,
+    RecipeBookRemove,
+    RecipeBookSettings,
+    SectionBlocksUpdate,
+    SetBorderSize,
+    SetChunkCacheRadius,
+    SetSimulationDistance,
+    SignUpdate,
+    UseItem,
+    UpdateRecipes,
 )
 from quadrix.world.nbt import Tag, TagType
 
@@ -243,23 +276,20 @@ def test_id_tables_cover_every_id_from_ids_py():
     assert ServerboundPlayPacket is Serverbound
 
 
-def test_unimplemented_payload_raises_named_unsupported():
-    # PART 3 закрыл add_entity, поэтому берём пакет из ещё не портированной
-    # группы (статистика — не entity/player sync).
-    stats_id = id_of(
-        "award_stats", State.PLAY, Direction.CLIENTBOUND
-    )
+def test_part6_completes_play_rs():
+    # PART 6 закрыл остаток play.rs: статистика — уже не заглушка, а
+    # настоящий @dataclass с кодеком провода.
+    stats_id = id_of("award_stats", State.PLAY, Direction.CLIENTBOUND)
+    assert ID_TO_CLASS[stats_id] is AwardStats
 
-    with pytest.raises(Unsupported) as excinfo:
-        decode_clientbound(stats_id, Reader(b""))
+    # Ни один класс dispatch больше не поднимает Unsupported.
+    for cls in (
+        *ID_TO_CLASS.values(),
+        *SERVERBOUND_ID_TO_CLASS.values(),
+    ):
+        assert not getattr(cls, "_unsupported", False), cls.__name__
 
-    assert "play.rs PART 2+" in str(excinfo.value)
-    assert "award_stats" in str(excinfo.value)
-
-    # encode заглушки тоже не притворяется, что пакет реализован.
-    placeholder = ID_TO_CLASS[stats_id]()
-    with pytest.raises(Unsupported):
-        encode_clientbound(Writer(), placeholder)
+    assert issubclass(Unsupported, Exception)
 
 
 def test_unknown_and_trailing_bytes():
@@ -1769,4 +1799,231 @@ def test_part5_replaces_unsupported_stubs():
     for name, cls in expected_serverbound.items():
         packet_id = id_of(name, State.PLAY, Direction.SERVERBOUND)
         assert SERVERBOUND_ID_TO_CLASS[packet_id] is cls, name
+
+
+# ═════════════════════════════════════════════════════════════════════
+# PART 6 — мир, чанки, свет, границы, погода, рецепты и остаток
+# ═════════════════════════════════════════════════════════════════════
+
+
+def test_level_chunk_with_light_round_trip_raw_buffer():
+    # Буфер секций остаётся сырым: тут его не разбираем в полноценный Chunk.
+    layer = bytes([0xAB]) * 2048
+    entity = BlockEntityInfo(
+        packed_xz=3, y=64, kind=1, tag=compound(x=Tag(TagType.Int, int_val=7))
+    )
+    chunk = ChunkData(
+        heightmaps=[(1, [0, 0])],
+        buffer=b"\xDE\xAD\xBE\xEF",
+        block_entities=[entity],
+    )
+    light = LightData(
+        sky_mask=bytearray(b"\x01"),
+        block_mask=bytearray(b"\x02"),
+        empty_sky_mask=bytearray(),
+        empty_block_mask=bytearray(),
+        sky=[layer],
+        block=[layer, layer],
+    )
+    packet = LevelChunkWithLight(x=12, z=-7, chunk=chunk, light=light)
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "level_chunk_with_light", State.PLAY, Direction.CLIENTBOUND
+    )
+    # Сразу за id — два Int (x, z), затем сырой буфер чанка.
+    assert body[1:5] == (12).to_bytes(4, "big", signed=True)
+    assert body[5:9] == (-7).to_bytes(4, "big", signed=True)
+    assert b"\xDE\xAD\xBE\xEF" in body
+    assert packet.chunk.buffer == b"\xDE\xAD\xBE\xEF"
+    assert len(packet.light.sky[0]) == 2048
+
+
+def test_forget_level_chunk_and_block_update_round_trip():
+    forget = ForgetLevelChunk(pos=(5, -7))
+    update = BlockUpdate(pos=(1, 64, -3), state=42)
+
+    forget_id, _ = round_trip(Clientbound, forget)
+    update_id, update_body = round_trip(Clientbound, update)
+
+    assert forget_id == id_of(
+        "forget_level_chunk", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert forget_id != update_id
+    assert update_id == id_of("block_update", State.PLAY, Direction.CLIENTBOUND)
+    assert int.from_bytes(update_body[1:9], "big", signed=True) == (
+        pack_block_pos((1, 64, -3))
+    )
+    assert update_body[9] == 42
+    assert len(update_body) == 10
+
+
+def test_section_blocks_update_and_block_entity_data_round_trip():
+    section = SectionBlocksUpdate(
+        section=(2, -1, 3), changes=[1, 2, 300, 123456]
+    )
+    be_data = BlockEntityData(
+        pos=(10, 20, 30),
+        kind=7,
+        tag=compound(text=string('{"text":"Сундук"}')),
+    )
+
+    section_id, _ = round_trip(Clientbound, section)
+    be_id, _ = round_trip(Clientbound, be_data)
+
+    assert section_id == id_of(
+        "section_blocks_update", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert section.changes == [1, 2, 300, 123456]
+    assert be_id == id_of(
+        "block_entity_data", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert be_data.tag.compound_val["text"].str_val == '{"text":"Сундук"}'
+
+
+def test_level_event_and_block_destruction_round_trip():
+    event = LevelEvent(kind=2001, pos=(1, 2, 3), data=0, global_=True)
+    destruction = BlockDestruction(id=3, pos=(4, 5, 6), progress=7)
+
+    event_id, event_body = round_trip(Clientbound, event)
+    destruction_id, destruction_body = round_trip(Clientbound, destruction)
+
+    assert event_id == id_of("level_event", State.PLAY, Direction.CLIENTBOUND)
+    assert event_body[1:5] == (2001).to_bytes(4, "big", signed=True)
+    assert event_body[-1] == 1  # global_
+    assert destruction_id == id_of(
+        "block_destruction", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert destruction_body[1] == 3  # VarInt id
+    assert destruction_body[-1] == 7  # u8 progress
+
+
+def test_explosion_round_trip_with_sound_holder():
+    particle = Particle(id=0)
+    block_particle = ExplosionParticle(
+        particle=Particle(id=0), scaling=1.5, speed=0.5, weight=3
+    )
+    packet = Explode(
+        center=(1.0, 2.0, 3.0),
+        radius=4.0,
+        block_count=5,
+        knockback=(0.1, 0.2, 0.3),
+        particle=particle,
+        sound=(-1, ("minecraft:entity.generic.explode", None)),
+        block_particles=[block_particle],
+        play_sound=True,
+    )
+
+    packet_id, _ = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of("explode", State.PLAY, Direction.CLIENTBOUND)
+    assert packet.sound == (-1, ("minecraft:entity.generic.explode", None))
+    assert packet.block_particles[0].weight == 3
+    assert packet.play_sound is True
+
+
+def test_border_size_and_chunk_distances_round_trip():
+    border = SetBorderSize(size=29999984.0)
+    radius = SetChunkCacheRadius(distance=10)
+    simulation = SetSimulationDistance(distance=8)
+
+    border_id, border_body = round_trip(Clientbound, border)
+    radius_id, radius_body = round_trip(Clientbound, radius)
+    simulation_id, simulation_body = round_trip(Clientbound, simulation)
+
+    assert border_id == id_of(
+        "set_border_size", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert border_body[1:] == struct.pack(">d", 29999984.0)
+    assert radius_id == id_of(
+        "set_chunk_cache_radius", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert simulation_id == id_of(
+        "set_simulation_distance", State.PLAY, Direction.CLIENTBOUND
+    )
+    # Один Rust-структ Distance обслуживает два разных ID.
+    assert radius_id != simulation_id
+    assert radius_body == bytes([radius_id, 10])
+    assert simulation_body == bytes([simulation_id, 8])
+
+
+def test_recipe_book_packets_round_trip():
+    remove = RecipeBookRemove(ids=[1, 2, 300])
+    settings = RecipeBookSettings(
+        books=[(True, False), (False, True), (True, True), (False, False)]
+    )
+
+    remove_id, remove_body = round_trip(Clientbound, remove)
+    settings_id, settings_body = round_trip(Clientbound, settings)
+
+    assert remove_id == id_of(
+        "recipe_book_remove", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert remove_body[1] == 3  # число id
+    assert settings_id == id_of(
+        "recipe_book_settings", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert settings_body[1:] == bytes([1, 0, 0, 1, 1, 1, 0, 0])
+
+
+def test_serverbound_part6_round_trip():
+    teleport = AcceptTeleportation(
+        id=9, x=1.0, y=2.0, z=3.0, yaw=90.0, pitch=-45.0
+    )
+    mode = ChangeGameMode(mode=1)
+    batch = ChunkBatchReceived(chunks_per_tick=8.5)
+    sign = SignUpdate(pos=(1, 2, 3), lines=["a", "b", "c", "d"], front=True)
+    use = UseItem(hand=0, sequence=7, yaw=0.0, pitch=0.0)
+
+    teleport_id, _ = round_trip(Serverbound, teleport)
+    mode_id, mode_body = round_trip(Serverbound, mode)
+    batch_id, _ = round_trip(Serverbound, batch)
+    sign_id, _ = round_trip(Serverbound, sign)
+    use_id, _ = round_trip(Serverbound, use)
+
+    assert teleport_id == id_of(
+        "accept_teleportation", State.PLAY, Direction.SERVERBOUND
+    )
+    assert teleport.yaw == 90.0
+    assert mode_id == id_of("change_game_mode", State.PLAY, Direction.SERVERBOUND)
+    assert mode_body == bytes([mode_id, 1])
+    assert batch_id == id_of(
+        "chunk_batch_received", State.PLAY, Direction.SERVERBOUND
+    )
+    assert sign.lines == ["a", "b", "c", "d"]
+    assert use.sequence == 7
+
+
+def test_unmodeled_ids_pass_through_raw():
+    # update_recipes Rust не моделирует: payload идёт как есть (как Unknown).
+    recipe_id = id_of("update_recipes", State.PLAY, Direction.CLIENTBOUND)
+
+    packet = Clientbound.decode(recipe_id, b"\x01\x02\x03")
+    assert isinstance(packet, UpdateRecipes)
+    assert packet.payload == b"\x01\x02\x03"
+
+    _, body = round_trip(Clientbound, packet)
+    expected = Writer()
+    expected.varint(recipe_id)
+    expected.bytes(b"\x01\x02\x03")
+    assert body == bytes(expected.data)
+
+
+def test_play_rs_fully_implemented():
+    # Ни один смоделированный Rust ID не остался заглушкой Unsupported.
+    for packet_id, cls in ID_TO_CLASS.items():
+        assert not getattr(cls, "_unsupported", False), (
+            packet_id,
+            cls.__name__,
+        )
+    for packet_id, cls in SERVERBOUND_ID_TO_CLASS.items():
+        assert not getattr(cls, "_unsupported", False), (
+            packet_id,
+            cls.__name__,
+        )
+
+    # Плюс таблицы dispatch покрывают все ID из ids.py.
+    assert len(ID_TO_CLASS) == len(ids.play.clientbound.NAMES)
+    assert len(SERVERBOUND_ID_TO_CLASS) == len(ids.play.serverbound.NAMES)
 

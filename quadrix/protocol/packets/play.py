@@ -43,16 +43,19 @@ from typing import Dict, List as TypingList, Optional, Tuple, Type
 
 from quadrix.protocol import ids
 from quadrix.protocol.buf import (
+    BitSet,
     Bool,
     Byte,
     Bytes,
     BytesN,
+    ChunkPos,
     Double,
     Float,
     Ident,
     Int,
     List,
     Long,
+    Longs,
     LpVec3,
     Nbt,
     Opt,
@@ -60,6 +63,7 @@ from quadrix.protocol.buf import (
     Pos,
     ProtocolError,
     Reader,
+    SectionPos,
     Short,
     Str,
     StrN,
@@ -71,13 +75,31 @@ from quadrix.protocol.buf import (
     Writer,
 )
 from quadrix.protocol.ids import Direction, State, id_of
-from quadrix.protocol.packets.configuration import Disconnect, KeepAlive
+from quadrix.protocol.packets.configuration import (
+    ClearDialog,
+    ClientInformation,
+    CookieRequest,
+    CookieResponse,
+    CustomClickAction,
+    CustomPayload,
+    Disconnect,
+    KeepAlive,
+    Ping as ConfigurationPing,
+    ResourcePackPop,
+    ResourcePackPush,
+    ResourcePackResponse,
+    ServerLinks,
+    StoreCookie,
+    Transfer,
+    UpdateTags,
+)
 from quadrix.protocol.packets.handshake import (
     Empty,
     Unknown,
     _Packet,
     _PacketSet,
 )
+from quadrix.protocol.packets.status import Ping as StatusPing
 from quadrix.world.nbt import Tag, TagType
 
 __all__ = [
@@ -296,8 +318,42 @@ def _unsupported_packet(packet_name: str) -> Type[_Packet]:
                 f"Заглушка PART 1 для {packet_name}: настоящий payload "
                 f"появится в PART 2+."
             ),
+            "_unsupported": True,
             "read": classmethod(read),
             "write": write,
+        },
+    )
+
+
+@dataclass
+class _RawPassthrough(_Packet):
+    """ID, который Rust не моделирует: payload пишется/читается как есть.
+
+    packet_enum! в play.rs превращает такие id в ``Unknown`` с сырым
+    payload. Здесь для каждого имени создаётся отдельный подкласс
+    (ID не должны схлопываться), а ``read`` забирает весь остаток.
+    """
+
+    payload: bytes
+
+    @classmethod
+    def read(cls, r: Reader) -> "_RawPassthrough":
+        return cls(bytes(r.rest()))
+
+    def write(self, w: Writer) -> None:
+        w.bytes(self.payload)
+
+
+def _raw_packet(packet_name: str) -> Type[_Packet]:
+    """Отдельный raw-passthrough подкласс для одного id (как Unknown)."""
+    return type(
+        _variant_name(packet_name),
+        (_RawPassthrough,),
+        {
+            "__doc__": (
+                f"ID {packet_name}: Rust не моделирует payload, байты "
+                f"проходят как есть (аналог Unknown)."
+            ),
         },
     )
 
@@ -3513,6 +3569,2729 @@ class SelectTrade(_Packet):
         VarInt.write(self.item, w)
 
 
+# ── PART 6: мир, чанки, свет, границы, погода, рецепты и остаток ─────
+#
+# Источник — play.rs (packet! + packet_enum!), chunk.rs (ChunkData /
+# LightData / Paletted / Layers), recipes.rs (RecipeBook*) и adapter/ids.rs
+# (переадресация id ещё не портирована, поэтому item/component/
+# slot_display/sound_event — тождественные отображения).
+#
+# Форма чанка на проводе сохраняется сырой: heightmaps как long-массивы,
+# buffer — необработанные байты секций, light — байтовые слои по 2048.
+# В полноценный Chunk это НЕ разбирается (это делает mesher клиента).
+
+# ---- общие структуры (play.rs:27-58) ---------------------------------
+
+
+@dataclass
+class GlobalPos(_Packet):
+    """GlobalPos: измерение (Identifier) и позиция блока."""
+
+    dimension: str
+    pos: Tuple[int, int, int]
+
+    @classmethod
+    def read(cls, r: Reader) -> "GlobalPos":
+        return cls(Ident.read(r), Pos.read(r))
+
+    def write(self, w: Writer) -> None:
+        Ident.write(self.dimension, w)
+        Pos.write(self.pos, w)
+
+
+@dataclass
+class SpawnInfo(_Packet):
+    """CommonPlayerSpawnInfo (play.rs:33)."""
+
+    dimension_type: int
+    dimension: str
+    seed: int
+    game_type: int
+    previous_game_type: Optional[int]
+    debug: bool
+    flat: bool
+    last_death: Optional[GlobalPos]
+    portal_cooldown: int
+    sea_level: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SpawnInfo":
+        return cls(
+            VarInt.read(r),
+            Ident.read(r),
+            Long.read(r),
+            VarInt.read(r),
+            OptVarInt.read(r),
+            Bool.read(r),
+            Bool.read(r),
+            Opt(GlobalPos).read(r),
+            VarInt.read(r),
+            VarInt.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.dimension_type, w)
+        Ident.write(self.dimension, w)
+        Long.write(self.seed, w)
+        VarInt.write(self.game_type, w)
+        OptVarInt.write(self.previous_game_type, w)
+        Bool.write(self.debug, w)
+        Bool.write(self.flat, w)
+        Opt(GlobalPos).write(self.last_death, w)
+        VarInt.write(self.portal_cooldown, w)
+        VarInt.write(self.sea_level, w)
+
+
+# ---- общие кодеки PART 6 ---------------------------------------------
+
+
+class _StatList:
+    """StatList (play.rs:1827): (тип, значение, счётчик) по сети."""
+
+    @classmethod
+    def read(cls, r: Reader) -> list[Tuple[int, int, int]]:
+        n = r.count(r.remaining())
+        return [(r.varint(), r.varint(), r.varint()) for _ in range(n)]
+
+    @classmethod
+    def write(cls, v: list[Tuple[int, int, int]], w: Writer) -> None:
+        w.varint(len(v))
+        for a, b, c in v:
+            w.varint(a)
+            w.varint(b)
+            w.varint(c)
+
+
+class _SoundHolder:
+    """SoundHolder (play.rs:903): id реестра, иначе location + Opt(range)."""
+
+    @classmethod
+    def read(cls, r: Reader) -> Tuple[int, Optional[Tuple[str, Optional[float]]]]:
+        ident = r.varint()
+        if ident != 0:
+            return (ident - 1, None)
+        location = r.string(32767)
+        return (-1, (location, r.f32() if r.bool() else None))
+
+    @classmethod
+    def write(
+        cls,
+        v: Tuple[int, Optional[Tuple[str, Optional[float]]]],
+        w: Writer,
+    ) -> None:
+        ident, direct = v
+        if direct is None:
+            w.varint(ident + 1)
+            return
+        w.varint(0)
+        w.string(direct[0])
+        Opt(Float).write(direct[1], w)
+
+
+class _Equipment:
+    """Equipment (play.rs:861): пары (ordinal, стек) с битом продолжения."""
+
+    @classmethod
+    def read(cls, r: Reader) -> list[Tuple[int, Optional[ItemStack]]]:
+        out: list[Tuple[int, Optional[ItemStack]]] = []
+        while True:
+            slot = r.u8()
+            out.append((slot & 127, _Slot.read(r)))
+            if slot & 128 == 0:
+                return out
+
+    @classmethod
+    def write(cls, v: list[Tuple[int, Optional[ItemStack]]], w: Writer) -> None:
+        for i, (slot, stack) in enumerate(v):
+            w.u8((slot | 128) if i + 1 < len(v) else slot)
+            _Slot.write(stack, w)
+
+
+@dataclass
+class MapDecoration(_Packet):
+    """MapDecoration (play.rs:398): holder, позиция, поворот, имя."""
+
+    kind: int
+    x: int
+    y: int
+    rot: int
+    name: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "MapDecoration":
+        return cls(
+            VarInt.read(r),
+            Byte.read(r),
+            Byte.read(r),
+            Byte.read(r),
+            Opt(Nbt).read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.kind, w)
+        Byte.write(self.x, w)
+        Byte.write(self.y, w)
+        Byte.write(self.rot, w)
+        Opt(Nbt).write(self.name, w)
+
+
+@dataclass(frozen=True)
+class MapPatch:
+    """MapItemSavedData.MapPatch (play.rs:409): ширина 0 — пусто."""
+
+    start_x: int
+    start_y: int
+    width: int
+    height: int
+    colors: bytes
+
+
+class _MapPatchOpt:
+    """MapPatchOpt (play.rs:416): Option<MapPatch> как в Rust."""
+
+    @classmethod
+    def read(cls, r: Reader) -> Optional[MapPatch]:
+        width = r.u8()
+        if width == 0:
+            return None
+        height = r.u8()
+        start_x = r.u8()
+        start_y = r.u8()
+        colors = bytes(r.bytes(r.count(r.remaining())))
+        return MapPatch(start_x, start_y, width, height, colors)
+
+    @classmethod
+    def write(cls, v: Optional[MapPatch], w: Writer) -> None:
+        if v is None:
+            w.u8(0)
+            return
+        w.u8(v.width)
+        w.u8(v.height)
+        w.u8(v.start_x)
+        w.u8(v.start_y)
+        w.varint(len(v.colors))
+        w.bytes(v.colors)
+
+
+@dataclass
+class BossAction:
+    """BossEvent.Action (play.rs:1847): операция (0..5) и её поля."""
+
+    op: int
+    name: object = None
+    progress: float = 0.0
+    color: int = 0
+    overlay: int = 0
+    darken: bool = False
+    music: bool = False
+    fog: bool = False
+
+
+def _boss_flags(darken: bool, music: bool, fog: bool) -> int:
+    return int(darken) | (int(music) << 1) | (int(fog) << 2)
+
+
+def _split_flags(flags: int) -> Tuple[bool, bool, bool]:
+    return (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0)
+
+
+@dataclass
+class BossEvent(_Packet):
+    """ClientboundBossEventPacket (play.rs:1878)."""
+
+    id: int
+    action: BossAction
+
+    @classmethod
+    def read(cls, r: Reader) -> "BossEvent":
+        boss_id = r.uuid()
+        op = r.varint()
+        if op == 0:
+            action = BossAction(
+                0,
+                name=Nbt.read(r),
+                progress=Float.read(r),
+                color=VarInt.read(r),
+                overlay=VarInt.read(r),
+            )
+            action.darken, action.music, action.fog = _split_flags(r.u8())
+        elif op == 1:
+            action = BossAction(1)
+        elif op == 2:
+            action = BossAction(2, progress=Float.read(r))
+        elif op == 3:
+            action = BossAction(3, name=Nbt.read(r))
+        elif op == 4:
+            action = BossAction(4, color=VarInt.read(r), overlay=VarInt.read(r))
+        elif op == 5:
+            action = BossAction(5)
+            action.darken, action.music, action.fog = _split_flags(r.u8())
+        else:
+            raise ProtocolError(f"[QuadRix] unknown boss event operation {op}")
+        return cls(boss_id, action)
+
+    def write(self, w: Writer) -> None:
+        Uuid.write(self.id, w)
+        action = self.action
+        w.varint(action.op)
+        if action.op == 0:
+            Nbt.write(action.name, w)
+            w.f32(action.progress)
+            w.varint(action.color)
+            w.varint(action.overlay)
+            w.u8(_boss_flags(action.darken, action.music, action.fog))
+        elif action.op == 2:
+            w.f32(action.progress)
+        elif action.op == 3:
+            Nbt.write(action.name, w)
+        elif action.op == 4:
+            w.varint(action.color)
+            w.varint(action.overlay)
+        elif action.op == 5:
+            w.u8(_boss_flags(action.darken, action.music, action.fog))
+
+
+@dataclass(frozen=True)
+class DialogHolder:
+    """Holder<Dialog> (play.rs:253): запись реестра или сам диалог."""
+
+    registry: Optional[int] = None
+    direct: object = None
+
+    @classmethod
+    def read(cls, r: Reader) -> "DialogHolder":
+        ident = r.varint()
+        if ident == 0:
+            return cls(None, Nbt.read(r))
+        return cls(ident - 1, None)
+
+    def write(self, w: Writer) -> None:
+        if self.registry is not None:
+            w.varint(self.registry + 1)
+        else:
+            w.varint(0)
+            Nbt.write(self.direct, w)
+
+
+def _read_sign_side(r: Reader) -> bool:
+    """SignTextSlot: VarInt 1 — front, любой другой id — back."""
+    return r.varint() == 1
+
+
+def _write_sign_side(v: bool, w: Writer) -> None:
+    w.varint(1 if v else 0)
+
+
+def _read_sign_lines(r: Reader) -> list[str]:
+    """SignLines: четыре строки без счётчика (по 384 символа)."""
+    return [r.string(384) for _ in range(4)]
+
+
+def _write_sign_lines(v: list[str], w: Writer) -> None:
+    for line in v:
+        w.string(line)
+
+
+def _read_fixed3(r: Reader) -> bytes:
+    return bytes(r.bytes(3))
+
+
+@dataclass
+class TestInstanceData(_Packet):
+    """TestInstanceBlockEntity.Data (play.rs:2403)."""
+
+    test: Optional[str]
+    size: Tuple[int, int, int]
+    rotation: int
+    ignore_entities: bool
+    status: int
+    error_message: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "TestInstanceData":
+        return cls(
+            Opt(Ident).read(r),
+            VarVec3i.read(r),
+            VarInt.read(r),
+            Bool.read(r),
+            VarInt.read(r),
+            Opt(Nbt).read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Opt(Ident).write(self.test, w)
+        VarVec3i.write(self.size, w)
+        VarInt.write(self.rotation, w)
+        Bool.write(self.ignore_entities, w)
+        VarInt.write(self.status, w)
+        Opt(Nbt).write(self.error_message, w)
+
+
+# ---- чанки и свет (chunk.rs) -----------------------------------------
+
+
+@dataclass
+class BlockEntityInfo(_Packet):
+    """ChunkData.BlockEntityInfo (chunk.rs:270)."""
+
+    packed_xz: int
+    y: int
+    kind: int
+    tag: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "BlockEntityInfo":
+        return cls(Byte.read(r), Short.read(r), VarInt.read(r), Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Byte.write(self.packed_xz, w)
+        Short.write(self.y, w)
+        VarInt.write(self.kind, w)
+        Nbt.write(self.tag, w)
+
+
+class _Heightmaps:
+    """Heightmaps (chunk.rs:278): (тип, long-массив), не больше 16."""
+
+    @classmethod
+    def read(cls, r: Reader) -> list[Tuple[int, list[int]]]:
+        n = r.count(16)
+        return [(r.varint(), r.long_array()) for _ in range(n)]
+
+    @classmethod
+    def write(cls, v: list[Tuple[int, list[int]]], w: Writer) -> None:
+        w.varint(len(v))
+        for kind, data in v:
+            w.varint(kind)
+            Longs.write(data, w)
+
+
+@dataclass
+class ChunkData(_Packet):
+    """ClientboundLevelChunkPacketData (chunk.rs:294).
+
+    buffer хранится сырым: секции декодируются mesher'ом, а не здесь.
+    """
+
+    heightmaps: list[Tuple[int, list[int]]]
+    buffer: bytes
+    block_entities: list[BlockEntityInfo]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChunkData":
+        heightmaps = _Heightmaps.read(r)
+        buffer = bytes(Bytes.read(r))
+        n = r.count(r.remaining())
+        block_entities = [BlockEntityInfo.read(r) for _ in range(n)]
+        return cls(heightmaps, buffer, block_entities)
+
+    def write(self, w: Writer) -> None:
+        _Heightmaps.write(self.heightmaps, w)
+        Bytes.write(self.buffer, w)
+        w.varint(len(self.block_entities))
+        for entity in self.block_entities:
+            entity.write(w)
+
+
+class _Layers:
+    """Layers (chunk.rs:318): слои по 2048 байт, иначе отказ."""
+
+    @classmethod
+    def read(cls, r: Reader) -> list[bytes]:
+        n = r.count(r.remaining())
+        out: list[bytes] = []
+        for _ in range(n):
+            layer = bytes(r.byte_array(2048))
+            if len(layer) != 2048:
+                raise ProtocolError(
+                    f"[QuadRix] DataLayer should be 2048 bytes not: "
+                    f"{len(layer)}"
+                )
+            out.append(layer)
+        return out
+
+    @classmethod
+    def write(cls, v: list[bytes], w: Writer) -> None:
+        w.varint(len(v))
+        for layer in v:
+            w.byte_array(layer)
+
+
+@dataclass
+class LightData(_Packet):
+    """ClientboundLightUpdatePacketData (chunk.rs:346)."""
+
+    sky_mask: bytearray
+    block_mask: bytearray
+    empty_sky_mask: bytearray
+    empty_block_mask: bytearray
+    sky: list[bytes]
+    block: list[bytes]
+
+    @classmethod
+    def read(cls, r: Reader) -> "LightData":
+        return cls(
+            BitSet.read(r),
+            BitSet.read(r),
+            BitSet.read(r),
+            BitSet.read(r),
+            _Layers.read(r),
+            _Layers.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        BitSet.write(self.sky_mask, w)
+        BitSet.write(self.block_mask, w)
+        BitSet.write(self.empty_sky_mask, w)
+        BitSet.write(self.empty_block_mask, w)
+        _Layers.write(self.sky, w)
+        _Layers.write(self.block, w)
+
+
+@dataclass
+class ChunkBiomeData(_Packet):
+    """ClientboundChunksBiomesPacket.ChunkBiomeData (play.rs:334)."""
+
+    pos: Tuple[int, int]
+    buffer: bytes
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChunkBiomeData":
+        return cls(ChunkPos.read(r), bytes(BytesN(2097152).read(r)))
+
+    def write(self, w: Writer) -> None:
+        ChunkPos.write(self.pos, w)
+        BytesN(2097152).write(self.buffer, w)
+
+
+@dataclass
+class ChunksBiomes(_Packet):
+    """ClientboundChunksBiomesPacket (play.rs:362)."""
+
+    chunks: list[ChunkBiomeData]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChunksBiomes":
+        return cls(List(ChunkBiomeData).read(r))
+
+    def write(self, w: Writer) -> None:
+        List(ChunkBiomeData).write(self.chunks, w)
+
+
+@dataclass
+class LevelChunkWithLight(_Packet):
+    """ClientboundLevelChunkWithLightPacket (play.rs:378)."""
+
+    x: int
+    z: int
+    chunk: ChunkData
+    light: LightData
+
+    @classmethod
+    def read(cls, r: Reader) -> "LevelChunkWithLight":
+        return cls(Int.read(r), Int.read(r), ChunkData.read(r), LightData.read(r))
+
+    def write(self, w: Writer) -> None:
+        Int.write(self.x, w)
+        Int.write(self.z, w)
+        self.chunk.write(w)
+        self.light.write(w)
+
+
+@dataclass
+class LightUpdate(_Packet):
+    """ClientboundLightUpdatePacket (play.rs:380)."""
+
+    x: int
+    z: int
+    light: LightData
+
+    @classmethod
+    def read(cls, r: Reader) -> "LightUpdate":
+        return cls(VarInt.read(r), VarInt.read(r), LightData.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.x, w)
+        VarInt.write(self.z, w)
+        self.light.write(w)
+
+
+@dataclass
+class ForgetLevelChunk(_Packet):
+    """ClientboundForgetLevelChunkPacket (play.rs:330)."""
+
+    pos: Tuple[int, int]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ForgetLevelChunk":
+        return cls(ChunkPos.read(r))
+
+    def write(self, w: Writer) -> None:
+        ChunkPos.write(self.pos, w)
+
+
+# ---- clientbound: блоки, время и события ------------------------------
+
+
+@dataclass
+class BlockChangedAck(_Packet):
+    """ClientboundBlockChangedAckPacket (play.rs:74)."""
+
+    sequence: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "BlockChangedAck":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.sequence, w)
+
+
+@dataclass
+class BlockDestruction(_Packet):
+    """ClientboundBlockDestructionPacket (play.rs:81)."""
+
+    id: int
+    pos: Tuple[int, int, int]
+    progress: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "BlockDestruction":
+        return cls(VarInt.read(r), Pos.read(r), UByte.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        Pos.write(self.pos, w)
+        UByte.write(self.progress, w)
+
+
+@dataclass
+class BlockEntityData(_Packet):
+    """ClientboundBlockEntityDataPacket (play.rs:82)."""
+
+    pos: Tuple[int, int, int]
+    kind: int
+    tag: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "BlockEntityData":
+        return cls(Pos.read(r), VarInt.read(r), Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        VarInt.write(self.kind, w)
+        Nbt.write(self.tag, w)
+
+
+@dataclass
+class BlockUpdate(_Packet):
+    """ClientboundBlockUpdatePacket (play.rs:83)."""
+
+    pos: Tuple[int, int, int]
+    state: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "BlockUpdate":
+        return cls(Pos.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        VarInt.write(self.state, w)
+
+
+@dataclass
+class AddTransientBlock(_Packet):
+    """ClientboundAddTransientBlockPacket (play.rs:86)."""
+
+    pos: Tuple[int, int, int]
+    state: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "AddTransientBlock":
+        return cls(Pos.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        VarInt.write(self.state, w)
+
+
+@dataclass
+class BlockEvent(_Packet):
+    """ClientboundBlockEventPacket (play.rs:952)."""
+
+    pos: Tuple[int, int, int]
+    b0: int
+    b1: int
+    block: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "BlockEvent":
+        return cls(Pos.read(r), UByte.read(r), UByte.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        UByte.write(self.b0, w)
+        UByte.write(self.b1, w)
+        VarInt.write(self.block, w)
+
+
+@dataclass
+class LevelEvent(_Packet):
+    """ClientboundLevelEventPacket (play.rs:379)."""
+
+    kind: int
+    pos: Tuple[int, int, int]
+    data: int
+    global_: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "LevelEvent":
+        return cls(Int.read(r), Pos.read(r), Int.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        Int.write(self.kind, w)
+        Pos.write(self.pos, w)
+        Int.write(self.data, w)
+        Bool.write(self.global_, w)
+
+
+@dataclass
+class SectionBlocksUpdate(_Packet):
+    """ClientboundSectionBlocksUpdatePacket (play.rs:811).
+
+    Каждое изменение: state << 12 | x << 8 | z << 4 | y внутри секции.
+    """
+
+    section: Tuple[int, int, int]
+    changes: list[int]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SectionBlocksUpdate":
+        return cls(SectionPos.read(r), List(VarLong).read(r))
+
+    def write(self, w: Writer) -> None:
+        SectionPos.write(self.section, w)
+        List(VarLong).write(self.changes, w)
+
+
+@dataclass
+class ChangeDifficulty(_Packet):
+    """ClientboundChangeDifficultyPacket (play.rs:87)."""
+
+    difficulty: int
+    locked: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChangeDifficulty":
+        return cls(VarInt.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.difficulty, w)
+        Bool.write(self.locked, w)
+
+
+@dataclass
+class GameRuleEntry(_Packet):
+    """GameRuleEntry (play.rs:89): имя правила и его значение."""
+
+    name: str
+    value: str
+
+    @classmethod
+    def read(cls, r: Reader) -> "GameRuleEntry":
+        return cls(Ident.read(r), Str.read(r))
+
+    def write(self, w: Writer) -> None:
+        Ident.write(self.name, w)
+        Str.write(self.value, w)
+
+
+@dataclass
+class GameRuleValues(_Packet):
+    """ClientboundGameRuleValuesPacket (play.rs:90)."""
+
+    entries: list[GameRuleEntry]
+
+    @classmethod
+    def read(cls, r: Reader) -> "GameRuleValues":
+        return cls(List(GameRuleEntry).read(r))
+
+    def write(self, w: Writer) -> None:
+        List(GameRuleEntry).write(self.entries, w)
+
+
+@dataclass
+class ChunkBatchFinished(_Packet):
+    """ClientboundChunkBatchFinishedPacket (play.rs:91)."""
+
+    size: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChunkBatchFinished":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.size, w)
+
+
+class ChunkBatchStart(Empty):
+    """ClientboundChunkBatchStartPacket (пустой payload)."""
+
+
+class LowDiskSpaceWarning(Empty):
+    """ClientboundLowDiskSpaceWarningPacket (пустой payload)."""
+
+
+class StartConfiguration(Empty):
+    """ClientboundStartConfigurationPacket (пустой payload)."""
+
+
+@dataclass
+class DistanceBase(_Packet):
+    """Distance (play.rs:823): один VarInt. Используется двумя ID."""
+
+    distance: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "DistanceBase":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.distance, w)
+
+
+@dataclass
+class SetChunkCacheRadius(DistanceBase):
+    """ClientboundSetChunkCacheRadiusPacket (Distance, play.rs:823)."""
+
+
+@dataclass
+class SetSimulationDistance(DistanceBase):
+    """ClientboundSetSimulationDistancePacket (Distance, play.rs:823)."""
+
+
+@dataclass
+class SetDefaultSpawnPosition(_Packet):
+    """ClientboundSetDefaultSpawnPositionPacket (play.rs:825)."""
+
+    pos: GlobalPos
+    yaw: float
+    pitch: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetDefaultSpawnPosition":
+        return cls(GlobalPos.read(r), Float.read(r), Float.read(r))
+
+    def write(self, w: Writer) -> None:
+        self.pos.write(w)
+        Float.write(self.yaw, w)
+        Float.write(self.pitch, w)
+
+
+@dataclass
+class SetDisplayObjective(_Packet):
+    """ClientboundSetDisplayObjectivePacket (play.rs:990)."""
+
+    slot: int
+    objective: str
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetDisplayObjective":
+        return cls(VarInt.read(r), Str.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.slot, w)
+        Str.write(self.objective, w)
+
+
+@dataclass
+class SetExperience(_Packet):
+    """ClientboundSetExperiencePacket (play.rs:881)."""
+
+    progress: float
+    level: int
+    total: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetExperience":
+        return cls(Float.read(r), VarInt.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Float.write(self.progress, w)
+        VarInt.write(self.level, w)
+        VarInt.write(self.total, w)
+
+
+@dataclass
+class UpdateMobEffect(_Packet):
+    """ClientboundUpdateMobEffectPacket (play.rs:1267)."""
+
+    id: int
+    effect: int
+    amplifier: int
+    duration: int
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "UpdateMobEffect":
+        return cls(
+            VarInt.read(r), VarInt.read(r), VarInt.read(r), VarInt.read(r), Byte.read(r)
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        VarInt.write(self.effect, w)
+        VarInt.write(self.amplifier, w)
+        VarInt.write(self.duration, w)
+        Byte.write(self.flags, w)
+
+
+@dataclass
+class RemoveMobEffect(_Packet):
+    """ClientboundRemoveMobEffectPacket (play.rs:1269)."""
+
+    id: int
+    effect: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "RemoveMobEffect":
+        return cls(VarInt.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        VarInt.write(self.effect, w)
+
+
+@dataclass
+class InitializeBorder(_Packet):
+    """ClientboundInitializeBorderPacket (play.rs:955)."""
+
+    center_x: float
+    center_z: float
+    old_size: float
+    new_size: float
+    lerp_time: int
+    absolute_max_size: int
+    warning_blocks: int
+    warning_time: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "InitializeBorder":
+        return cls(
+            Double.read(r),
+            Double.read(r),
+            Double.read(r),
+            Double.read(r),
+            VarLong.read(r),
+            VarInt.read(r),
+            VarInt.read(r),
+            VarInt.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Double.write(self.center_x, w)
+        Double.write(self.center_z, w)
+        Double.write(self.old_size, w)
+        Double.write(self.new_size, w)
+        VarLong.write(self.lerp_time, w)
+        VarInt.write(self.absolute_max_size, w)
+        VarInt.write(self.warning_blocks, w)
+        VarInt.write(self.warning_time, w)
+
+
+@dataclass
+class SetBorderCenter(_Packet):
+    """ClientboundSetBorderCenterPacket (play.rs:969)."""
+
+    x: float
+    z: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetBorderCenter":
+        return cls(Double.read(r), Double.read(r))
+
+    def write(self, w: Writer) -> None:
+        Double.write(self.x, w)
+        Double.write(self.z, w)
+
+
+@dataclass
+class SetBorderLerpSize(_Packet):
+    """ClientboundSetBorderLerpSizePacket (play.rs:973)."""
+
+    old_size: float
+    new_size: float
+    lerp_time: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetBorderLerpSize":
+        return cls(Double.read(r), Double.read(r), VarLong.read(r))
+
+    def write(self, w: Writer) -> None:
+        Double.write(self.old_size, w)
+        Double.write(self.new_size, w)
+        VarLong.write(self.lerp_time, w)
+
+
+@dataclass
+class SetBorderSize(_Packet):
+    """ClientboundSetBorderSizePacket (play.rs:977)."""
+
+    size: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetBorderSize":
+        return cls(Double.read(r))
+
+    def write(self, w: Writer) -> None:
+        Double.write(self.size, w)
+
+
+@dataclass
+class SetBorderWarningDelay(_Packet):
+    """ClientboundSetBorderWarningDelayPacket (play.rs:981)."""
+
+    delay: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetBorderWarningDelay":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.delay, w)
+
+
+@dataclass
+class SetBorderWarningDistance(_Packet):
+    """ClientboundSetBorderWarningDistancePacket (play.rs:985)."""
+
+    blocks: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetBorderWarningDistance":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.blocks, w)
+
+
+# ---- clientbound: звук, частицы, вспышка ------------------------------
+
+
+@dataclass
+class Sound(_Packet):
+    """ClientboundSoundPacket (play.rs:925)."""
+
+    sound: Tuple[int, Optional[Tuple[str, Optional[float]]]]
+    source: int
+    x: int
+    y: int
+    z: int
+    volume: float
+    pitch: float
+    seed: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "Sound":
+        return cls(
+            _SoundHolder.read(r),
+            VarInt.read(r),
+            Int.read(r),
+            Int.read(r),
+            Int.read(r),
+            Float.read(r),
+            Float.read(r),
+            Long.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        _SoundHolder.write(self.sound, w)
+        VarInt.write(self.source, w)
+        Int.write(self.x, w)
+        Int.write(self.y, w)
+        Int.write(self.z, w)
+        Float.write(self.volume, w)
+        Float.write(self.pitch, w)
+        Long.write(self.seed, w)
+
+
+@dataclass
+class SoundEntity(_Packet):
+    """ClientboundSoundEntityPacket (play.rs:1293)."""
+
+    sound: Tuple[int, Optional[Tuple[str, Optional[float]]]]
+    source: int
+    id: int
+    volume: float
+    pitch: float
+    seed: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SoundEntity":
+        return cls(
+            _SoundHolder.read(r),
+            VarInt.read(r),
+            VarInt.read(r),
+            Float.read(r),
+            Float.read(r),
+            Long.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        _SoundHolder.write(self.sound, w)
+        VarInt.write(self.source, w)
+        VarInt.write(self.id, w)
+        Float.write(self.volume, w)
+        Float.write(self.pitch, w)
+        Long.write(self.seed, w)
+
+
+@dataclass
+class StopSound(_Packet):
+    """ClientboundStopSoundPacket (play.rs:1304): бит 0 — source, бит 1 — id."""
+
+    source: Optional[int]
+    sound: Optional[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "StopSound":
+        flags = r.u8()
+        source = None
+        if flags & 1 != 0:
+            value = r.varint()
+            if not 0 <= value < 11:
+                raise ProtocolError("[QuadRix] invalid sound source")
+            source = value
+        sound = r.string(32767) if flags & 2 != 0 else None
+        return cls(source, sound)
+
+    def write(self, w: Writer) -> None:
+        flags = int(self.source is not None) | (int(self.sound is not None) << 1)
+        w.u8(flags)
+        if self.source is not None:
+            w.varint(self.source)
+        if self.sound is not None:
+            w.string(self.sound)
+
+
+@dataclass
+class LevelParticles(_Packet):
+    """ClientboundLevelParticlesPacket (play.rs:1081)."""
+
+    particle: Particle
+    override_limiter: bool
+    always_show: bool
+    pos: Tuple[float, float, float]
+    dist: Tuple[float, float, float]
+    max_speed: Tuple[float, float, float]
+    count: int
+    randomization: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "LevelParticles":
+        particle = Particle.read(r)
+        override_limiter = Bool.read(r)
+        always_show = Bool.read(r)
+        pos = Vec3d.read(r)
+        dist = (Float.read(r), Float.read(r), Float.read(r))
+        max_speed = (Float.read(r), Float.read(r), Float.read(r))
+        return cls(
+            particle,
+            override_limiter,
+            always_show,
+            pos,
+            dist,
+            max_speed,
+            VarInt.read(r),
+            VarInt.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        self.particle.write(w)
+        Bool.write(self.override_limiter, w)
+        Bool.write(self.always_show, w)
+        Vec3d.write(self.pos, w)
+        for value in (*self.dist, *self.max_speed):
+            Float.write(value, w)
+        VarInt.write(self.count, w)
+        VarInt.write(self.randomization, w)
+
+
+@dataclass
+class ExplosionParticle(_Packet):
+    """ExplosionParticleInfo (play.rs:1119)."""
+
+    particle: Particle
+    scaling: float
+    speed: float
+    weight: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "ExplosionParticle":
+        return cls(
+            Particle.read(r), Float.read(r), Float.read(r), VarInt.read(r)
+        )
+
+    def write(self, w: Writer) -> None:
+        self.particle.write(w)
+        Float.write(self.scaling, w)
+        Float.write(self.speed, w)
+        VarInt.write(self.weight, w)
+
+
+@dataclass
+class Explode(_Packet):
+    """ClientboundExplodePacket (play.rs:1129)."""
+
+    center: Tuple[float, float, float]
+    radius: float
+    block_count: int
+    knockback: Optional[Tuple[float, float, float]]
+    particle: Particle
+    sound: Tuple[int, Optional[Tuple[str, Optional[float]]]]
+    block_particles: list[ExplosionParticle]
+    play_sound: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "Explode":
+        center = Vec3d.read(r)
+        radius = Float.read(r)
+        block_count = Int.read(r)
+        knockback = Opt(Vec3d).read(r)
+        particle = Particle.read(r)
+        sound = _SoundHolder.read(r)
+        n = r.varint()
+        block_particles = [ExplosionParticle.read(r) for _ in range(n)]
+        return cls(
+            center,
+            radius,
+            block_count,
+            knockback,
+            particle,
+            sound,
+            block_particles,
+            Bool.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Vec3d.write(self.center, w)
+        Float.write(self.radius, w)
+        Int.write(self.block_count, w)
+        Opt(Vec3d).write(self.knockback, w)
+        self.particle.write(w)
+        _SoundHolder.write(self.sound, w)
+        w.varint(len(self.block_particles))
+        for part in self.block_particles:
+            part.write(w)
+        Bool.write(self.play_sound, w)
+
+
+# ---- clientbound: экраны, статистика, достижения ----------------------
+
+
+@dataclass
+class MountScreenOpen(_Packet):
+    """ClientboundMountScreenOpenPacket (play.rs:584)."""
+
+    container: int
+    columns: int
+    entity: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "MountScreenOpen":
+        return cls(VarInt.read(r), VarInt.read(r), Int.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        VarInt.write(self.columns, w)
+        Int.write(self.entity, w)
+
+
+@dataclass
+class OpenBook(_Packet):
+    """ClientboundOpenBookPacket (play.rs:592)."""
+
+    hand: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "OpenBook":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.hand, w)
+
+
+@dataclass
+class OpenSignEditor(_Packet):
+    """ClientboundOpenSignEditorPacket (play.rs:587)."""
+
+    pos: Tuple[int, int, int]
+    front: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "OpenSignEditor":
+        return cls(Pos.read(r), _read_sign_side(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        _write_sign_side(self.front, w)
+
+
+@dataclass
+class PlayerCombatKill(_Packet):
+    """ClientboundPlayerCombatKillPacket (play.rs:662)."""
+
+    id: int
+    message: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerCombatKill":
+        return cls(VarInt.read(r), Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        Nbt.write(self.message, w)
+
+
+@dataclass
+class TagQuery(_Packet):
+    """ClientboundTagQueryPacket (play.rs:939)."""
+
+    transaction: int
+    tag: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "TagQuery":
+        return cls(VarInt.read(r), Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.transaction, w)
+        Nbt.write(self.tag, w)
+
+
+@dataclass
+class AwardStats(_Packet):
+    """ClientboundAwardStatsPacket (play.rs:1824)."""
+
+    stats: list[Tuple[int, int, int]]
+
+    @classmethod
+    def read(cls, r: Reader) -> "AwardStats":
+        return cls(_StatList.read(r))
+
+    def write(self, w: Writer) -> None:
+        _StatList.write(self.stats, w)
+
+
+@dataclass
+class SelectAdvancementsTab(_Packet):
+    """ClientboundSelectAdvancementsTabPacket (play.rs:79)."""
+
+    tab: Optional[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SelectAdvancementsTab":
+        return cls(Opt(Ident).read(r))
+
+    def write(self, w: Writer) -> None:
+        Opt(Ident).write(self.tab, w)
+
+
+@dataclass
+class AdvancementDisplay(_Packet):
+    """DisplayInfo достижения (play.rs:1658)."""
+
+    title: object
+    description: object
+    icon: ItemStack
+    frame: int
+    show_toast: bool
+    hidden: bool
+    background: Optional[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "AdvancementDisplay":
+        title = Nbt.read(r)
+        description = Nbt.read(r)
+        icon = _Template.read(r)
+        frame = VarInt.read(r)
+        flags = Int.read(r)
+        background = r.string(32767) if flags & 1 != 0 else None
+        return cls(
+            title,
+            description,
+            icon,
+            frame,
+            flags & 2 != 0,
+            flags & 4 != 0,
+            background,
+        )
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.title, w)
+        Nbt.write(self.description, w)
+        _Template.write(self.icon, w)
+        VarInt.write(self.frame, w)
+        flags = (
+            int(self.background is not None)
+            | int(self.show_toast) << 1
+            | int(self.hidden) << 2
+        )
+        Int.write(flags, w)
+        if self.background is not None:
+            w.string(self.background)
+
+
+@dataclass
+class Advancement(_Packet):
+    """PositionedAdvancement (play.rs:1670)."""
+
+    id: str
+    parent: Optional[str]
+    display: Optional[AdvancementDisplay]
+    requirements: list[list[str]]
+    telemetry: bool
+    x: float
+    y: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "Advancement":
+        ident = r.string(32767)
+        parent = r.string(32767) if r.bool() else None
+        display = AdvancementDisplay.read(r) if r.bool() else None
+        groups = r.count(r.remaining())
+        requirements = [
+            [r.string(32767) for _ in range(r.count(r.remaining()))]
+            for _ in range(groups)
+        ]
+        telemetry = Bool.read(r)
+        x = Float.read(r)
+        y = Float.read(r)
+        return cls(ident, parent, display, requirements, telemetry, x, y)
+
+    def write(self, w: Writer) -> None:
+        w.string(self.id)
+        Bool.write(self.parent is not None, w)
+        if self.parent is not None:
+            w.string(self.parent)
+        Bool.write(self.display is not None, w)
+        if self.display is not None:
+            self.display.write(w)
+        w.varint(len(self.requirements))
+        for group in self.requirements:
+            w.varint(len(group))
+            for criterion in group:
+                w.string(criterion)
+        Bool.write(self.telemetry, w)
+        Float.write(self.x, w)
+        Float.write(self.y, w)
+
+
+@dataclass
+class UpdateAdvancements(_Packet):
+    """ClientboundUpdateAdvancementsPacket (play.rs:1684)."""
+
+    reset: bool
+    added: list[Advancement]
+    removed: list[str]
+    progress: list[Tuple[str, list[Tuple[str, Optional[int]]]]]
+    show: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "UpdateAdvancements":
+        reset = Bool.read(r)
+        n = r.count(r.remaining())
+        added = [Advancement.read(r) for _ in range(n)]
+        n = r.count(r.remaining())
+        removed = [r.string(32767) for _ in range(n)]
+        n = r.count(r.remaining())
+        progress = []
+        for _ in range(n):
+            ident = r.string(32767)
+            k = r.count(r.remaining())
+            criteria = []
+            for _ in range(k):
+                name = r.string(32767)
+                at = Long.read(r) if r.bool() else None
+                criteria.append((name, at))
+            progress.append((ident, criteria))
+        show = Bool.read(r)
+        return cls(reset, added, removed, progress, show)
+
+    def write(self, w: Writer) -> None:
+        Bool.write(self.reset, w)
+        w.varint(len(self.added))
+        for adv in self.added:
+            adv.write(w)
+        w.varint(len(self.removed))
+        for ident in self.removed:
+            w.string(ident)
+        w.varint(len(self.progress))
+        for ident, criteria in self.progress:
+            w.string(ident)
+            w.varint(len(criteria))
+            for name, at in criteria:
+                w.string(name)
+                Bool.write(at is not None, w)
+                if at is not None:
+                    Long.write(at, w)
+        Bool.write(self.show, w)
+
+
+@dataclass
+class SetObjective(_Packet):
+    """ClientboundSetObjectivePacket (play.rs:1043)."""
+
+    name: str
+    method: int
+    display: Optional[Tuple[object, int, Optional[NumberFormat]]]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetObjective":
+        name = r.string(32767)
+        method = Byte.read(r)
+        display = None
+        if method in (0, 2):
+            display = (Nbt.read(r), VarInt.read(r), Opt(NumberFormat).read(r))
+        return cls(name, method, display)
+
+    def write(self, w: Writer) -> None:
+        w.string(self.name)
+        Byte.write(self.method, w)
+        if self.method in (0, 2):
+            name, render, fmt = self.display or (
+                Tag(TagType.End, is_end=True),
+                0,
+                None,
+            )
+            Nbt.write(name, w)
+            VarInt.write(render, w)
+            Opt(NumberFormat).write(fmt, w)
+
+
+# ---- clientbound: карта предмета -------------------------------------
+
+
+@dataclass
+class MapItemData(_Packet):
+    """ClientboundMapItemDataPacket (play.rs:450)."""
+
+    map_id: int
+    scale: int
+    locked: bool
+    decorations: Optional[list[MapDecoration]]
+    patch: Optional[MapPatch]
+
+    @classmethod
+    def read(cls, r: Reader) -> "MapItemData":
+        return cls(
+            VarInt.read(r),
+            Byte.read(r),
+            Bool.read(r),
+            Opt(List(MapDecoration)).read(r),
+            _MapPatchOpt.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.map_id, w)
+        Byte.write(self.scale, w)
+        Bool.write(self.locked, w)
+        Opt(List(MapDecoration)).write(self.decorations, w)
+        _MapPatchOpt.write(self.patch, w)
+
+
+# ---- clientbound: локатор (waypoint) ----------------------------------
+
+
+@dataclass
+class TrackedWaypoint(_Packet):
+    """ClientboundTrackedWaypointPacket (play.rs:2136).
+
+    id: ("uuid", value) | ("name", value).
+    target: ("empty",) | ("block", (x,y,z)) | ("chunk", (x,z)) | ("azimuth", f).
+    """
+
+    operation: int
+    id: Tuple[str, object]
+    style: str
+    color: Optional[int]
+    target: tuple
+
+    @classmethod
+    def read(cls, r: Reader) -> "TrackedWaypoint":
+        operation = r.varint()
+        if not 0 <= operation <= 2:
+            raise ProtocolError(f"[QuadRix] waypoint operation {operation}")
+        ident = ("uuid", Uuid.read(r)) if r.bool() else ("name", r.string(32767))
+        style = Ident.read(r)
+        color = None
+        if r.bool():
+            red, green, blue = r.u8(), r.u8(), r.u8()
+            color = -16777216 | red << 16 | green << 8 | blue
+        kind = r.varint()
+        if kind == 0:
+            target = ("empty",)
+        elif kind == 1:
+            target = ("block", (r.varint(), r.varint(), r.varint()))
+        elif kind == 2:
+            target = ("chunk", (r.varint(), r.varint()))
+        elif kind == 3:
+            target = ("azimuth", Float.read(r))
+        else:
+            raise ProtocolError(f"[QuadRix] waypoint type {kind}")
+        return cls(operation, ident, style, color, target)
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.operation, w)
+        if self.id[0] == "uuid":
+            Bool.write(True, w)
+            Uuid.write(self.id[1], w)
+        else:
+            Bool.write(False, w)
+            w.string(self.id[1])
+        w.string(self.style)
+        Bool.write(self.color is not None, w)
+        if self.color is not None:
+            for shift in (16, 8, 0):
+                w.u8((self.color >> shift) & 0xFF)
+        target = self.target
+        if target[0] == "empty":
+            w.varint(0)
+        elif target[0] == "block":
+            w.varint(1)
+            for value in target[1]:
+                w.varint(value)
+        elif target[0] == "chunk":
+            w.varint(2)
+            for value in target[1]:
+                w.varint(value)
+        else:
+            w.varint(3)
+            Float.write(target[1], w)
+
+
+# ---- clientbound: вход и возрождение ----------------------------------
+
+
+@dataclass
+class Login(_Packet):
+    """ClientboundLoginPacket (play.rs:381)."""
+
+    player_id: int
+    hardcore: bool
+    levels: list[str]
+    max_players: int
+    chunk_radius: int
+    simulation_distance: int
+    reduced_debug_info: bool
+    show_death_screen: bool
+    limited_crafting: bool
+    spawn: SpawnInfo
+    online_mode: bool
+    enforces_secure_chat: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "Login":
+        return cls(
+            Int.read(r),
+            Bool.read(r),
+            List(Ident).read(r),
+            VarInt.read(r),
+            VarInt.read(r),
+            VarInt.read(r),
+            Bool.read(r),
+            Bool.read(r),
+            Bool.read(r),
+            SpawnInfo.read(r),
+            Bool.read(r),
+            Bool.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Int.write(self.player_id, w)
+        Bool.write(self.hardcore, w)
+        List(Ident).write(self.levels, w)
+        VarInt.write(self.max_players, w)
+        VarInt.write(self.chunk_radius, w)
+        VarInt.write(self.simulation_distance, w)
+        Bool.write(self.reduced_debug_info, w)
+        Bool.write(self.show_death_screen, w)
+        Bool.write(self.limited_crafting, w)
+        self.spawn.write(w)
+        Bool.write(self.online_mode, w)
+        Bool.write(self.enforces_secure_chat, w)
+
+
+@dataclass
+class Respawn(_Packet):
+    """ClientboundRespawnPacket (play.rs:807)."""
+
+    spawn: SpawnInfo
+    keep: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "Respawn":
+        return cls(SpawnInfo.read(r), Byte.read(r))
+
+    def write(self, w: Writer) -> None:
+        self.spawn.write(w)
+        Byte.write(self.keep, w)
+
+
+# ---- рецепты (recipes.rs) ---------------------------------------------
+
+
+@dataclass(frozen=True)
+class HolderSet:
+    """HolderSet<Item> (recipes.rs:14): тег по имени или id предметов."""
+
+    tag: Optional[str] = None
+    items: tuple = ()
+
+    @classmethod
+    def read(cls, r: Reader) -> "HolderSet":
+        n = r.varint() - 1
+        if n == -1:
+            return cls(tag=r.string(32767))
+        if n < 0:
+            raise ProtocolError("[QuadRix] negative holder set size")
+        if n > r.remaining():
+            raise ProtocolError("[QuadRix] holder set larger than the packet")
+        return cls(items=tuple(r.varint() for _ in range(n)))
+
+    def write(self, w: Writer) -> None:
+        if self.tag is not None:
+            w.varint(0)
+            w.string(self.tag)
+            return
+        w.varint(len(self.items) + 1)
+        for ident in self.items:
+            w.varint(ident)
+
+
+@dataclass(frozen=True)
+class TrimPattern:
+    """TrimPattern (recipes.rs:50): id реестра или сам шаблон."""
+
+    id: Optional[int] = None
+    asset: str = ""
+    description: object = None
+    decal: bool = False
+
+    @classmethod
+    def read(cls, r: Reader) -> "TrimPattern":
+        ident = r.varint()
+        if ident == 0:
+            return cls(
+                None, r.string(32767), Nbt.read(r), Bool.read(r)
+            )
+        return cls(ident - 1)
+
+    def write(self, w: Writer) -> None:
+        if self.id is not None:
+            w.varint(self.id + 1)
+            return
+        w.varint(0)
+        w.string(self.asset)
+        Nbt.write(self.description, w)
+        Bool.write(self.decal, w)
+
+
+_MAX_SLOT_DEPTH = 32
+
+
+@dataclass(frozen=True)
+class SlotDisplay:
+    """SlotDisplay (recipes.rs:61): kind + аргументы (см. чтение)."""
+
+    kind: str
+    args: tuple = ()
+
+    @classmethod
+    def read(cls, r: Reader) -> "SlotDisplay":
+        return cls._read_at(r, 0)
+
+    @classmethod
+    def _read_at(cls, r: Reader, depth: int) -> "SlotDisplay":
+        if depth > _MAX_SLOT_DEPTH:
+            raise ProtocolError("[QuadRix] slot displays nest too deep")
+
+        def inner() -> "SlotDisplay":
+            return cls._read_at(r, depth + 1)
+
+        kind = r.varint()
+        if kind == 0:
+            return cls("empty")
+        if kind == 1:
+            return cls("any_fuel")
+        if kind == 2:
+            return cls("with_any_potion", (inner(),))
+        if kind == 3:
+            return cls("only_with_component", (inner(), r.varint()))
+        if kind == 4:
+            return cls("item", (r.varint(),))
+        if kind == 5:
+            return cls("item_stack", (_Template.read(r),))
+        if kind == 6:
+            return cls("tag", (HolderSet.read(r),))
+        if kind == 7:
+            return cls("dyed", (inner(), inner()))
+        if kind == 8:
+            base = inner()
+            material = inner()
+            pattern = TrimPattern.read(r)
+            return cls("smithing_trim", (base, material, pattern))
+        if kind == 9:
+            return cls("with_remainder", (inner(), inner()))
+        if kind == 10:
+            n = r.count(r.remaining())
+            return cls(
+                "composite",
+                (tuple(cls._read_at(r, depth + 1) for _ in range(n)),),
+            )
+        raise ProtocolError(f"[QuadRix] unknown slot display {kind}")
+
+    def write(self, w: Writer) -> None:
+        args = self.args
+        if self.kind == "empty":
+            w.varint(0)
+        elif self.kind == "any_fuel":
+            w.varint(1)
+        elif self.kind == "with_any_potion":
+            w.varint(2)
+            args[0].write(w)
+        elif self.kind == "only_with_component":
+            w.varint(3)
+            args[0].write(w)
+            w.varint(args[1])
+        elif self.kind == "item":
+            w.varint(4)
+            w.varint(args[0])
+        elif self.kind == "item_stack":
+            w.varint(5)
+            _Template.write(args[0], w)
+        elif self.kind == "tag":
+            w.varint(6)
+            args[0].write(w)
+        elif self.kind == "dyed":
+            w.varint(7)
+            args[0].write(w)
+            args[1].write(w)
+        elif self.kind == "smithing_trim":
+            w.varint(8)
+            args[0].write(w)
+            args[1].write(w)
+            args[2].write(w)
+        elif self.kind == "with_remainder":
+            w.varint(9)
+            args[0].write(w)
+            args[1].write(w)
+        else:
+            w.varint(10)
+            w.varint(len(args[0]))
+            for display in args[0]:
+                display.write(w)
+
+
+@dataclass(frozen=True)
+class RecipeDisplay:
+    """RecipeDisplay (recipes.rs:229): kind + аргументы (см. чтение)."""
+
+    kind: str
+    args: tuple = ()
+
+    @classmethod
+    def read(cls, r: Reader) -> "RecipeDisplay":
+        kind = r.varint()
+        if kind == 0:
+            ingredients = [SlotDisplay.read(r) for _ in range(r.count(r.remaining()))]
+            return cls("shapeless", (ingredients, SlotDisplay.read(r), SlotDisplay.read(r)))
+        if kind == 1:
+            width = r.varint()
+            height = r.varint()
+            ingredients = [SlotDisplay.read(r) for _ in range(r.count(r.remaining()))]
+            if width * height != len(ingredients):
+                raise ProtocolError("[QuadRix] shaped display size mismatch")
+            return cls(
+                "shaped",
+                (width, height, ingredients, SlotDisplay.read(r), SlotDisplay.read(r)),
+            )
+        if kind == 2:
+            return cls(
+                "furnace",
+                (
+                    SlotDisplay.read(r),
+                    SlotDisplay.read(r),
+                    SlotDisplay.read(r),
+                    SlotDisplay.read(r),
+                    VarInt.read(r),
+                    Float.read(r),
+                ),
+            )
+        if kind == 3:
+            return cls(
+                "stonecutter",
+                (SlotDisplay.read(r), SlotDisplay.read(r), SlotDisplay.read(r)),
+            )
+        if kind == 4:
+            return cls(
+                "smithing",
+                (
+                    SlotDisplay.read(r),
+                    SlotDisplay.read(r),
+                    SlotDisplay.read(r),
+                    SlotDisplay.read(r),
+                    SlotDisplay.read(r),
+                ),
+            )
+        raise ProtocolError(f"[QuadRix] unknown recipe display {kind}")
+
+    def write(self, w: Writer) -> None:
+        args = self.args
+        if self.kind == "shapeless":
+            w.varint(0)
+            w.varint(len(args[0]))
+            for display in args[0]:
+                display.write(w)
+            args[1].write(w)
+            args[2].write(w)
+        elif self.kind == "shaped":
+            w.varint(1)
+            w.varint(args[0])
+            w.varint(args[1])
+            w.varint(len(args[2]))
+            for display in args[2]:
+                display.write(w)
+            args[3].write(w)
+            args[4].write(w)
+        elif self.kind == "furnace":
+            w.varint(2)
+            for display in args[:4]:
+                display.write(w)
+            w.varint(args[4])
+            w.f32(args[5])
+        elif self.kind == "stonecutter":
+            w.varint(3)
+            for display in args:
+                display.write(w)
+        else:
+            w.varint(4)
+            for display in args:
+                display.write(w)
+
+
+@dataclass
+class RecipeBookEntry(_Packet):
+    """RecipeDisplayEntry (recipes.rs:393)."""
+
+    id: int
+    display: RecipeDisplay
+    group: int
+    category: int
+    requirements: Optional[list[HolderSet]]
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "RecipeBookEntry":
+        ident = VarInt.read(r)
+        display = RecipeDisplay.read(r)
+        group = VarInt.read(r)
+        category = VarInt.read(r)
+        requirements = None
+        if r.bool():
+            n = r.count(r.remaining())
+            requirements = [HolderSet.read(r) for _ in range(n)]
+        return cls(ident, display, group, category, requirements, Byte.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        self.display.write(w)
+        VarInt.write(self.group, w)
+        VarInt.write(self.category, w)
+        Bool.write(self.requirements is not None, w)
+        if self.requirements is not None:
+            w.varint(len(self.requirements))
+            for requirement in self.requirements:
+                requirement.write(w)
+        Byte.write(self.flags, w)
+
+
+@dataclass
+class RecipeBookAdd(_Packet):
+    """ClientboundRecipeBookAddPacket (recipes.rs:408)."""
+
+    entries: list[RecipeBookEntry]
+    replace: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "RecipeBookAdd":
+        n = r.count(r.remaining())
+        entries = [RecipeBookEntry.read(r) for _ in range(n)]
+        return cls(entries, Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        w.varint(len(self.entries))
+        for entry in self.entries:
+            entry.write(w)
+        Bool.write(self.replace, w)
+
+
+@dataclass
+class RecipeBookRemove(_Packet):
+    """ClientboundRecipeBookRemovePacket (recipes.rs:470)."""
+
+    ids: list[int]
+
+    @classmethod
+    def read(cls, r: Reader) -> "RecipeBookRemove":
+        return cls([r.varint() for _ in range(r.count(r.remaining()))])
+
+    def write(self, w: Writer) -> None:
+        w.varint(len(self.ids))
+        for ident in self.ids:
+            w.varint(ident)
+
+
+@dataclass
+class RecipeBookSettings(_Packet):
+    """RecipeBookSettings (recipes.rs:489): 4 книги (open, filtering)."""
+
+    books: list[Tuple[bool, bool]]
+
+    @classmethod
+    def read(cls, r: Reader) -> "RecipeBookSettings":
+        return cls([(Bool.read(r), Bool.read(r)) for _ in range(4)])
+
+    def write(self, w: Writer) -> None:
+        for open_, filtering in self.books:
+            Bool.write(open_, w)
+            Bool.write(filtering, w)
+
+
+@dataclass
+class RecipeBookSeenRecipe(_Packet):
+    """ServerboundRecipeBookSeenRecipePacket (recipes.rs:511)."""
+
+    recipe: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "RecipeBookSeenRecipe":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.recipe, w)
+
+
+@dataclass
+class RecipeBookChangeSettings(_Packet):
+    """ServerboundRecipeBookChangeSettingsPacket (recipes.rs:528)."""
+
+    book_type: int
+    open: bool
+    filtering: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "RecipeBookChangeSettings":
+        book_type = VarInt.read(r)
+        if not 0 <= book_type < 4:
+            raise ProtocolError("[QuadRix] invalid recipe book type")
+        return cls(book_type, Bool.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.book_type, w)
+        Bool.write(self.open, w)
+        Bool.write(self.filtering, w)
+
+
+@dataclass
+class PlaceGhostRecipe(_Packet):
+    """ClientboundPlaceGhostRecipePacket (recipes.rs:555)."""
+
+    container: int
+    display: RecipeDisplay
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlaceGhostRecipe":
+        return cls(VarInt.read(r), RecipeDisplay.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        self.display.write(w)
+
+
+@dataclass
+class PlaceRecipe(_Packet):
+    """ServerboundPlaceRecipePacket (recipes.rs:575)."""
+
+    container: int
+    recipe: int
+    use_max: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlaceRecipe":
+        return cls(VarInt.read(r), VarInt.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.container, w)
+        VarInt.write(self.recipe, w)
+        Bool.write(self.use_max, w)
+
+
+# ---- clientbound: диалог (play-локальный ShowDialog) ------------------
+
+
+@dataclass
+class ShowDialog(_Packet):
+    """ClientboundShowDialogPacket (play.rs:276): Holder<Dialog>."""
+
+    dialog: DialogHolder
+
+    @classmethod
+    def read(cls, r: Reader) -> "ShowDialog":
+        return cls(DialogHolder.read(r))
+
+    def write(self, w: Writer) -> None:
+        self.dialog.write(w)
+
+
+@dataclass
+class MinecartStep(_Packet):
+    """NewMinecartBehavior.MinecartStep (play.rs:846)."""
+
+    position: Tuple[float, float, float]
+    movement: Tuple[float, float, float]
+    yaw: int
+    pitch: int
+    weight: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "MinecartStep":
+        return cls(
+            Vec3d.read(r),
+            Vec3d.read(r),
+            Byte.read(r),
+            Byte.read(r),
+            Float.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Vec3d.write(self.position, w)
+        Vec3d.write(self.movement, w)
+        Byte.write(self.yaw, w)
+        Byte.write(self.pitch, w)
+        Float.write(self.weight, w)
+
+
+@dataclass
+class MoveMinecartAlongTrack(_Packet):
+    """ClientboundMoveMinecartPacket (play.rs:858)."""
+
+    id: int
+    steps: list[MinecartStep]
+
+    @classmethod
+    def read(cls, r: Reader) -> "MoveMinecartAlongTrack":
+        return cls(VarInt.read(r), List(MinecartStep).read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        List(MinecartStep).write(self.steps, w)
+
+
+@dataclass
+class PostEffects(_Packet):
+    """ClientboundPostEffectsPacket (play.rs:803)."""
+
+    effects: list[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "PostEffects":
+        return cls(List(Ident).read(r))
+
+    def write(self, w: Writer) -> None:
+        List(Ident).write(self.effects, w)
+
+
+@dataclass
+class GameTestHighlightPos(_Packet):
+    """ClientboundGameTestHighlightPosPacket (play.rs:2420)."""
+
+    absolute: Tuple[int, int, int]
+    relative: Tuple[int, int, int]
+
+    @classmethod
+    def read(cls, r: Reader) -> "GameTestHighlightPos":
+        return cls(Pos.read(r), Pos.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.absolute, w)
+        Pos.write(self.relative, w)
+
+
+@dataclass
+class TestInstanceBlockStatus(_Packet):
+    """ClientboundTestInstanceBlockStatus (play.rs:2425)."""
+
+    status: object
+    size: Optional[Tuple[int, int, int]]
+
+    @classmethod
+    def read(cls, r: Reader) -> "TestInstanceBlockStatus":
+        return cls(Nbt.read(r), Opt(VarVec3i).read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.status, w)
+        Opt(VarVec3i).write(self.size, w)
+
+
+# ---- serverbound: остаток play.rs -------------------------------------
+
+
+@dataclass
+class AcceptTeleportation(_Packet):
+    """ServerboundAcceptTeleportationPacket (play.rs:2222)."""
+
+    id: int
+    x: float
+    y: float
+    z: float
+    yaw: float
+    pitch: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "AcceptTeleportation":
+        return cls(
+            VarInt.read(r),
+            Double.read(r),
+            Double.read(r),
+            Double.read(r),
+            Float.read(r),
+            Float.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        Double.write(self.x, w)
+        Double.write(self.y, w)
+        Double.write(self.z, w)
+        Float.write(self.yaw, w)
+        Float.write(self.pitch, w)
+
+
+@dataclass
+class Attack(_Packet):
+    """ServerboundAttackPacket (play.rs:2223)."""
+
+    id: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "Attack":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+
+
+@dataclass
+class TeleportToEntity(_Packet):
+    """ServerboundTeleportToEntityPacket (play.rs:2224)."""
+
+    uuid: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "TeleportToEntity":
+        return cls(Uuid.read(r))
+
+    def write(self, w: Writer) -> None:
+        Uuid.write(self.uuid, w)
+
+
+@dataclass
+class SpectatorAction(_Packet):
+    """ServerboundSpectatorActionPacket (play.rs:2228)."""
+
+    target: Optional[int]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SpectatorAction":
+        return cls(OptVarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        OptVarInt.write(self.target, w)
+
+
+@dataclass
+class ChangeGameMode(_Packet):
+    """ServerboundChangeGameModePacket (play.rs:2232)."""
+
+    mode: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChangeGameMode":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.mode, w)
+
+
+@dataclass
+class ChangeDifficultyRequest(_Packet):
+    """ServerboundChangeDifficultyPacket (play.rs:2289)."""
+
+    difficulty: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChangeDifficultyRequest":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.difficulty, w)
+
+
+@dataclass
+class LockDifficulty(_Packet):
+    """ServerboundLockDifficultyPacket (play.rs:2290)."""
+
+    locked: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "LockDifficulty":
+        return cls(Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        Bool.write(self.locked, w)
+
+
+@dataclass
+class SetGameRule(_Packet):
+    """ServerboundSetGameRulePacket (play.rs:2293)."""
+
+    entries: list[GameRuleEntry]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetGameRule":
+        return cls(List(GameRuleEntry).read(r))
+
+    def write(self, w: Writer) -> None:
+        List(GameRuleEntry).write(self.entries, w)
+
+
+@dataclass
+class ChunkBatchReceived(_Packet):
+    """ServerboundChunkBatchReceivedPacket (play.rs:2294)."""
+
+    chunks_per_tick: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChunkBatchReceived":
+        return cls(Float.read(r))
+
+    def write(self, w: Writer) -> None:
+        Float.write(self.chunks_per_tick, w)
+
+
+@dataclass
+class SeenAdvancements(_Packet):
+    """ServerboundSeenAdvancementsPacket (play.rs:2331)."""
+
+    action: int
+    tab: Optional[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SeenAdvancements":
+        action = VarInt.read(r)
+        return cls(action, r.string(32767) if action == 0 else None)
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.action, w)
+        if self.action == 0:
+            w.string(self.tab or "")
+
+
+@dataclass
+class BlockEntityTagQuery(_Packet):
+    """ServerboundBlockEntityTagQueryPacket (play.rs:2356)."""
+
+    transaction: int
+    pos: Tuple[int, int, int]
+
+    @classmethod
+    def read(cls, r: Reader) -> "BlockEntityTagQuery":
+        return cls(VarInt.read(r), Pos.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.transaction, w)
+        Pos.write(self.pos, w)
+
+
+@dataclass
+class EntityTagQuery(_Packet):
+    """ServerboundEntityTagQueryPacket (play.rs:2361)."""
+
+    transaction: int
+    entity: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "EntityTagQuery":
+        return cls(VarInt.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.transaction, w)
+        VarInt.write(self.entity, w)
+
+
+@dataclass
+class SignUpdate(_Packet):
+    """ServerboundSignUpdatePacket (play.rs:2379)."""
+
+    pos: Tuple[int, int, int]
+    lines: list[str]
+    front: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "SignUpdate":
+        return cls(Pos.read(r), _read_sign_lines(r), _read_sign_side(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        _write_sign_lines(self.lines, w)
+        _write_sign_side(self.front, w)
+
+
+@dataclass
+class SetJigsawBlock(_Packet):
+    """ServerboundSetJigsawBlockPacket (play.rs:2384)."""
+
+    pos: Tuple[int, int, int]
+    name: str
+    target: str
+    pool: str
+    final_state: str
+    joint: str
+    selection_priority: int
+    placement_priority: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetJigsawBlock":
+        return cls(
+            Pos.read(r),
+            Ident.read(r),
+            Ident.read(r),
+            Ident.read(r),
+            Str.read(r),
+            Str.read(r),
+            VarInt.read(r),
+            VarInt.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        Ident.write(self.name, w)
+        Ident.write(self.target, w)
+        Ident.write(self.pool, w)
+        Str.write(self.final_state, w)
+        Str.write(self.joint, w)
+        VarInt.write(self.selection_priority, w)
+        VarInt.write(self.placement_priority, w)
+
+
+@dataclass
+class SetTestBlock(_Packet):
+    """ServerboundSetTestBlockPacket (play.rs:2398)."""
+
+    pos: Tuple[int, int, int]
+    mode: int
+    message: str
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetTestBlock":
+        return cls(Pos.read(r), VarInt.read(r), Str.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        VarInt.write(self.mode, w)
+        Str.write(self.message, w)
+
+
+@dataclass
+class TestInstanceBlockAction(_Packet):
+    """ServerboundTestInstanceBlockActionPacket (play.rs:2415)."""
+
+    pos: Tuple[int, int, int]
+    action: int
+    data: TestInstanceData
+
+    @classmethod
+    def read(cls, r: Reader) -> "TestInstanceBlockAction":
+        return cls(Pos.read(r), VarInt.read(r), TestInstanceData.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        VarInt.write(self.action, w)
+        self.data.write(w)
+
+
+@dataclass
+class JigsawGenerate(_Packet):
+    """ServerboundJigsawGeneratePacket (play.rs:2429)."""
+
+    pos: Tuple[int, int, int]
+    levels: int
+    keep_jigsaws: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "JigsawGenerate":
+        return cls(Pos.read(r), VarInt.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        VarInt.write(self.levels, w)
+        Bool.write(self.keep_jigsaws, w)
+
+
+@dataclass
+class SetCommandBlock(_Packet):
+    """ServerboundSetCommandBlockPacket (play.rs:2435)."""
+
+    pos: Tuple[int, int, int]
+    command: str
+    mode: int
+    flags: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetCommandBlock":
+        return cls(Pos.read(r), Str.read(r), VarInt.read(r), Byte.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        Str.write(self.command, w)
+        VarInt.write(self.mode, w)
+        Byte.write(self.flags, w)
+
+
+@dataclass
+class SetCommandMinecart(_Packet):
+    """ServerboundSetCommandMinecartPacket (play.rs:2440)."""
+
+    entity: int
+    command: str
+    track_output: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetCommandMinecart":
+        return cls(VarInt.read(r), Str.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.entity, w)
+        Str.write(self.command, w)
+        Bool.write(self.track_output, w)
+
+
+@dataclass
+class SetStructureBlock(_Packet):
+    """ServerboundSetStructureBlockPacket (play.rs:2446)."""
+
+    pos: Tuple[int, int, int]
+    update_type: int
+    mode: int
+    name: str
+    offset: Tuple[int, int, int]
+    size: Tuple[int, int, int]
+    mirror: int
+    rotation: int
+    data: str
+    ignore_entities: bool
+    strict: bool
+    show_air: bool
+    show_bounding_box: bool
+    integrity: float
+    seed: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetStructureBlock":
+        pos = Pos.read(r)
+        update_type = VarInt.read(r)
+        mode = VarInt.read(r)
+        name = r.string(32767)
+        offset = tuple(max(-48, min(48, r.i8())) for _ in range(3))
+        size = tuple(max(0, min(48, r.i8())) for _ in range(3))
+        mirror = VarInt.read(r)
+        rotation = VarInt.read(r)
+        data = r.string(128)
+        integrity = max(0.0, min(1.0, Float.read(r)))
+        seed = VarLong.read(r)
+        flags = Byte.read(r)
+        return cls(
+            pos,
+            update_type,
+            mode,
+            name,
+            offset,
+            size,
+            mirror,
+            rotation,
+            data,
+            flags & 1 != 0,
+            flags & 8 != 0,
+            flags & 2 != 0,
+            flags & 4 != 0,
+            integrity,
+            seed,
+        )
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        VarInt.write(self.update_type, w)
+        VarInt.write(self.mode, w)
+        w.string(self.name)
+        for value in self.offset:
+            w.i8(value)
+        for value in self.size:
+            w.i8(value)
+        VarInt.write(self.mirror, w)
+        VarInt.write(self.rotation, w)
+        w.string(self.data)
+        Float.write(self.integrity, w)
+        VarLong.write(self.seed, w)
+        flags = 0
+        if self.ignore_entities:
+            flags |= 1
+        if self.show_air:
+            flags |= 2
+        if self.show_bounding_box:
+            flags |= 4
+        if self.strict:
+            flags |= 8
+        Byte.write(flags, w)
+
+
+@dataclass
+class SetBeacon(_Packet):
+    """ServerboundSetBeaconPacket (play.rs:2595)."""
+
+    primary: Optional[int]
+    secondary: Optional[int]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetBeacon":
+        return cls(OptVarInt.read(r), OptVarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        OptVarInt.write(self.primary, w)
+        OptVarInt.write(self.secondary, w)
+
+
+@dataclass
+class PickItemFromBlock(_Packet):
+    """ServerboundPickItemFromBlockPacket (play.rs:2614)."""
+
+    pos: Tuple[int, int, int]
+    include_data: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "PickItemFromBlock":
+        return cls(Pos.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        Pos.write(self.pos, w)
+        Bool.write(self.include_data, w)
+
+
+@dataclass
+class SelectBundleItem(_Packet):
+    """ServerboundSelectBundleItemPacket (play.rs:2634)."""
+
+    slot: int
+    index: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SelectBundleItem":
+        return cls(VarInt.read(r), VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.slot, w)
+        VarInt.write(self.index, w)
+
+
+@dataclass
+class UseItem(_Packet):
+    """ServerboundUseItemPacket (play.rs:2638)."""
+
+    hand: int
+    sequence: int
+    yaw: float
+    pitch: float
+
+    @classmethod
+    def read(cls, r: Reader) -> "UseItem":
+        return cls(
+            VarInt.read(r), VarInt.read(r), Float.read(r), Float.read(r)
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.hand, w)
+        VarInt.write(self.sequence, w)
+        Float.write(self.yaw, w)
+        Float.write(self.pitch, w)
+
+
+@dataclass
+class UseItemOn(_Packet):
+    """ServerboundUseItemOnPacket (play.rs:2639)."""
+
+    hand: int
+    pos: Tuple[int, int, int]
+    face: int
+    cursor: Tuple[float, float, float]
+    inside: bool
+    world_border: bool
+    sequence: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "UseItemOn":
+        return cls(
+            VarInt.read(r),
+            Pos.read(r),
+            VarInt.read(r),
+            (Float.read(r), Float.read(r), Float.read(r)),
+            Bool.read(r),
+            Bool.read(r),
+            VarInt.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.hand, w)
+        Pos.write(self.pos, w)
+        VarInt.write(self.face, w)
+        for value in self.cursor:
+            Float.write(value, w)
+        Bool.write(self.inside, w)
+        Bool.write(self.world_border, w)
+        VarInt.write(self.sequence, w)
+
+
+class ConfigurationAcknowledged(Empty):
+    """ServerboundConfigurationAcknowledgedPacket (пустой payload)."""
+
+
+class Punch(Empty):
+    """ServerboundPunchPacket (пустой payload)."""
+
+
+# ---- id, которые Rust не моделирует: raw passthrough ------------------
+
+DebugBlockValue = _raw_packet("debug/block_value")
+DebugChunkValue = _raw_packet("debug/chunk_value")
+DebugEntityValue = _raw_packet("debug/entity_value")
+DebugEvent = _raw_packet("debug/event")
+DebugSample = _raw_packet("debug_sample")
+PlayerCombatEnd = _raw_packet("player_combat_end")
+PlayerCombatEnter = _raw_packet("player_combat_enter")
+UpdateRecipes = _raw_packet("update_recipes")
+CustomReportDetails = _raw_packet("custom_report_details")
+DebugSubscriptionRequest = _raw_packet("debug_subscription_request")
+
+
 # ── Реализованные ID (3 clientbound + 3 serverbound в PART 1) ────────
 
 _CLIENTBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
@@ -3585,6 +6364,87 @@ _CLIENTBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
     "set_cursor_item": SetCursorItem,
     "set_player_inventory": SetPlayerInventory,
     "cooldown": Cooldown,
+    # PART 6: мир, чанки, свет, границы, погода и рецепты
+    "add_transient_block": AddTransientBlock,
+    "award_stats": AwardStats,
+    "block_changed_ack": BlockChangedAck,
+    "block_destruction": BlockDestruction,
+    "block_entity_data": BlockEntityData,
+    "block_event": BlockEvent,
+    "block_update": BlockUpdate,
+    "boss_event": BossEvent,
+    "change_difficulty": ChangeDifficulty,
+    "chunk_batch_finished": ChunkBatchFinished,
+    "chunk_batch_start": ChunkBatchStart,
+    "chunks_biomes": ChunksBiomes,
+    "clear_dialog": ClearDialog,
+    "cookie_request": CookieRequest,
+    "custom_payload": CustomPayload,
+    "explode": Explode,
+    "forget_level_chunk": ForgetLevelChunk,
+    "game_rule_values": GameRuleValues,
+    "game_test_highlight_pos": GameTestHighlightPos,
+    "initialize_border": InitializeBorder,
+    "level_chunk_with_light": LevelChunkWithLight,
+    "level_event": LevelEvent,
+    "level_particles": LevelParticles,
+    "light_update": LightUpdate,
+    "login": Login,
+    "low_disk_space_warning": LowDiskSpaceWarning,
+    "map_item_data": MapItemData,
+    "mount_screen_open": MountScreenOpen,
+    "move_minecart_along_track": MoveMinecartAlongTrack,
+    "open_book": OpenBook,
+    "open_sign_editor": OpenSignEditor,
+    "ping": ConfigurationPing,
+    "place_ghost_recipe": PlaceGhostRecipe,
+    "player_combat_kill": PlayerCombatKill,
+    "pong_response": StatusPing,
+    "post_effects": PostEffects,
+    "recipe_book_add": RecipeBookAdd,
+    "recipe_book_remove": RecipeBookRemove,
+    "recipe_book_settings": RecipeBookSettings,
+    "remove_mob_effect": RemoveMobEffect,
+    "resource_pack_pop": ResourcePackPop,
+    "resource_pack_push": ResourcePackPush,
+    "respawn": Respawn,
+    "section_blocks_update": SectionBlocksUpdate,
+    "select_advancements_tab": SelectAdvancementsTab,
+    "server_links": ServerLinks,
+    "set_border_center": SetBorderCenter,
+    "set_border_lerp_size": SetBorderLerpSize,
+    "set_border_size": SetBorderSize,
+    "set_border_warning_delay": SetBorderWarningDelay,
+    "set_border_warning_distance": SetBorderWarningDistance,
+    "set_chunk_cache_radius": SetChunkCacheRadius,
+    "set_default_spawn_position": SetDefaultSpawnPosition,
+    "set_display_objective": SetDisplayObjective,
+    "set_experience": SetExperience,
+    "set_objective": SetObjective,
+    "set_simulation_distance": SetSimulationDistance,
+    "show_dialog": ShowDialog,
+    "sound": Sound,
+    "sound_entity": SoundEntity,
+    "start_configuration": StartConfiguration,
+    "stop_sound": StopSound,
+    "store_cookie": StoreCookie,
+    "tag_query": TagQuery,
+    "test_instance_block_status": TestInstanceBlockStatus,
+    "transfer": Transfer,
+    "update_advancements": UpdateAdvancements,
+    "update_mob_effect": UpdateMobEffect,
+    "update_tags": UpdateTags,
+    "waypoint": TrackedWaypoint,
+    # raw passthrough: ID, которые Rust не моделирует (Unknown)
+    "custom_report_details": CustomReportDetails,
+    "debug/block_value": DebugBlockValue,
+    "debug/chunk_value": DebugChunkValue,
+    "debug/entity_value": DebugEntityValue,
+    "debug/event": DebugEvent,
+    "debug_sample": DebugSample,
+    "player_combat_end": PlayerCombatEnd,
+    "player_combat_enter": PlayerCombatEnter,
+    "update_recipes": UpdateRecipes,
 }
 
 _SERVERBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
@@ -3623,6 +6483,46 @@ _SERVERBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
     "rename_item": RenameItem,
     "set_creative_mode_slot": SetCreativeModeSlot,
     "select_trade": SelectTrade,
+    # PART 6: остаток serverbound play.rs
+    "accept_teleportation": AcceptTeleportation,
+    "attack": Attack,
+    "block_entity_tag_query": BlockEntityTagQuery,
+    "bundle_item_selected": SelectBundleItem,
+    "change_difficulty": ChangeDifficultyRequest,
+    "change_game_mode": ChangeGameMode,
+    "chunk_batch_received": ChunkBatchReceived,
+    "client_information": ClientInformation,
+    "configuration_acknowledged": ConfigurationAcknowledged,
+    "cookie_response": CookieResponse,
+    "custom_click_action": CustomClickAction,
+    "custom_payload": CustomPayload,
+    "entity_tag_query": EntityTagQuery,
+    "jigsaw_generate": JigsawGenerate,
+    "lock_difficulty": LockDifficulty,
+    "pick_item_from_block": PickItemFromBlock,
+    "ping_request": StatusPing,
+    "place_recipe": PlaceRecipe,
+    "pong": ConfigurationPing,
+    "punch": Punch,
+    "recipe_book_change_settings": RecipeBookChangeSettings,
+    "recipe_book_seen_recipe": RecipeBookSeenRecipe,
+    "resource_pack": ResourcePackResponse,
+    "seen_advancements": SeenAdvancements,
+    "set_beacon": SetBeacon,
+    "set_command_block": SetCommandBlock,
+    "set_command_minecart": SetCommandMinecart,
+    "set_game_rule": SetGameRule,
+    "set_jigsaw_block": SetJigsawBlock,
+    "set_structure_block": SetStructureBlock,
+    "set_test_block": SetTestBlock,
+    "sign_update": SignUpdate,
+    "spectator_action": SpectatorAction,
+    "teleport_to_entity": TeleportToEntity,
+    "test_instance_block_action": TestInstanceBlockAction,
+    "use_item": UseItem,
+    "use_item_on": UseItemOn,
+    # raw passthrough: ID, которые Rust не моделирует
+    "debug_subscription_request": DebugSubscriptionRequest,
 }
 
 
