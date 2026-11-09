@@ -1027,3 +1027,447 @@ def test_part3_replaces_unsupported_stubs():
     for name, cls in expected_serverbound.items():
         packet_id = id_of(name, State.PLAY, Direction.SERVERBOUND)
         assert SERVERBOUND_ID_TO_CLASS[packet_id] is cls, name
+
+
+# ═════════════════════════════════════════════════════════════════════
+# PART 4 — чат и команды (play.rs)
+# ═════════════════════════════════════════════════════════════════════
+
+
+from quadrix.protocol.packets.play import (  # noqa: E402 — PART 4 блок
+    Chat,
+    ChatAck,
+    ChatCommand,
+    ChatCommandSigned,
+    ChatSessionUpdate,
+    ChatTypeBound,
+    ClearTitles,
+    CommandNode,
+    CommandSuggestion,
+    CommandSuggestions,
+    Commands,
+    CustomChatCompletions,
+    DeleteChat,
+    DisguisedChat,
+    LastSeenUpdate,
+    NumberFormat,
+    PlayerChat,
+    ResetScore,
+    ServerData,
+    SetActionBarText,
+    SetPlayerTeam,
+    SetScore,
+    SetSubtitleText,
+    SetTitleText,
+    SetTitlesAnimation,
+    SystemChat,
+    TabList,
+    TeamParameters,
+)
+
+
+def test_clientbound_system_chat_round_trip():
+    content = compound(text=string("Привет, мир!"))
+    packet = SystemChat(content=content, overlay=True)
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "system_chat", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert packet_id == 124
+    assert body[1] == int(TagType.Compound)  # сырой NBT, не VarInt-строка
+    assert body[-1] == 1  # overlay
+    assert packet.content == content
+
+
+def test_clientbound_disguised_chat_round_trip():
+    bound = ChatTypeBound(
+        chat_type=1,
+        name=compound(text=string("chat.type.text")),
+        target=None,
+    )
+    packet = DisguisedChat(
+        message=compound(text=string("hi")), chat_type=bound
+    )
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "disguised_chat", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert packet_id == 33
+    assert body[1] == int(TagType.Compound)
+    # ChatTypeBound: holder id + 1 (1 -> varint 2).
+    assert bound.chat_type == 1
+    assert packet.chat_type == bound
+
+
+def test_clientbound_player_chat_round_trip():
+    uuid = 0x0123456789ABCDEF0123456789ABCDEF
+    bound = ChatTypeBound(
+        chat_type=2,
+        name=compound(text=string("chat.type.text")),
+        target=compound(text=string("Alex")),
+    )
+    packet = PlayerChat(
+        global_index=5,
+        sender=uuid,
+        index=3,
+        signature=None,
+        content="hello",
+        timestamp=1000,
+        salt=42,
+        last_seen=[(2, None), (-1, b"\x11" * 256)],
+        unsigned_content=compound(text=string("raw")),
+        filter=(0, []),
+        chat_type=bound,
+    )
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "player_chat", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert packet_id == 66
+    assert body[1] == 5  # global_index
+    assert body[2:18] == uuid.to_bytes(16, "big")
+    assert body[18] == 3  # index
+    assert body[19] == 0  # signature отсутствует
+    assert packet.salt == 42
+    assert packet.last_seen == [(2, None), (-1, b"\x11" * 256)]
+
+
+def test_clientbound_delete_chat_round_trip():
+    packet = DeleteChat(signature=(-1, b"\x00" * 256))
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "delete_chat", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert packet_id == 31
+    # varint(-1 + 1) = 0, затем 256 байт подписи.
+    assert body[1] == 0
+    assert len(body) == 2 + 256
+
+
+def test_clientbound_command_suggestions_round_trip():
+    packet = CommandSuggestions(
+        id=7,
+        start=0,
+        length=3,
+        matches=[
+            ("abc", None),
+            ("abd", compound(text=string("tooltip"))),
+        ],
+    )
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "command_suggestions", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert packet_id == 15
+    assert body[1] == 7  # id
+    assert body[2] == 0  # start
+    assert body[3] == 3  # length
+    assert body[4] == 2  # число matches
+    assert packet.matches[0] == ("abc", None)
+    assert packet.matches[1][0] == "abd"
+
+
+def test_clientbound_commands_round_trip():
+    nodes = [
+        CommandNode(
+            kind=0,
+            executable=False,
+            restricted=False,
+            children=[1, 2],
+            redirect=None,
+            name="",
+            parser=None,
+            suggestions=None,
+        ),
+        CommandNode(
+            kind=1,
+            executable=True,
+            restricted=False,
+            children=[],
+            redirect=None,
+            name="run",
+            parser=None,
+            suggestions=None,
+        ),
+        CommandNode(
+            kind=2,
+            executable=False,
+            restricted=False,
+            children=[],
+            redirect=0,
+            name="value",
+            parser=(5, b"\x01"),  # brigadier:string, property = VarInt 1
+            suggestions="minecraft:ask_server",
+        ),
+    ]
+    packet = Commands(nodes=nodes, root=0)
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of("commands", State.PLAY, Direction.CLIENTBOUND)
+    assert packet_id == 16
+    assert body[1] == 3  # число узлов
+    assert packet.nodes[2].redirect == 0
+    assert packet.nodes[2].parser == (5, b"\x01")
+    assert packet.nodes[2].suggestions == "minecraft:ask_server"
+
+
+def test_clientbound_commands_rejects_a_cycle():
+    cyc = [
+        CommandNode(
+            kind=0,
+            executable=False,
+            restricted=False,
+            children=[0],
+            redirect=None,
+            name="",
+            parser=None,
+            suggestions=None,
+        )
+    ]
+    body = Commands(nodes=cyc, root=0).encode()
+    with pytest.raises(ProtocolError):
+        Clientbound.decode(16, body)
+
+
+def test_clientbound_titles_round_trip():
+    title = SetTitleText(text=compound(text=string("Title")))
+    subtitle = SetSubtitleText(text=compound(text=string("Sub")))
+    action = SetActionBarText(text=compound(text=string("Bar")))
+    times = SetTitlesAnimation(fade_in=10, stay=70, fade_out=20)
+    clear = ClearTitles(value=True)
+
+    assert round_trip(Clientbound, title)[0] == id_of(
+        "set_title_text", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert round_trip(Clientbound, subtitle)[0] == id_of(
+        "set_subtitle_text", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert round_trip(Clientbound, action)[0] == id_of(
+        "set_action_bar_text", State.PLAY, Direction.CLIENTBOUND
+    )
+    times_id, times_body = round_trip(Clientbound, times)
+    assert times_id == id_of(
+        "set_titles_animation", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert times_body == bytes([times_id]) + struct.pack(
+        ">iii", 10, 70, 20
+    )
+    clear_id, clear_body = round_trip(Clientbound, clear)
+    assert clear_id == id_of(
+        "clear_titles", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert clear_body == bytes([clear_id, 1])
+
+
+def test_clientbound_set_player_team_round_trip():
+    packet = SetPlayerTeam(
+        name="team1",
+        method=0,
+        parameters=TeamParameters(
+            display_name=compound(text=string("Team")),
+            prefix=compound(text=string("[")),
+            suffix=compound(text=string("]")),
+            name_tag_visibility=0,
+            collision_rule=0,
+            color=1,
+            options=3,
+        ),
+        players=["Alex", "Steve"],
+    )
+
+    packet_id, body = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "set_player_team", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert packet_id == 111
+    assert body[1:7] == b"\x05team1"
+    assert body[7] == 0  # method
+    assert packet.players == ["Alex", "Steve"]
+
+    # method 1 (remove) не несёт ни параметров, ни игроков.
+    removed = SetPlayerTeam("team1", 1, None, [])
+    remove_id, remove_body = round_trip(Clientbound, removed)
+    assert remove_body == bytes([remove_id, 5]) + b"team1" + bytes([1])
+
+
+def test_clientbound_set_and_reset_score_round_trip():
+    score = SetScore(
+        owner="Alex",
+        objective="points",
+        score=42,
+        display=compound(text=string("42")),
+        number_format=NumberFormat.fixed(compound(text=string("42"))),
+    )
+    reset = ResetScore(owner="Alex", objective=None)
+
+    score_id, _ = round_trip(Clientbound, score)
+    reset_id, reset_body = round_trip(Clientbound, reset)
+
+    assert score_id == id_of("set_score", State.PLAY, Direction.CLIENTBOUND)
+    assert reset_id == id_of("reset_score", State.PLAY, Direction.CLIENTBOUND)
+    assert reset_body == bytes([reset_id, 4]) + b"Alex" + bytes([0])
+    assert score.number_format == NumberFormat.fixed(
+        compound(text=string("42"))
+    )
+
+
+def test_clientbound_server_data_and_completions_round_trip():
+    server = ServerData(
+        motd=compound(text=string("MOTD")), icon=b"\x01\x02\x03"
+    )
+    completions = CustomChatCompletions(action=2, entries=["/say", "/time"])
+    tab = TabList(
+        header=compound(text=string("H")),
+        footer=compound(text=string("F")),
+    )
+
+    server_id, _ = round_trip(Clientbound, server)
+    completions_id, completions_body = round_trip(Clientbound, completions)
+    tab_id, _ = round_trip(Clientbound, tab)
+
+    assert server_id == id_of("server_data", State.PLAY, Direction.CLIENTBOUND)
+    assert completions_id == id_of(
+        "custom_chat_completions", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert completions_body[1] == 2
+    assert completions_body[2] == 2  # две записи
+    assert tab_id == id_of("tab_list", State.PLAY, Direction.CLIENTBOUND)
+
+
+def test_serverbound_chat_round_trip():
+    last_seen = LastSeenUpdate(
+        offset=3, acknowledged=b"\x00\x00\x00", checksum=1
+    )
+    packet = Chat(
+        message="hello world",
+        timestamp=123456789,
+        salt=99,
+        signature=None,
+        last_seen=last_seen,
+    )
+
+    packet_id, body = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of("chat", State.PLAY, Direction.SERVERBOUND)
+    assert packet_id == 9
+    assert body[1] == 11  # длина строки "hello world"
+    assert body[2:13] == b"hello world"
+    assert packet.timestamp == 123456789
+    assert packet.salt == 99
+    assert body[13] == 0  # подпись отсутствует
+
+
+def test_serverbound_chat_command_and_ack_round_trip():
+    command = ChatCommand(command="say hi")
+    ack = ChatAck(offset=7)
+
+    command_id, command_body = round_trip(Serverbound, command)
+    ack_id, ack_body = round_trip(Serverbound, ack)
+
+    assert command_id == id_of(
+        "chat_command", State.PLAY, Direction.SERVERBOUND
+    )
+    assert command_id == 7
+    assert command_body == bytes([command_id, 6]) + b"say hi"
+    assert ack_id == id_of("chat_ack", State.PLAY, Direction.SERVERBOUND)
+    assert ack_body == bytes([ack_id, 7])
+
+
+def test_serverbound_chat_command_signed_round_trip():
+    packet = ChatCommandSigned(
+        command="msg Alex hi",
+        timestamp=1000,
+        salt=7,
+        arguments=[("target", b"\x01" * 256)],
+        last_seen=LastSeenUpdate(
+            offset=1, acknowledged=b"\x01\x02\x03", checksum=-5
+        ),
+    )
+
+    packet_id, _ = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of(
+        "chat_command_signed", State.PLAY, Direction.SERVERBOUND
+    )
+    assert packet_id == 8
+    assert packet.arguments[0][0] == "target"
+    assert len(packet.arguments[0][1]) == 256
+
+
+def test_serverbound_chat_session_update_round_trip():
+    packet = ChatSessionUpdate(
+        session=0xAAAA,
+        expires_at=1700000000000,
+        key=b"key-bytes",
+        key_signature=b"signature-bytes",
+    )
+
+    packet_id, _ = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of(
+        "chat_session_update", State.PLAY, Direction.SERVERBOUND
+    )
+    assert packet.session == 0xAAAA
+    assert packet.expires_at == 1700000000000
+
+
+def test_serverbound_command_suggestion_round_trip():
+    packet = CommandSuggestion(id=2, text="execute ")
+
+    packet_id, body = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of(
+        "command_suggestion", State.PLAY, Direction.SERVERBOUND
+    )
+    assert packet_id == 15
+    assert body == bytes([packet_id, 2, 8]) + b"execute "
+
+
+def test_part4_replaces_unsupported_stubs():
+    expected_clientbound = {
+        "system_chat": SystemChat,
+        "player_chat": PlayerChat,
+        "disguised_chat": DisguisedChat,
+        "delete_chat": DeleteChat,
+        "command_suggestions": CommandSuggestions,
+        "commands": Commands,
+        "set_title_text": SetTitleText,
+        "set_subtitle_text": SetSubtitleText,
+        "set_action_bar_text": SetActionBarText,
+        "set_titles_animation": SetTitlesAnimation,
+        "clear_titles": ClearTitles,
+        "set_player_team": SetPlayerTeam,
+        "set_score": SetScore,
+        "reset_score": ResetScore,
+        "server_data": ServerData,
+        "custom_chat_completions": CustomChatCompletions,
+        "tab_list": TabList,
+    }
+    for name, cls in expected_clientbound.items():
+        packet_id = id_of(name, State.PLAY, Direction.CLIENTBOUND)
+        assert ID_TO_CLASS[packet_id] is cls, name
+
+    expected_serverbound = {
+        "chat": Chat,
+        "chat_command": ChatCommand,
+        "chat_ack": ChatAck,
+        "chat_command_signed": ChatCommandSigned,
+        "chat_session_update": ChatSessionUpdate,
+        "command_suggestion": CommandSuggestion,
+    }
+    for name, cls in expected_serverbound.items():
+        packet_id = id_of(name, State.PLAY, Direction.SERVERBOUND)
+        assert SERVERBOUND_ID_TO_CLASS[packet_id] is cls, name
+

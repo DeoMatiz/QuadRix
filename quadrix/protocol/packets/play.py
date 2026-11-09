@@ -45,6 +45,8 @@ from quadrix.protocol import ids
 from quadrix.protocol.buf import (
     Bool,
     Byte,
+    Bytes,
+    BytesN,
     Double,
     Float,
     Ident,
@@ -52,12 +54,14 @@ from quadrix.protocol.buf import (
     List,
     Long,
     LpVec3,
+    Nbt,
     Opt,
     OptVarInt,
     Pos,
     ProtocolError,
     Reader,
     Short,
+    Str,
     StrN,
     UByte,
     Uuid,
@@ -74,6 +78,7 @@ from quadrix.protocol.packets.handshake import (
     _Packet,
     _PacketSet,
 )
+from quadrix.world.nbt import Tag, TagType
 
 __all__ = [
     # исключение для незапортированных payload'ов
@@ -151,6 +156,45 @@ __all__ = [
     "ClientCommand",
     "PickItemFromEntity",
     "MoveVehicleRequest",
+    # PART 4: чат и команды — общие кодеки
+    "Signature",
+    "PackedSignature",
+    "FilterMask",
+    "HolderId",
+    "ChatTypeBound",
+    "Text",
+    "TitlesAnimation",
+    "LastSeenUpdate",
+    "ArgumentSignatures",
+    # PART 4: чат и команды — clientbound
+    "SystemChat",
+    "PlayerChat",
+    "DisguisedChat",
+    "DeleteChat",
+    "CommandSuggestions",
+    "Commands",
+    "CommandNode",
+    "ARGUMENT_TYPES",
+    "SetTitleText",
+    "SetSubtitleText",
+    "SetActionBarText",
+    "SetTitlesAnimation",
+    "ClearTitles",
+    "SetPlayerTeam",
+    "TeamParameters",
+    "SetScore",
+    "ResetScore",
+    "NumberFormat",
+    "ServerData",
+    "CustomChatCompletions",
+    "TabList",
+    # PART 4: чат и команды — serverbound
+    "Chat",
+    "ChatCommand",
+    "ChatAck",
+    "ChatCommandSigned",
+    "ChatSessionUpdate",
+    "CommandSuggestion",
     # таблицы
     "ID_TO_CLASS",
     "CLASS_TO_ID",
@@ -1955,6 +1999,966 @@ class MoveVehicleRequest(_Packet):
         Bool.write(self.on_ground, w)
 
 
+# ── PART 4: чат и команды (play.rs) ──────────────────────────────────
+#
+# Источник — play.rs. Портированы пакеты чата, заголовков и команд.
+# NBT-компоненты (тело чата, message, tooltip, заголовок) хранятся как
+# сырой Tag: разбор в rich-text — это рендер (PART 6+), не протокол.
+# Имена полей и вариантов сохранены дословно как в Rust.
+#
+# CommandSuggestions / CommandSuggestion: их ID есть в ids.rs
+# (play::clientbound::COMMAND_SUGGESTIONS = 15,
+# play::serverbound::COMMAND_SUGGESTION = 15), но в packet_enum! Rust они
+# не перечислены. Wire-формат взят из vanilla 26.3:
+#   clientbound — id VarInt, start VarInt, length VarInt,
+#                 list of (String, Optional<Component NBT>);
+#   serverbound — id VarInt, text String.
+#
+# Безопасный чат (secure_chat.rs) как логика НЕ портируется: подписи
+# (Signature, PackedSignature) и сессия (ChatSessionUpdate) хранятся как
+# байты, криптография не проверяется.
+
+# ---- общие кодеки чата ------------------------------------------------
+
+_SIGNATURE_SIZE = 256
+
+#: Tag::End — заглушка отсутствующего NBT-компонента (play.rs `Tag::End`).
+_EMPTY_TAG = Tag(TagType.End, is_end=True)
+
+
+class Signature:
+    """MessageSignature: ровно 256 необработанных байт (play.rs)."""
+
+    @classmethod
+    def read(cls, r: Reader) -> bytes:
+        return bytes(r.bytes(_SIGNATURE_SIZE))
+
+    @classmethod
+    def write(cls, v: bytes, w: Writer) -> None:
+        w.bytes(v)
+
+
+class PackedSignature:
+    """MessageSignature.Packed: индекс в кэше или полная подпись.
+
+    Форма на проводе — (i32, Optional[bytes]): varint(index + 1), а
+    когда индекс равен -1, следом идут 256 байт подписи.
+    """
+
+    @classmethod
+    def read(cls, r: Reader) -> Tuple[int, Optional[bytes]]:
+        index = r.varint() - 1
+        if index == -1:
+            return (-1, bytes(r.bytes(_SIGNATURE_SIZE)))
+        return (index, None)
+
+    @classmethod
+    def write(cls, v: Tuple[int, Optional[bytes]], w: Writer) -> None:
+        index, signature = v
+        w.varint(index + 1)
+        if signature is not None:
+            w.bytes(signature)
+
+
+class FilterMask:
+    """FilterMask: 0 pass-through, 1 fully filtered, 2 partially (BitSet)."""
+
+    @classmethod
+    def read(cls, r: Reader) -> Tuple[int, list[int]]:
+        kind = r.varint()
+        return (kind, r.long_array() if kind == 2 else [])
+
+    @classmethod
+    def write(cls, v: Tuple[int, list[int]], w: Writer) -> None:
+        kind, bits = v
+        w.varint(kind)
+        if kind == 2:
+            w.long_array(bits)
+
+
+class HolderId:
+    """Holder reference: registry id + 1; 0 — inline (не поддержано)."""
+
+    @classmethod
+    def read(cls, r: Reader) -> int:
+        ident = r.varint()
+        if ident == 0:
+            raise ProtocolError(
+                "[QuadRix] inline registry values are not supported"
+            )
+        return ident - 1
+
+    @classmethod
+    def write(cls, v: int, w: Writer) -> None:
+        w.varint(v + 1)
+
+
+@dataclass(frozen=True)
+class ChatTypeBound:
+    """ChatType.Bound: holder чата, имя и опциональная цель (NBT)."""
+
+    chat_type: int
+    name: object
+    target: Optional[object]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChatTypeBound":
+        return cls(HolderId.read(r), Nbt.read(r), Opt(Nbt).read(r))
+
+    def write(self, w: Writer) -> None:
+        HolderId.write(self.chat_type, w)
+        Nbt.write(self.name, w)
+        Opt(Nbt).write(self.target, w)
+
+
+@dataclass(frozen=True)
+class Text:
+    """play.rs Text: NBT-компонент заголовка/подзаголовка/action bar."""
+
+    text: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "Text":
+        return cls(Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.text, w)
+
+
+@dataclass(frozen=True)
+class TitlesAnimation:
+    """ClientboundSetTitlesAnimationPacket: fade_in, stay, fade_out."""
+
+    fade_in: int
+    stay: int
+    fade_out: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "TitlesAnimation":
+        return cls(Int.read(r), Int.read(r), Int.read(r))
+
+    def write(self, w: Writer) -> None:
+        Int.write(self.fade_in, w)
+        Int.write(self.stay, w)
+        Int.write(self.fade_out, w)
+
+
+@dataclass(frozen=True)
+class LastSeenUpdate:
+    """LastSeenMessages.Update: offset, 20-битный BitSet (3 байта), checksum."""
+
+    offset: int
+    acknowledged: bytes
+    checksum: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "LastSeenUpdate":
+        return cls(VarInt.read(r), bytes(r.bytes(3)), Byte.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.offset, w)
+        w.bytes(self.acknowledged)
+        Byte.write(self.checksum, w)
+
+
+class ArgumentSignatures:
+    """ArgumentSignatures: до 8 пар (имя ≤ 16 символов, подпись 256 байт)."""
+
+    @classmethod
+    def read(cls, r: Reader) -> list[Tuple[str, bytes]]:
+        n = r.count(8)
+        return [
+            (r.string(16), bytes(r.bytes(_SIGNATURE_SIZE))) for _ in range(n)
+        ]
+
+    @classmethod
+    def write(cls, v: list[Tuple[str, bytes]], w: Writer) -> None:
+        w.varint(len(v))
+        for name, signature in v:
+            w.string(name)
+            w.bytes(signature)
+
+
+# ---- clientbound: чат -------------------------------------------------
+
+@dataclass
+class SystemChat(_Packet):
+    """ClientboundSystemChatPacket: NBT-компонент и признак overlay."""
+
+    content: object
+    overlay: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "SystemChat":
+        return cls(Nbt.read(r), Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.content, w)
+        Bool.write(self.overlay, w)
+
+
+@dataclass
+class DisguisedChat(_Packet):
+    """ClientboundDisguisedChatPacket: message (NBT) и ChatType.Bound."""
+
+    message: object
+    chat_type: ChatTypeBound
+
+    @classmethod
+    def read(cls, r: Reader) -> "DisguisedChat":
+        return cls(Nbt.read(r), ChatTypeBound.read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.message, w)
+        self.chat_type.write(w)
+
+
+@dataclass
+class DeleteChat(_Packet):
+    """ClientboundDeleteChatPacket: удалённое сообщение по packed signature."""
+
+    signature: Tuple[int, Optional[bytes]]
+
+    @classmethod
+    def read(cls, r: Reader) -> "DeleteChat":
+        return cls(PackedSignature.read(r))
+
+    def write(self, w: Writer) -> None:
+        PackedSignature.write(self.signature, w)
+
+
+@dataclass
+class PlayerChat(_Packet):
+    """ClientboundPlayerChatPacket: подписанное сообщение игрока.
+
+    Поля — дословно из play.rs: global_index, sender (UUID),
+    index, signature (Optional<256 байт>), content (StrN<256>),
+    timestamp, salt, last_seen (индексы/packed), unsigned_content (NBT),
+    filter (FilterMask) и chat_type.
+    """
+
+    global_index: int
+    sender: int
+    index: int
+    signature: Optional[bytes]
+    content: str
+    timestamp: int
+    salt: int
+    last_seen: list[Tuple[int, Optional[bytes]]]
+    unsigned_content: Optional[object]
+    filter: Tuple[int, list[int]]
+    chat_type: ChatTypeBound
+
+    @classmethod
+    def read(cls, r: Reader) -> "PlayerChat":
+        return cls(
+            VarInt.read(r),
+            Uuid.read(r),
+            VarInt.read(r),
+            Opt(Signature).read(r),
+            StrN(256).read(r),
+            Long.read(r),
+            Long.read(r),
+            List(PackedSignature).read(r),
+            Opt(Nbt).read(r),
+            FilterMask.read(r),
+            ChatTypeBound.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.global_index, w)
+        Uuid.write(self.sender, w)
+        VarInt.write(self.index, w)
+        Opt(Signature).write(self.signature, w)
+        StrN(256).write(self.content, w)
+        Long.write(self.timestamp, w)
+        Long.write(self.salt, w)
+        List(PackedSignature).write(self.last_seen, w)
+        Opt(Nbt).write(self.unsigned_content, w)
+        FilterMask.write(self.filter, w)
+        self.chat_type.write(w)
+
+
+# ---- clientbound: команды ---------------------------------------------
+
+#: Реестр minecraft:command_argument_type 26.3 в порядке id
+#: (play.rs ARGUMENT_TYPES, ArgumentTypeInfos.bootstrap).
+ARGUMENT_TYPES: Tuple[str, ...] = (
+    "brigadier:bool",
+    "brigadier:float",
+    "brigadier:double",
+    "brigadier:integer",
+    "brigadier:long",
+    "brigadier:string",
+    "minecraft:entity",
+    "minecraft:game_profile",
+    "minecraft:block_pos",
+    "minecraft:column_pos",
+    "minecraft:vec3",
+    "minecraft:vec2",
+    "minecraft:block_state",
+    "minecraft:block_predicate",
+    "minecraft:item_stack",
+    "minecraft:item_predicate",
+    "minecraft:team_color",
+    "minecraft:hex_color",
+    "minecraft:component",
+    "minecraft:style",
+    "minecraft:message",
+    "minecraft:nbt_compound_tag",
+    "minecraft:nbt_tag",
+    "minecraft:nbt_path",
+    "minecraft:objective",
+    "minecraft:objective_criteria",
+    "minecraft:operation",
+    "minecraft:particle",
+    "minecraft:angle",
+    "minecraft:rotation",
+    "minecraft:scoreboard_slot",
+    "minecraft:score_holder",
+    "minecraft:swizzle",
+    "minecraft:team",
+    "minecraft:item_slot",
+    "minecraft:item_slots",
+    "minecraft:resource_location",
+    "minecraft:function",
+    "minecraft:entity_anchor",
+    "minecraft:int_range",
+    "minecraft:float_range",
+    "minecraft:dimension",
+    "minecraft:gamemode",
+    "minecraft:time",
+    "minecraft:resource_or_tag",
+    "minecraft:resource_or_tag_key",
+    "minecraft:resource",
+    "minecraft:resource_key",
+    "minecraft:resource_selector",
+    "minecraft:template_mirror",
+    "minecraft:template_rotation",
+    "minecraft:heightmap",
+    "minecraft:loot_table",
+    "minecraft:loot_predicate",
+    "minecraft:loot_modifier",
+    "minecraft:context_float_provider",
+    "minecraft:context_int_provider",
+    "minecraft:slot_source",
+    "minecraft:dialog",
+    "minecraft:feature",
+    "minecraft:swing_animation",
+    "minecraft:uuid",
+)
+
+
+def _read_argument_properties(r: Reader, argument_id: int) -> None:
+    """Пропустить свойства парсера аргумента (`ArgumentTypeInfo`).
+
+    Порт ArgumentTypeInfo.deserializeFromNetwork: только те парсеры,
+    что несут байты в 26.3. Имена берутся из ARGUMENT_TYPES по id
+    (Registry опережает остальные и сдвигает их по кодировке).
+    """
+    if not 0 <= argument_id < len(ARGUMENT_TYPES):
+        raise ProtocolError(
+            f"[QuadRix] unknown argument type {argument_id}"
+        )
+    name = ARGUMENT_TYPES[argument_id]
+    if name in ("brigadier:integer", "brigadier:long", "brigadier:float",
+                "brigadier:double"):
+        flags = r.u8()
+        if name == "brigadier:integer":
+            if flags & 1:
+                r.i32()
+            if flags & 2:
+                r.i32()
+        elif name == "brigadier:long":
+            if flags & 1:
+                r.i64()
+            if flags & 2:
+                r.i64()
+        elif name == "brigadier:float":
+            if flags & 1:
+                r.f32()
+            if flags & 2:
+                r.f32()
+        else:
+            if flags & 1:
+                r.f64()
+            if flags & 2:
+                r.f64()
+    elif name == "brigadier:string":
+        r.varint()
+    elif name == "minecraft:entity":
+        r.u8()
+    elif name == "minecraft:score_holder":
+        r.u8()
+    elif name == "minecraft:time":
+        r.i32()
+    elif name in (
+        "minecraft:resource",
+        "minecraft:resource_key",
+        "minecraft:resource_or_tag",
+        "minecraft:resource_or_tag_key",
+        "minecraft:resource_selector",
+    ):
+        r.string(32767)
+    # Остальные парсеры не несут свойств на проводе.
+
+
+@dataclass(frozen=True)
+class CommandNode:
+    """Один узел ClientboundCommandsPacket: литерал или аргумент.
+
+    kind: 0 root, 1 literal, 2 argument. parser хранит (id, сырые байты)
+    свойств, suggestions — провайдер подсказок (minecraft:ask_server).
+    """
+
+    kind: int
+    executable: bool
+    restricted: bool
+    children: list[int]
+    redirect: Optional[int]
+    name: str
+    parser: Optional[Tuple[int, bytes]]
+    suggestions: Optional[str]
+
+
+def _acyclic(nodes: list[CommandNode], edges) -> bool:
+    """Порт play.rs `acyclic`: обход без рекурсии, цикл — False."""
+    new, on_path, done = 0, 1, 2
+    state = [new] * len(nodes)
+    for start in range(len(nodes)):
+        if state[start] != new:
+            continue
+        state[start] = on_path
+        path: list[list[int]] = [[start, 0]]
+        while path:
+            node, followed = path[-1]
+            edge_list = edges(nodes[node])
+            if followed >= len(edge_list):
+                state[node] = done
+                path.pop()
+                continue
+            path[-1][1] += 1
+            edge = edge_list[followed]
+            if edge < 0 or edge >= len(nodes):
+                continue
+            if state[edge] == on_path:
+                return False
+            if state[edge] == new:
+                state[edge] = on_path
+                path.append([edge, 0])
+    return True
+
+
+@dataclass
+class Commands(_Packet):
+    """ClientboundCommandsPacket: узлы дерева и индекс корня."""
+
+    nodes: list[CommandNode]
+    root: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "Commands":
+        n = r.count(r.remaining())
+        nodes: list[CommandNode] = []
+        for _ in range(n):
+            flags = r.u8()
+            count = r.count(r.remaining())
+            children = [r.varint() for _ in range(count)]
+            redirect = r.varint() if flags & 8 else None
+            kind = flags & 3
+            name = ""
+            parser: Optional[Tuple[int, bytes]] = None
+            suggestions: Optional[str] = None
+            if kind >= 1:
+                name = r.string(32767)
+            if kind == 2:
+                arg_id = r.varint()
+                start = r.position()
+                _read_argument_properties(r, arg_id)
+                parser = (arg_id, bytes(r.since(start)))
+                if flags & 16:
+                    suggestions = r.string(32767)
+            nodes.append(
+                CommandNode(
+                    kind=kind,
+                    executable=bool(flags & 4),
+                    restricted=bool(flags & 32),
+                    children=children,
+                    redirect=redirect,
+                    name=name,
+                    parser=parser,
+                    suggestions=suggestions,
+                )
+            )
+        # ClientboundCommandsPacket.validateEntries: сначала redirect
+        # (canBuild), потом children (canResolve).
+        if not _acyclic(nodes, lambda node: [node.redirect] if node.redirect is not None else []):
+            raise ProtocolError("[QuadRix] Server sent an impossible command tree")
+        if not _acyclic(nodes, lambda node: node.children):
+            raise ProtocolError("[QuadRix] Server sent an impossible command tree")
+        return cls(nodes, r.varint())
+
+    def write(self, w: Writer) -> None:
+        w.varint(len(self.nodes))
+        for node in self.nodes:
+            flags = node.kind & 3
+            if node.executable:
+                flags |= 4
+            if node.redirect is not None:
+                flags |= 8
+            if node.suggestions is not None:
+                flags |= 16
+            if node.restricted:
+                flags |= 32
+            w.u8(flags)
+            w.varint(len(node.children))
+            for child in node.children:
+                w.varint(child)
+            if node.redirect is not None:
+                w.varint(node.redirect)
+            if node.kind >= 1:
+                w.string(node.name)
+            if node.kind == 2:
+                arg_id, props = node.parser if node.parser is not None else (5, b"")
+                w.varint(arg_id)
+                w.bytes(props)
+                if node.suggestions is not None:
+                    w.string(node.suggestions)
+        w.varint(self.root)
+
+
+@dataclass
+class CommandSuggestions(_Packet):
+    """ClientboundCommandSuggestionsPacket: id, start, length, matches."""
+
+    id: int
+    start: int
+    length: int
+    matches: list[Tuple[str, Optional[object]]]
+
+    @classmethod
+    def read(cls, r: Reader) -> "CommandSuggestions":
+        ident = VarInt.read(r)
+        start = VarInt.read(r)
+        length = VarInt.read(r)
+        count = r.count(r.remaining())
+        matches: list[Tuple[str, Optional[object]]] = []
+        for _ in range(count):
+            text = r.string(32767)
+            tooltip = Opt(Nbt).read(r)
+            matches.append((text, tooltip))
+        return cls(ident, start, length, matches)
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        VarInt.write(self.start, w)
+        VarInt.write(self.length, w)
+        w.varint(len(self.matches))
+        for text, tooltip in self.matches:
+            w.string(text)
+            Opt(Nbt).write(tooltip, w)
+
+
+# ---- clientbound: заголовки -------------------------------------------
+
+@dataclass
+class SetTitleText(_Packet):
+    """ClientboundSetTitleTextPacket: NBT-компонент заголовка."""
+
+    text: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetTitleText":
+        return cls(Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.text, w)
+
+
+@dataclass
+class SetSubtitleText(_Packet):
+    """ClientboundSetSubtitleTextPacket: NBT-компонент подзаголовка."""
+
+    text: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetSubtitleText":
+        return cls(Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.text, w)
+
+
+@dataclass
+class SetActionBarText(_Packet):
+    """ClientboundSetActionBarTextPacket: NBT-компонент action bar."""
+
+    text: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetActionBarText":
+        return cls(Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.text, w)
+
+
+@dataclass
+class SetTitlesAnimation(_Packet):
+    """ClientboundSetTitlesAnimationPacket (Bool1-независимый)."""
+
+    fade_in: int
+    stay: int
+    fade_out: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetTitlesAnimation":
+        return cls(Int.read(r), Int.read(r), Int.read(r))
+
+    def write(self, w: Writer) -> None:
+        Int.write(self.fade_in, w)
+        Int.write(self.stay, w)
+        Int.write(self.fade_out, w)
+
+
+@dataclass
+class ClearTitles(_Packet):
+    """ClientboundClearTitlesPacket: сбрасывать ли и тайминги."""
+
+    value: bool
+
+    @classmethod
+    def read(cls, r: Reader) -> "ClearTitles":
+        return cls(Bool.read(r))
+
+    def write(self, w: Writer) -> None:
+        Bool.write(self.value, w)
+
+
+# ---- clientbound: команды и очки --------------------------------------
+
+@dataclass(frozen=True)
+class TeamParameters:
+    """ClientboundSetPlayerTeamPacket.Parameters."""
+
+    display_name: object
+    prefix: object
+    suffix: object
+    name_tag_visibility: int
+    collision_rule: int
+    color: Optional[int]
+    options: int
+
+
+@dataclass
+class SetPlayerTeam(_Packet):
+    """ClientboundSetPlayerTeamPacket: method 0 добавляет (параметры и
+    игроки), 1 удаляет, 2 меняет (параметры), 3 входит и 4 покидает
+    (игроки)."""
+
+    name: str
+    method: int
+    parameters: Optional[TeamParameters]
+    players: list[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetPlayerTeam":
+        name = Str.read(r)
+        method = Byte.read(r)
+        parameters = None
+        if method in (0, 2):
+            parameters = TeamParameters(
+                Nbt.read(r),
+                Nbt.read(r),
+                Nbt.read(r),
+                VarInt.read(r),
+                VarInt.read(r),
+                OptVarInt.read(r),
+                Byte.read(r),
+            )
+        players = List(Str).read(r) if method in (0, 3, 4) else []
+        return cls(name, method, parameters, players)
+
+    def write(self, w: Writer) -> None:
+        Str.write(self.name, w)
+        Byte.write(self.method, w)
+        if self.method in (0, 2):
+            params = self.parameters or TeamParameters(
+                _EMPTY_TAG,
+                _EMPTY_TAG,
+                _EMPTY_TAG,
+                0,
+                0,
+                None,
+                0,
+            )
+            Nbt.write(params.display_name, w)
+            Nbt.write(params.prefix, w)
+            Nbt.write(params.suffix, w)
+            VarInt.write(params.name_tag_visibility, w)
+            VarInt.write(params.collision_rule, w)
+            OptVarInt.write(params.color, w)
+            Byte.write(params.options, w)
+        if self.method in (0, 3, 4):
+            List(Str).write(self.players, w)
+
+
+@dataclass(frozen=True)
+class NumberFormat:
+    """NumberFormatTypes: 0 blank, 1 styled (стиль), 2 fixed (компонент)."""
+
+    kind: int
+    tag: Optional[object] = None
+
+    @classmethod
+    def blank(cls) -> "NumberFormat":
+        return cls(0)
+
+    @classmethod
+    def styled(cls, tag: object) -> "NumberFormat":
+        return cls(1, tag)
+
+    @classmethod
+    def fixed(cls, tag: object) -> "NumberFormat":
+        return cls(2, tag)
+
+    @classmethod
+    def read(cls, r: Reader) -> "NumberFormat":
+        kind = r.varint()
+        if kind == 0:
+            return cls(0)
+        if kind in (1, 2):
+            return cls(kind, Nbt.read(r))
+        raise ProtocolError(f"[QuadRix] unknown number format {kind}")
+
+    def write(self, w: Writer) -> None:
+        w.varint(self.kind)
+        if self.kind in (1, 2):
+            Nbt.write(self.tag, w)
+
+
+@dataclass
+class SetScore(_Packet):
+    """ClientboundSetScorePacket."""
+
+    owner: str
+    objective: str
+    score: int
+    display: Optional[object]
+    number_format: Optional[NumberFormat]
+
+    @classmethod
+    def read(cls, r: Reader) -> "SetScore":
+        return cls(
+            Str.read(r),
+            Str.read(r),
+            VarInt.read(r),
+            Opt(Nbt).read(r),
+            Opt(NumberFormat).read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Str.write(self.owner, w)
+        Str.write(self.objective, w)
+        VarInt.write(self.score, w)
+        Opt(Nbt).write(self.display, w)
+        Opt(NumberFormat).write(self.number_format, w)
+
+
+@dataclass
+class ResetScore(_Packet):
+    """ClientboundResetScorePacket: одна цель или все, если objective None."""
+
+    owner: str
+    objective: Optional[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ResetScore":
+        return cls(Str.read(r), Opt(Str).read(r))
+
+    def write(self, w: Writer) -> None:
+        Str.write(self.owner, w)
+        Opt(Str).write(self.objective, w)
+
+
+# ---- clientbound: прочее (tab list, server data, completions) ---------
+
+@dataclass
+class TabList(_Packet):
+    """ClientboundTabListPacket: header и footer (NBT)."""
+
+    header: object
+    footer: object
+
+    @classmethod
+    def read(cls, r: Reader) -> "TabList":
+        return cls(Nbt.read(r), Nbt.read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.header, w)
+        Nbt.write(self.footer, w)
+
+
+@dataclass
+class ServerData(_Packet):
+    """ClientboundServerDataPacket: motd (NBT) и опциональная иконка."""
+
+    motd: object
+    icon: Optional[bytes]
+
+    @classmethod
+    def read(cls, r: Reader) -> "ServerData":
+        return cls(Nbt.read(r), Opt(Bytes).read(r))
+
+    def write(self, w: Writer) -> None:
+        Nbt.write(self.motd, w)
+        Opt(Bytes).write(self.icon, w)
+
+
+@dataclass
+class CustomChatCompletions(_Packet):
+    """ClientboundCustomChatCompletionsPacket: действие и строки."""
+
+    action: int
+    entries: list[str]
+
+    @classmethod
+    def read(cls, r: Reader) -> "CustomChatCompletions":
+        return cls(VarInt.read(r), List(Str).read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.action, w)
+        List(Str).write(self.entries, w)
+
+
+# ---- serverbound: чат и команды ---------------------------------------
+
+@dataclass
+class Chat(_Packet):
+    """ServerboundChatPacket: сообщение, подпись и LastSeenUpdate."""
+
+    message: str
+    timestamp: int
+    salt: int
+    signature: Optional[bytes]
+    last_seen: LastSeenUpdate
+
+    @classmethod
+    def read(cls, r: Reader) -> "Chat":
+        return cls(
+            StrN(256).read(r),
+            Long.read(r),
+            Long.read(r),
+            Opt(Signature).read(r),
+            LastSeenUpdate.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        StrN(256).write(self.message, w)
+        Long.write(self.timestamp, w)
+        Long.write(self.salt, w)
+        Opt(Signature).write(self.signature, w)
+        self.last_seen.write(w)
+
+
+@dataclass
+class ChatCommand(_Packet):
+    """ServerboundChatCommandPacket: только строка команды."""
+
+    command: str
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChatCommand":
+        return cls(Str.read(r))
+
+    def write(self, w: Writer) -> None:
+        Str.write(self.command, w)
+
+
+@dataclass
+class ChatAck(_Packet):
+    """ServerboundChatAckPacket: сколько сообщений подтверждено."""
+
+    offset: int
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChatAck":
+        return cls(VarInt.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.offset, w)
+
+
+@dataclass
+class ChatCommandSigned(_Packet):
+    """ServerboundChatCommandSignedPacket: команда, подписи аргументов,
+    timestamp, salt и LastSeenUpdate."""
+
+    command: str
+    timestamp: int
+    salt: int
+    arguments: list[Tuple[str, bytes]]
+    last_seen: LastSeenUpdate
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChatCommandSigned":
+        return cls(
+            Str.read(r),
+            Long.read(r),
+            Long.read(r),
+            ArgumentSignatures.read(r),
+            LastSeenUpdate.read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Str.write(self.command, w)
+        Long.write(self.timestamp, w)
+        Long.write(self.salt, w)
+        ArgumentSignatures.write(self.arguments, w)
+        self.last_seen.write(w)
+
+
+@dataclass
+class ChatSessionUpdate(_Packet):
+    """ServerboundChatSessionUpdatePacket: RemoteChatSession.Data."""
+
+    session: int
+    expires_at: int
+    key: bytes
+    key_signature: bytes
+
+    @classmethod
+    def read(cls, r: Reader) -> "ChatSessionUpdate":
+        return cls(
+            Uuid.read(r),
+            Long.read(r),
+            BytesN(512).read(r),
+            BytesN(4096).read(r),
+        )
+
+    def write(self, w: Writer) -> None:
+        Uuid.write(self.session, w)
+        Long.write(self.expires_at, w)
+        BytesN(512).write(self.key, w)
+        BytesN(4096).write(self.key_signature, w)
+
+
+@dataclass
+class CommandSuggestion(_Packet):
+    """ServerboundCommandSuggestionPacket: id и текст запроса."""
+
+    id: int
+    text: str
+
+    @classmethod
+    def read(cls, r: Reader) -> "CommandSuggestion":
+        return cls(VarInt.read(r), Str.read(r))
+
+    def write(self, w: Writer) -> None:
+        VarInt.write(self.id, w)
+        Str.write(self.text, w)
+
+
 # ── Реализованные ID (3 clientbound + 3 serverbound в PART 1) ────────
 
 _CLIENTBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
@@ -1999,6 +3003,24 @@ _CLIENTBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
     "swing_animation": SwingAnimation,
     "take_item_entity": TakeItemEntity,
     "update_attributes": UpdateAttributes,
+    # PART 4: чат, заголовки и команды
+    "system_chat": SystemChat,
+    "player_chat": PlayerChat,
+    "disguised_chat": DisguisedChat,
+    "delete_chat": DeleteChat,
+    "command_suggestions": CommandSuggestions,
+    "commands": Commands,
+    "set_title_text": SetTitleText,
+    "set_subtitle_text": SetSubtitleText,
+    "set_action_bar_text": SetActionBarText,
+    "set_titles_animation": SetTitlesAnimation,
+    "clear_titles": ClearTitles,
+    "set_player_team": SetPlayerTeam,
+    "set_score": SetScore,
+    "reset_score": ResetScore,
+    "server_data": ServerData,
+    "custom_chat_completions": CustomChatCompletions,
+    "tab_list": TabList,
 }
 
 _SERVERBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
@@ -2021,6 +3043,13 @@ _SERVERBOUND_IMPLEMENTED: Dict[str, Type[_Packet]] = {
     "client_command": ClientCommand,
     "pick_item_from_entity": PickItemFromEntity,
     "move_vehicle": MoveVehicleRequest,
+    # PART 4: чат и команды
+    "chat": Chat,
+    "chat_command": ChatCommand,
+    "chat_ack": ChatAck,
+    "chat_command_signed": ChatCommandSigned,
+    "chat_session_update": ChatSessionUpdate,
+    "command_suggestion": CommandSuggestion,
 }
 
 
