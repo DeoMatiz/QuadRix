@@ -508,10 +508,30 @@ files:
   - rust: horizon-items/src/item_data.rs
     python: quadrix/items/item_data.py
     test: tests/items/test_item_data.py
-    status: pending
+    status: done
     lines_rust: ~2000
+    lines_python: ~800
+    depends_on: [quadrix/items/items.py, quadrix/protocol/buf.py, quadrix/world/nbt.py]
+    note: >
+      Две модели: NBT (StackData, decode_components, encode_components,
+      components_tag) и wire (Component* union, Stack, Slot/DelimitedSlot/Template,
+      ComponentMap/ComponentPatch, read_stack/write_stack). 122 components из
+      .local/horizon-client/26.3/registries.json (minecraft:data_component_type).
+      Name-collision: NBT WrittenBook/FireworkExplosion vs wire WireWrittenBook/
+      WireFireworkExplosion. skip.rs → _skip_component → ComponentRaw.
+      ComponentPatch.apply: DAMAGE→stack.damage, остальное→stack.extra.
+      13 tests.
+      ⚠️ play.py всё ещё кидает ProtocolError на non-empty patches —
+      следующая сессия заменит на реальный парсинг через ComponentPatch.
+
+  - rust: horizon-items/src/items.rs (APPEND helpers)
+    python: quadrix/items/items.py
+    test: tests/items/test_items.py
+    status: done
     depends_on: [quadrix/items/items.py]
-    note: "Item components (damage, enchant, custom_data)."
+    note: >
+      APPEND: ItemStack.next_damage, damage_per_hit, same_item (components-aware),
+      is_damageable, is_stackable. 15 существующих тестов не сломаны.
 
   - rust: horizon-items/src/enchant.rs
     python: quadrix/items/enchant.py
