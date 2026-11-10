@@ -690,6 +690,19 @@ files:
       10 tests passed. Uses item_use.py (is_blocking), world_ray.py,
       block_placement.py, block_survival.py via dependencies.
 
+  - rust: horizon-world/src/item_use_start.rs
+    python: quadrix/world/item_use_start.py
+    test: tests/world/test_item_use_start.py
+    status: done
+    note: >
+      Порт start функции и трейта StartUseWorld из item_use_start.rs.
+      Содержит функцию start, инициализирующую состояние использования
+      предмета (еда, лук, и т.д.), и трейт StartUseWorld с методами
+      duration, synchronize_equipment, is_off_hand, set_off_hand_flag,
+      start_vibration, has_kinetic_weapon, reset_recent_kinetic_enemies.
+      Зависимости: item_use_catalog, item_use, world_ray, block_placement.
+      7 tests passed.
+
   - rust: horizon-world/src/item_after_use.rs
     python: quadrix/world/item_after_use.py
     test: tests/world/test_item_after_use.py
