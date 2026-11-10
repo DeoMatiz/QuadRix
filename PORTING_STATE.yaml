@@ -425,6 +425,19 @@ files:
       ⚠️ В Rust входящий пакет — PlayerPosition, не SyncPlayerPosition
       (в play.py класса SyncPlayerPosition нет).
 
+  - rust: horizon-protocol/src/packets/play.rs (ItemStack patches fix)
+    python: quadrix/protocol/packets/play.py
+    test: tests/protocol/test_play.py + tests/protocol/test_item_stack_wire.py
+    status: done
+    depends_on: [quadrix/items/item_data.py, quadrix/items/items.py]
+    note: >
+      _Slot / _Template в play.py → псевдонимы item_data.Slot / Template /
+      DelimitedSlot / Stack. ProtocolError на non-empty patches убран.
+      SetCreativeModeSlot → DelimitedSlot (item.rs:1067). NetCost (MerchantOffers)
+      → реальный Vec<(i32, Component)> через read_component / write_component.
+      +18 тестов (7 в test_play.py + 11 в test_item_stack_wire.py).
+      563 passed, 0 failed, 0 Unsupported.
+
   - rust: horizon-protocol/src/crypto.rs
     python: quadrix/protocol/crypto.py
     test: tests/protocol/test_crypto.py
