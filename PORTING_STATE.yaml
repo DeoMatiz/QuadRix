@@ -672,9 +672,6 @@ files:
       еда/вёдра/кровати/семена/зажигалка/ножницы живут в item_use_catalog.rs,
       inventory_use.rs, item_use_start.rs, item_use_lifecycle.rs,
       item_after_use.rs (все ещё pending, отдельные сессии). Сохранено
-      i32::wrapping_sub (wrapping_sub_i32). FALLBACK не потребовался —
-      модуль чистый, данных из .local не читает. 14 tests.
-
   - rust: horizon-world/src/item_use_catalog.rs
     python: quadrix/world/item_use_catalog.py
     test: tests/world/test_item_use_catalog.py
@@ -717,17 +714,23 @@ files:
       # FALLBACK: bow shooting pending (test_complete_bow_shooting_fallback exists).
 
   - rust: horizon-world/src/item_after_use.rs
-    python: quadrix/world/item_after_use.py
-    test: tests/world/test_item_after_use.py
+  - rust: horizon-world/src/inventory_use.rs
+    python: quadrix/world/inventory_use.py
+    test: tests/world/test_inventory_use.py
     status: done
     note: >
-      Port of item_after_use.rs: functions after_use and finish.
-      Uses AfterUseWorld trait methods (remainder, cooldown, prototype,
-      finish_item, infinite_materials, extra_item, apply_cooldown).
-      Dependencies: item_use_catalog (ItemUseStack), item_use_lifecycle (UseState).
-      5 tests passed (covering remainder, cooldown, no-components, both components, finish).
-      # FALLBACK: none - all components ported from Rust original.
-
+      Port of inventory_use.rs: InventoryUse, UseView, UseServices, DurationServices,
+      StartServices, UseLifecycleWorld. Living item-use lifecycle bound to player
+      inventory, shared stack identity and synchronized using/offhand bytes. Item
+      effects and level services remain explicit so their callbacks can observe or
+      mutate the same stored state. Types: ActiveStack, UseView, InventoryUse,
+      FlagObserver, UseServices, DurationServices, StartServices. UseLifecycleWorld
+      methods: empty_item, is_empty, same_item_type, using_item, used_hand, hand_item,
+      set_hand_item, level, is_client, remaining_ticks, item_tick, use_on_release,
+      release_item, finish_item, set_using_flag, finish_vibration. Dispatch via
+      UseCategory enum (consumable, block, bucket, instrument, equippable, air).
+      Dependencies: item_use_catalog, item_use, item_use_start, item_use_lifecycle,
+      item_after_use. 15 tests passed.
   - rust: horizon-world/src/item_blocking.rs
     python: quadrix/world/item_blocking.py
     test: tests/world/test_item_blocking.py
