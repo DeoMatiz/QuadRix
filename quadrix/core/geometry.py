@@ -373,7 +373,7 @@ class Vec3:
         )
 
     def with_component(self, axis: Axis, value: float) -> "Vec3":
-        coords = self.components()
+        coords = list(self.components())
         coords[axis.value] = value
         return Vec3.new(coords[0], coords[1], coords[2])
 

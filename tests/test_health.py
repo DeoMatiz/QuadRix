@@ -301,8 +301,8 @@ class TestPlayerHealth:
         player = PlayerHealth.new(resources, attributes)
         player.animate_hurt()
         assert player.hurt_animation_time == 10
-        assert player.hurt["hurt_duration"] == 10
-        assert player.hurt["hurt_time"] == 10
+        assert player.hurt_state["hurt_duration"] == 10
+        assert player.hurt_state["hurt_time"] == 10
     
     def test_player_health_indicate_damage(self):
         """PlayerHealth.indicate_damage() sets indicated direction."""
@@ -319,8 +319,8 @@ class TestPlayerHealth:
         player = PlayerHealth.new(resources, attributes)
         # Take damage from 20 to 10
         player.flash_health_change(10.0)
-        assert player.hurt["cooldown"] == 20
-        assert player.hurt["last_hurt"] == 10.0
+        assert player.hurt_state["cooldown"] == 20
+        assert player.hurt_state["last_hurt"] == 10.0
     
     def test_player_flash_health_change_healing(self):
         """PlayerHealth.flash_health_change() handles healing.
@@ -336,7 +336,7 @@ class TestPlayerHealth:
         # Heal from 10 to 20 (damage < 0, health increased)
         player.flash_health_change(20.0)
         # Cooldown should be set to 10 for healing
-        assert player.hurt["cooldown"] == 10
+        assert player.hurt_state["cooldown"] == 10
     
     def test_player_health_set_health(self):
         """PlayerHealth.set_health() sets health value."""
@@ -427,3 +427,446 @@ class TestDamageTypes:
         fall = r.damage.get("minecraft:fall")
         assert isinstance(fall, DamageType)
         assert "minecraft:bypasses_armor" in fall.tags
+
+# ═══════════════════════════════════════════════════════════════════════
+# PART 2 tests - hurt / die logic
+# ═══════════════════════════════════════════════════════════════════════
+from quadrix.health import (
+    Environment,
+    Blocking,
+    BlockingRules,
+    DamageReduction,
+    ItemDamageFunction,
+    DamageSource,
+    HealthRules,
+    Scaling,
+    Difficulty,
+    Bypass,
+    ImmunityTag,
+    DamageRule,
+    HurtTag,
+    DamageStat,
+    hurt_sound,
+)
+from quadrix.effects import StatusFlags
+import quadrix.health as health_module
+
+
+PART2_ROOT = Path(".local/horizon-client-health")
+
+
+def _load():
+    return HealthResources.load(PART2_ROOT)
+
+
+def _new(max_health=20.0, **kwargs):
+    resources = _load()
+    player = PlayerHealth.new(resources, {"minecraft:max_health": float(max_health)})
+    for key, value in kwargs.items():
+        setattr(player, key, value)
+    return resources, player
+
+
+class TestHurtBasics:
+    def test_hurt_reduces_health(self):
+        resources, player = _new()
+        assert player.hurt(resources, {}, "minecraft:generic", 5.0) is True
+        assert player.health() == pytest.approx(15.0)
+
+    def test_hurt_returns_false_when_dead(self):
+        resources, player = _new()
+        player.dead = True
+        assert player.hurt(resources, {}, "minecraft:generic", 5.0) is False
+        assert player.health() == pytest.approx(20.0)
+
+    def test_client_side_does_not_hurt(self):
+        resources, player = _new(client_side=True)
+        assert player.hurt(resources, {}, "minecraft:generic", 5.0) is False
+        assert player.health() == pytest.approx(20.0)
+
+    def test_hurt_log_records_the_hit(self):
+        resources, player = _new()
+        player.hurt(resources, {}, "minecraft:generic", 5.0)
+        assert len(player.hurt_log) == 1
+        record = player.hurt_log[0]
+        assert record.source == "minecraft:generic"
+        assert record.amount == pytest.approx(5.0)
+        assert record.taken == pytest.approx(5.0)
+        assert record.health == pytest.approx(15.0)
+
+    def test_unknown_source_raises(self):
+        resources, player = _new()
+        with pytest.raises(KeyError):
+            player.hurt(resources, {}, "minecraft:not_a_type", 1.0)
+
+
+class TestHurtCooldown:
+    def test_weaker_hit_in_cooldown_does_nothing(self):
+        resources, player = _new()
+        assert player.hurt(resources, {}, "minecraft:mob_attack", 1.0) is True
+        assert player.health() == pytest.approx(19.0)
+        # Stronger hit inside the cooldown only takes the difference.
+        assert player.hurt(resources, {}, "minecraft:mob_attack", 2.0) is True
+        assert player.health() == pytest.approx(18.0)
+        # Weaker than the last hit: refused.
+        assert player.hurt(resources, {}, "minecraft:mob_attack", 1.5) is False
+        assert player.health() == pytest.approx(18.0)
+
+    def test_advance_clock_expires_cooldown(self):
+        resources, player = _new()
+        player.hurt(resources, {}, "minecraft:mob_attack", 1.0)
+        assert player.hurt_state["cooldown"] == 20
+        for _ in range(20):
+            player.advance_clock()
+        assert player.hurt_state["cooldown"] == 0
+
+
+class TestDifficultyScaling:
+    def test_easy_scales_mob_hit(self):
+        resources, player = _new()
+        rules = HealthRules(difficulty=Difficulty.Easy)
+        player.hurt_caused_by(
+            resources, rules, "minecraft:mob_attack", 4.0, None, True, 0
+        )
+        assert player.health() == pytest.approx(17.0)
+
+    def test_hard_scales_mob_hit(self):
+        resources, player = _new()
+        rules = HealthRules(difficulty=Difficulty.Hard)
+        player.hurt_caused_by(
+            resources, rules, "minecraft:mob_attack", 4.0, None, True, 0
+        )
+        assert player.health() == pytest.approx(14.0)
+
+    def test_non_living_source_is_not_scaled(self):
+        resources, player = _new()
+        rules = HealthRules(difficulty=Difficulty.Hard)
+        player.hurt_caused_by(
+            resources, rules, "minecraft:mob_attack", 4.0, None, False, 0
+        )
+        assert player.health() == pytest.approx(16.0)
+
+    def test_peaceful_zeroes_scaled_damage(self):
+        resources, player = _new()
+        rules = HealthRules(difficulty=Difficulty.Peaceful)
+        assert player.hurt_caused_by(
+            resources, rules, "minecraft:mob_attack", 4.0, None, True, 0
+        ).hurt is False
+        assert player.health() == pytest.approx(20.0)
+
+
+class TestBlocking:
+    def _shield(self, *, bypassed=False, pierce=False, angle=0.0):
+        rules = BlockingRules(
+            delay_seconds=0.25,
+            disable_scale=1.0,
+            reductions=[
+                DamageReduction(
+                    horizontal_angle=90.0,
+                    types=None,
+                    base=0.0,
+                    factor=1.0,
+                )
+            ],
+            item_damage=ItemDamageFunction(threshold=3.0, base=1.0, factor=1.0),
+        )
+        return Blocking(rules=rules, bypassed=bypassed, pierce=pierce, angle=angle)
+
+    def test_shield_fully_blocks_easy_scaled_hit(self):
+        resources, player = _new()
+        rules = HealthRules(difficulty=Difficulty.Easy)
+        outcome = player.hurt_caused_by(
+            resources,
+            rules,
+            "minecraft:mob_attack",
+            4.0,
+            self._shield(),
+            True,
+            0,
+        )
+        assert outcome.blocked == pytest.approx(3.0)
+        assert outcome.fully_blocked is True
+        assert outcome.knockback is False
+        assert outcome.sound is True
+        assert player.health() == pytest.approx(20.0)
+
+    def test_bypassed_shield_blocks_nothing(self):
+        resources, player = _new()
+        outcome = player.hurt_caused_by(
+            resources,
+            {},
+            "minecraft:mob_attack",
+            4.0,
+            self._shield(bypassed=True),
+            False,
+            0,
+        )
+        assert outcome.blocked == pytest.approx(0.0)
+        assert outcome.fully_blocked is False
+        assert player.health() == pytest.approx(16.0)
+
+    def test_piercing_shield_blocks_nothing(self):
+        resources, player = _new()
+        outcome = player.hurt_caused_by(
+            resources,
+            {},
+            "minecraft:mob_attack",
+            4.0,
+            self._shield(pierce=True),
+            False,
+            0,
+        )
+        assert outcome.blocked == pytest.approx(0.0)
+        assert player.health() == pytest.approx(16.0)
+
+    def test_outside_angle_blocks_nothing(self):
+        resources, player = _new()
+        outcome = player.hurt_caused_by(
+            resources,
+            {},
+            "minecraft:mob_attack",
+            4.0,
+            self._shield(angle=3.0),
+            False,
+            0,
+        )
+        assert outcome.blocked == pytest.approx(0.0)
+        assert player.health() == pytest.approx(16.0)
+
+    def test_partial_block(self):
+        resources, player = _new()
+        rules = BlockingRules(
+            reductions=[
+                DamageReduction(
+                    horizontal_angle=90.0, types=None, base=1.0, factor=0.5
+                )
+            ]
+        )
+        outcome = player.hurt_blocking(
+            resources,
+            {},
+            "minecraft:mob_attack",
+            4.0,
+            Blocking(rules, False, False, 0.0),
+        )
+        assert outcome.blocked == pytest.approx(3.0)
+        assert outcome.fully_blocked is False
+        assert player.health() == pytest.approx(19.0)
+
+
+class TestImmunityAndEffects:
+    def test_fire_resistance_blocks_fire_damage(self):
+        resources, player = _new()
+        player.status = StatusFlags(fire_resistance=True)
+        assert player.hurt(resources, {}, "minecraft:on_fire", 5.0) is False
+        assert player.health() == pytest.approx(20.0)
+
+    def test_fire_damage_without_resistance_hurts(self):
+        resources, player = _new()
+        assert player.hurt(resources, {}, "minecraft:on_fire", 5.0) is True
+        assert player.health() == pytest.approx(15.0)
+
+    def test_resistance_reduces_damage(self):
+        resources, player = _new()
+        player.status = StatusFlags(resistance=0)
+        player.hurt(resources, {}, "minecraft:mob_attack", 10.0)
+        assert player.health() == pytest.approx(12.0)
+
+    def test_armor_reduces_damage(self):
+        resources, player = _new()
+        player.attributes = {"minecraft:armor": 20.0}
+        player.hurt(resources, {}, "minecraft:mob_attack", 10.0)
+        # 20 armor leaves 40% of the hit: 4 damage.
+        assert player.health() == pytest.approx(16.0)
+
+    def test_bypasses_armor_ignores_armor(self):
+        resources, player = _new()
+        player.attributes = {"minecraft:armor": 20.0}
+        player.hurt(resources, {}, "minecraft:generic", 10.0)
+        assert player.health() == pytest.approx(10.0)
+
+    def test_absorption_takes_damage_first(self):
+        resources, player = _new()
+        player.data["absorption"] = 5.0
+        player.hurt(resources, {}, "minecraft:mob_attack", 10.0)
+        assert player.absorption() == pytest.approx(0.0)
+        assert player.health() == pytest.approx(15.0)
+
+    def test_totem_saves_from_death(self):
+        resources, player = _new()
+        player.totem_ready = True
+        player.hurt(resources, {}, "minecraft:generic", 100.0)
+        assert player.totem_used is True
+        assert player.totem_ready is False
+        assert player.dead is False
+        assert player.health() == pytest.approx(1.0)
+
+    def test_death_sets_dead_flag(self):
+        resources, player = _new()
+        player.hurt(resources, {}, "minecraft:generic", 100.0)
+        assert player.dead is True
+        assert player.dead_or_dying() is True
+
+    def test_ability_invulnerable_stops_damage(self):
+        resources, player = _new(invulnerable=True)
+        assert player.hurt(resources, {}, "minecraft:generic", 5.0) is False
+        assert player.health() == pytest.approx(20.0)
+
+    def test_ability_invulnerable_is_bypassed(self):
+        resources, player = _new(invulnerable=True)
+        assert player.hurt(resources, {}, "minecraft:out_of_world", 5.0) is True
+        assert player.health() == pytest.approx(15.0)
+
+    def test_not_client_loaded_is_immune(self):
+        resources, player = _new(client_loaded=False)
+        assert player.hurt(resources, {}, "minecraft:generic", 5.0) is False
+        assert player.health() == pytest.approx(20.0)
+
+
+class TestHooks:
+    def test_damage_pre_hook_changes_amount(self):
+        resources, player = _new()
+
+        def hook(hurting, amount):
+            assert hurting.kind == "player"
+            return 5.0
+
+        health_module.DAMAGE_PRE_HOOK = hook
+        try:
+            player.hurt(resources, {}, "minecraft:mob_attack", 10.0)
+        finally:
+            health_module.DAMAGE_PRE_HOOK = None
+        assert player.health() == pytest.approx(15.0)
+
+    def test_damage_post_hook_sees_amount(self):
+        resources, player = _new()
+        seen = []
+
+        def hook(hurting, amount):
+            seen.append(amount)
+
+        health_module.DAMAGE_POST_HOOK = hook
+        try:
+            player.hurt(resources, {}, "minecraft:mob_attack", 10.0)
+        finally:
+            health_module.DAMAGE_POST_HOOK = None
+        assert seen == [pytest.approx(10.0)]
+
+    def test_hurt_server_hook_cancels(self):
+        resources, player = _new()
+
+        def hook(hurting, amount):
+            return True, amount
+
+        health_module.HURT_SERVER_HOOK = hook
+        try:
+            outcome = player.hurt_blocking(
+                resources, {}, "minecraft:mob_attack", 5.0
+            )
+        finally:
+            health_module.HURT_SERVER_HOOK = None
+        assert outcome.canceled is True
+        assert outcome.hurt is False
+        assert player.health() == pytest.approx(20.0)
+
+
+class TestEnvironment:
+    def _env(self, *, name="minecraft:on_fire", status=None, rules=None):
+        resources = _load()
+        source = DamageSource(resources.damage, name)
+        return Environment(
+            entity=7,
+            causing=0,
+            invulnerable=False,
+            client_loaded=True,
+            rules=rules or HealthRules(),
+            source=source,
+            living_cause=False,
+            events=[],
+            dead=False,
+            sync_velocity=False,
+            game_time=5,
+            status=status or StatusFlags(),
+            data={"health": 20.0, "absorption": 0.0},
+            food={},
+            attributes={},
+        )
+
+    def test_field_and_method_duality(self):
+        env = self._env()
+        assert env.source() == "minecraft:on_fire"
+        assert env.source.definition().id == "minecraft:on_fire"
+        assert env.client_loaded() is True
+        assert bool(env.client_loaded) is True
+        assert env.game_time() == 5
+
+    def test_tag_lookup_for_both_traits(self):
+        env = self._env()
+        assert env.tag(ImmunityTag.Fire) is True
+        assert env.tag(None, HurtTag.Fire) is True
+        assert env.tag(ImmunityTag.Fall) is False
+
+    def test_rules_and_scaling(self):
+        env = self._env()
+        assert env.damage_rule(DamageRule.Fall) is True
+        assert env.difficulty() is Difficulty.Normal
+        assert env.scales_with_difficulty() is False
+        assert env.ender_pearl() is False
+
+    def test_events_phase_and_stat(self):
+        env = self._env()
+        env.phase("entity-damage")
+        env.stat("taken", 3)
+        assert env.events[-2].name == "Phase"
+        assert env.events[-2].text == "entity-damage"
+        assert env.events[-1].name == "Statistic"
+        assert env.events[-1].stat_name == "taken"
+        assert env.events[-1].amount == 3
+
+    def test_armor_and_resistance_methods(self):
+        env = self._env(status=StatusFlags(resistance=1))
+        assert env.has_resistance() is True
+        assert env.resistance_amplifier() == 1
+        env.hurt_armor({}, 4.0)
+        assert env.events[-1].name == "ArmorHurt"
+        assert env.events[-1].amount == pytest.approx(4.0)
+
+    def test_resistance_amplifier_without_effect_raises(self):
+        env = self._env()
+        assert env.has_resistance() is False
+        with pytest.raises(ValueError):
+            env.resistance_amplifier()
+
+    def test_sound_helpers(self):
+        assert hurt_sound("drowning") == "minecraft:entity.player.hurt_drown"
+        assert hurt_sound("burning") == "minecraft:entity.player.hurt_on_fire"
+        assert hurt_sound("poking") == "minecraft:entity.player.hurt_sweet_berry_bush"
+        assert hurt_sound("freezing") == "minecraft:entity.player.hurt_freeze"
+        assert hurt_sound("hurt") == "minecraft:entity.player.hurt"
+
+
+class TestSupportingRules:
+    def test_blocking_rules_delay_ticks(self):
+        rules = BlockingRules(delay_seconds=0.25, disable_scale=2.0)
+        assert rules.delay_ticks() == 5
+        assert rules.disable_ticks(1.0) == 40
+        assert rules.disable_ticks(0.0) == 0
+
+    def test_item_damage_function(self):
+        f = ItemDamageFunction(threshold=3.0, base=1.0, factor=1.0)
+        assert f.apply(2.0) == 0
+        assert f.apply(4.0) == 5
+
+    def test_scaling_names(self):
+        assert Scaling.Never.name_of() == "never"
+        assert Scaling.Always.name_of() == "always"
+        assert (
+            Scaling.LivingNonPlayer.name_of()
+            == "when_caused_by_living_non_player"
+        )
+
+    def test_blocking_dataclass_fields(self):
+        b = Blocking(BlockingRules(), False, True, 1.25)
+        assert b.bypassed is False
+        assert b.pierce is True
+        assert b.angle == 1.25
