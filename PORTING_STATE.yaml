@@ -597,10 +597,22 @@ files:
   - rust: horizon-world/src/chunk.rs
     python: quadrix/world/chunk.py
     test: tests/world/test_chunk.py
-    status: pending
+    status: done
     lines_rust: ~1000
+    lines_python: ~700
     depends_on: [horizon-world/src/registry.rs, horizon-world/src/nbt.rs]
-    note: "Chunk (sections, paletted storage, block entities)."
+    note: >
+      PalettedContainer / Paletted (wire: bits_per_entry=0 single, indirect, direct
+      global), BitStorage (SimpleBitStorage / PackedStorage, без разрыва значения
+      между long'ами), ChunkSection (non_empty/fluids/states/biomes), Heightmap +
+      HeightmapType (WORLD_SURFACE / MOTION_BLOCKING / …), BlockEntity (packed_xz,
+      y, kind, tag), LightData + nibble, ChunkData (heightmaps + raw buffer +
+      block_entities), Chunk.from_chunk_data / from_packet / to_chunk_data,
+      Chunk + ColumnLayout (min_y, max_y, section_index, get/set, world_surface,
+      motion_blocking, biome). NBT-формат сохранён (NbtPalettedContainer,
+      BlockSection, NbtChunkData). 17 tests.
+      ⚠️ Удалена пустая папка quadrix/world/chunk/ (только __init__.py 0 байт) —
+      Python импортировал бы её вместо chunk.py.
 
   - rust: horizon-world/src/chunk_status.rs
     python: quadrix/world/chunk_status.py
