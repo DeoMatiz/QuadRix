@@ -193,6 +193,9 @@ class Client:
         self.data_dir = Path(data_dir)
         self.verbose = bool(verbose)
         self.connect_timeout = float(connect_timeout)
+        self.control_host = "127.0.0.1"
+        self.control_port = 25566
+        self.control_server: Optional[ControlServer] = None
 
         self.conn: Optional[Connection] = None
         self.profile = None
@@ -226,6 +229,7 @@ class Client:
         """Загрузить локальные данные: движение, реестр блоков, здоровье."""
         _cache_movement_resources()
         motion_dir = self.data_dir / "horizon-client-motion"
+        
         try:
             movement = MovementResources.load(motion_dir)
             self.motion = PlayerMotion.new(movement, Vec3(0.0, 64.0, 0.0))
@@ -614,6 +618,8 @@ class Client:
                 if max_ticks and self.ticks >= max_ticks:
                     self.running = False
                     break
+            if self.control_server:
+                self.control_server.poll()
         _log(f"play: выход; тиков={self.ticks}, пакетов={self.packets_seen}")
 
     # -- ввод ----------------------------------------------------------
@@ -707,6 +713,8 @@ class Client:
         if self.conn is not None:
             self.conn.close()
             self.conn = None
+        if self.control_server is not None:
+            self.control_server.stop()
 
 
 # ── CLI ───────────────────────────────────────────────────────────────
@@ -752,6 +760,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=10.0,
         help="таймаут подключения, секунды",
     )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="запустить control server (TCP JSON-lines)",
+    )
+    parser.add_argument(
+        "--control-host",
+        default="127.0.0.1",
+        help="host control server (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--control-port",
+        type=int,
+        default=25566,
+        help="port control server (default: 25566)",
+    )
     return parser
 
 
@@ -776,7 +800,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         data_dir=args.data_dir,
         verbose=args.verbose,
         connect_timeout=args.connect_timeout,
+        control_host=args.control_host,
+        control_port=args.control_port,
     )
+    if args.daemon:
+        from quadrix.control.server import ControlServer
+        client.control_server = ControlServer(
+            host=args.control_host,
+            port=args.control_port,
+            client=client,
+        )
+        client.control_server.start()
+
     try:
         client.connect()
         client.handshake()
