@@ -678,8 +678,17 @@ files:
   - rust: horizon-world/src/item_use_catalog.rs
     python: quadrix/world/item_use_catalog.py
     test: tests/world/test_item_use_catalog.py
-    status: pending
-    note: "Item use catalog (consumable, block placement, etc.)."
+    status: done
+    note: >
+      Item use catalog (consumable, block placement, etc.).
+      Ported types: ItemId, Duration, UseComponents, ItemDefinition,
+      ItemUseStack, ItemUseCatalog. Duration variants: Components,
+      Constant(72000 for Bow/Crossbow/Trident, 200 for Bundle/Brush,
+      1200 for Spyglass, 0 for EnderEye, arbitrary for Instrument).
+      Components parsed: max_stack_size, max_damage, damage, unbreakable,
+      consume_seconds, blocks_attacks, kinetic_weapon, instrument.
+      10 tests passed. Uses item_use.py (is_blocking), world_ray.py,
+      block_placement.py, block_survival.py via dependencies.
 
   - rust: horizon-world/src/item_after_use.rs
     python: quadrix/world/item_after_use.py
