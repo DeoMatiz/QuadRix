@@ -662,8 +662,18 @@ files:
   - rust: horizon-world/src/item_use.rs
     python: quadrix/world/item_use.py
     test: tests/world/test_item_use.py
-    status: pending
-    note: "Item use actions (right-click logic)."
+    status: done
+    note: >-
+      Порт фактического содержимого item_use.rs: трейт ItemUseWorld
+      (using_item/use_item/blocking_delay/item_type/use_duration/
+      remaining_ticks/remaining_ticks_virtual + default query_*) и функции
+      blocking_item, is_blocking, ticks_using_item, ticks_using_item_partial.
+      Это слой блокирующего использования (щит/лук), а НЕ right-click dispatch:
+      еда/вёдра/кровати/семена/зажигалка/ножницы живут в item_use_catalog.rs,
+      inventory_use.rs, item_use_start.rs, item_use_lifecycle.rs,
+      item_after_use.rs (все ещё pending, отдельные сессии). Сохранено
+      i32::wrapping_sub (wrapping_sub_i32). FALLBACK не потребовался —
+      модуль чистый, данных из .local не читает. 14 tests.
 
   - rust: horizon-world/src/item_use_catalog.rs
     python: quadrix/world/item_use_catalog.py
