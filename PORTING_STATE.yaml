@@ -27,7 +27,7 @@ assets_render: .local/horizon-client-render/
 assets_structures: .local/horizon-client-structures/
 minecraft_cache: .local/minecraft/
 
-last_session: 2026-11-09
+last_session: 2026-11-10
 
 # ============================================================================
 # СТАТУСЫ:
@@ -986,8 +986,21 @@ files:
   - rust: horizon-world/src/block_placement.rs
     python: quadrix/world/block_placement.py
     test: tests/world/test_block_placement.py
-    status: pending
-    note: "Block placement rules."
+    status: done
+    lines_python: 715
+    note: >
+      Player-facing установка блока: PlaceContext, PlacementContext
+      (pos/hit_pos/face/hit/inside/yaw/pitch/sneaking/item/replace_clicked),
+      can_be_replaced/can_place, can_survive, placement_state/get_placement_state,
+      is_air/is_solid/is_replaceable, place. Плюс примитивы worldgen
+      block_placement.rs: HORIZONTAL, SIDE_NAMES, relative, Placement,
+      DoublePlant, Moss(code/has_faces). 8 tests (реальные .local:
+      block-registry.nbt + cached-collision.nbt). ВНИМАНИЕ: сам
+      block_placement.rs — это worldgen-модуль (Moss/DoublePlant над
+      FeatureWorld); запрошенный игровой API взят из level/place.rs +
+      level/mod.rs + block_survival.rs. FALLBACK-пометки: block_properties
+      pending (флаги replaceable/solid-off), block_survival pending
+      (полный порт опоры — next). блокирует: item_use.rs, world_ray.rs.
 
   - rust: horizon-world/src/block_survival.rs
     python: quadrix/world/block_survival.py
