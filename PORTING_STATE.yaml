@@ -703,6 +703,18 @@ files:
       Зависимости: item_use_catalog, item_use, world_ray, block_placement.
       7 tests passed.
 
+  - rust: horizon-world/src/item_use_lifecycle.rs
+    python: quadrix/world/item_use_lifecycle.py
+    test: tests/world/test_item_use_lifecycle.py
+    status: done
+    note: >
+      Living item-use lifecycle ordering over stable item-stack handles.
+      Портировано из horizon-world/src/item_use_lifecycle.rs.
+      Содержит struct UseState<Item>, trait UseLifecycleWorld и
+      функции tick, update, complete, release, stop.
+      Зависимости: item_use, item_use_catalog, item_use_start.
+      7 tests passed (covering tick, update, complete, release, stop).
+
   - rust: horizon-world/src/item_after_use.rs
     python: quadrix/world/item_after_use.py
     test: tests/world/test_item_after_use.py
