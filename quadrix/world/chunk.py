@@ -26,10 +26,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum, IntEnum
+from enum import Enum
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from quadrix.protocol.buf import Reader, Writer, bit
+# Источник истины для Heightmap/HeightmapType — порт heightmap.rs.
+from quadrix.world.heightmap import Heightmap, HeightmapType
 from quadrix.world.nbt import Tag, TagType
 from quadrix.world.registry import BlockRegistry, BlockState, BlockStateId
 
@@ -495,90 +497,8 @@ Section = ChunkSection
 # ---- Heightmap -------------------------------------------------------------
 
 
-class HeightmapType(IntEnum):
-    """``HeightmapType`` (horizon-world/src/heightmap.rs:9), порядок = id."""
-
-    WorldSurfaceWg = 0
-    WorldSurface = 1
-    OceanFloorWg = 2
-    OceanFloor = 3
-    MotionBlocking = 4
-    MotionBlockingNoLeaves = 5
-
-    @property
-    def nbt_name(self) -> str:
-        return _HEIGHTMAP_NAMES[self]
-
-    def send_to_client(self) -> bool:
-        return self in (
-            HeightmapType.WorldSurface,
-            HeightmapType.MotionBlocking,
-            HeightmapType.MotionBlockingNoLeaves,
-        )
-
-
-_HEIGHTMAP_NAMES = {
-    HeightmapType.WorldSurfaceWg: "WORLD_SURFACE_WG",
-    HeightmapType.WorldSurface: "WORLD_SURFACE",
-    HeightmapType.OceanFloorWg: "OCEAN_FLOOR_WG",
-    HeightmapType.OceanFloor: "OCEAN_FLOOR",
-    HeightmapType.MotionBlocking: "MOTION_BLOCKING",
-    HeightmapType.MotionBlockingNoLeaves: "MOTION_BLOCKING_NO_LEAVES",
-}
-
-
-@dataclass
-class Heightmap:
-    """``Heightmap``: 256 высот колонны в packed long'ах.
-
-    ``Heightmap::new`` берёт ``bits = 32 - height.leading_zeros()``: для
-    ванильных 384 блоков это 9 бит (тест ``9 bits, 256 entries``).
-    """
-
-    kind: HeightmapType
-    data: BitStorage
-    min_y: int = MIN_Y
-
-    @classmethod
-    def new(cls, kind: HeightmapType, min_y: int = MIN_Y, height: int = HEIGHT) -> "Heightmap":
-        bits = max(1, int(height).bit_length())
-        return cls(kind=HeightmapType(kind), data=BitStorage.new(bits, 256), min_y=min_y)
-
-    @classmethod
-    def from_longs(
-        cls,
-        kind: HeightmapType,
-        words: Sequence[int],
-        min_y: int = MIN_Y,
-        height: int = HEIGHT,
-    ) -> "Heightmap":
-        bits = max(1, int(height).bit_length())
-        return cls(
-            kind=HeightmapType(kind),
-            data=BitStorage.from_words(bits, 256, [_as_u64(w) for w in words]),
-            min_y=min_y,
-        )
-
-    def bits(self) -> int:
-        return self.data.bits()
-
-    def raw_data(self) -> List[int]:
-        return self.data.words()
-
-    def to_longs(self) -> List[int]:
-        return [_as_i64(word) for word in self.data.words()]
-
-    @staticmethod
-    def index(x: int, z: int) -> int:
-        """``Heightmap::index``: x + z * 16."""
-        return (x & 15) + (z & 15) * 16
-
-    def get(self, x: int, z: int) -> int:
-        """Абсолютная высота (``first_available``): min_y + сохранённое."""
-        return self.data.get(self.index(x, z)) + self.min_y
-
-    def set(self, x: int, z: int, y: int) -> None:
-        self.data.set(self.index(x, z), y - self.min_y)
+# ``Heightmap`` and ``HeightmapType`` импортируются из ``quadrix.world.heightmap``
+# (порт ``heightmap.rs`` — источник истины: update/prime/get/set).
 
 
 # ---- BlockEntity (BlockEntityInfo) ----------------------------------------
