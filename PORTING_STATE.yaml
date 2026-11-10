@@ -954,8 +954,8 @@ files:
   - rust: horizon-world/src/world_ray.rs
     python: quadrix/world/world_ray.py
     test: tests/world/test_world_ray.py
-    status: pending
-    note: "Raytrace (block hit, entity hit). Для клика по блоку."
+    status: done
+    note: "Raytrace (block hit, entity hit). Для клика по блоку. Добавлены ClipContext, BlockHitResult, EntityHitResult, clip(world, context). FALLBACK — entity raytrace в fall_reset_shape. 17 тестов пройдено."
 
   - rust: horizon-world/src/region.rs
     python: quadrix/world/region.py
