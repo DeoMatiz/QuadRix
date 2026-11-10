@@ -122,13 +122,17 @@ def test_is_replaceable_air_grass_stone(registry):
 
 
 def test_cannot_place_with_air_below(registry, placement):
-    """Под целью воздух → блок не выживет, ставить нельзя."""
+    """Под целью воздух → блок не выживет, ставить нельзя.
+
+    Проверяем на факеле (``CenterBelow``): у камня правило ``Always``,
+    он выживает в любом месте (block_survival.rs).
+    """
     air = registry.default_state("minecraft:air")
-    stone = registry.default_state("minecraft:stone")
+    torch = registry.default_state("minecraft:torch")
     world = FakeWorld(air)  # (0,63,0) тоже воздух
 
-    assert placement.can_survive(world, stone, (0, 64, 0)) is False
-    assert can_place_block(world, stone, (0, 64, 0), _ctx(), placement=placement) is False
+    assert placement.can_survive(world, torch, (0, 64, 0)) is False
+    assert can_place_block(world, torch, (0, 64, 0), _ctx(), placement=placement) is False
 
 
 def test_place_on_solid_surface_far_away(registry, placement):

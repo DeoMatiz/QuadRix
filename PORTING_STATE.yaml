@@ -999,14 +999,38 @@ files:
       block_placement.rs — это worldgen-модуль (Moss/DoublePlant над
       FeatureWorld); запрошенный игровой API взят из level/place.rs +
       level/mod.rs + block_survival.rs. FALLBACK-пометки: block_properties
-      pending (флаги replaceable/solid-off), block_survival pending
-      (полный порт опоры — next). блокирует: item_use.rs, world_ray.rs.
+      pending (флаги replaceable/solid-off). can_survive делегирует в
+      quadrix.world.block_survival (порт block_survival.rs — done).
+      блокирует: item_use.rs, world_ray.rs.
 
   - rust: horizon-world/src/block_survival.rs
     python: quadrix/world/block_survival.py
     test: tests/world/test_block_survival.py
-    status: pending
-    note: "Block drops, tool requirement, break progress."
+    status: done
+    lines_python: 2121
+    note: >
+      Полный порт block_survival.rs: SurvivalRule (49 правил), Rule,
+      SurvivalDefinitions, BlockSurvivalRegistry (load/622 строки),
+      can_survive/can_attach_to, _dispatch (Fire/Cactus/Path/Mushroom/
+      Multiface/Vine/Scaffolding/PistonHead/ChorusPlant/SugarCane/Frogspawn/
+      BigDripleaf/Farmland/Cocoa/Crop/Door/TagBelow/Support/... — все ветки
+      Rust 640-1205), relative/direction_name, SupportType, FluidKind/
+      FluidState. Вспомогательные модули встроены: block_properties.rs
+      (BlockDefinitionProperties/BoundBlockProperty/BlockPropertiesRegistry
+      из block-properties.nbt + cached-collision.nbt), block_support.rs
+      (BlockSupportRegistry из cached-support.nbt), face/join (опорные
+      формы). Плюс клиентский API разрушения: block_hardness/
+      block_resistance/requires_tool (gameplay-facts.json), can_harvest/
+      is_harvestable (ItemInfo.tool + tags.json), get_drops (минимальный
+      вычислитель loot_table/blocks/*.json: alternatives/group/sequence/
+      set_count/apply_bonus/limit_count, silk_touch/fortune/random_chance/
+      table_bonus), break_block (дроп + set_block air, flags 3). Ванильное
+      правило requiresCorrectToolForDrops применено в get_drops.
+      9 tests (реальные .local: block-registry.nbt, survival-rules.json,
+      block-properties.nbt, cached-support.nbt, gameplay-facts.json,
+      loot_table). FALLBACK: только динамические опоры (cached_shape(None) →
+      форма столкновения). can_survive в block_placement.py больше не
+      FALLBACK — делегирует сюда. Разблокирует: item_use.rs, world_ray.rs.
 
   - rust: horizon-world/src/block_support.rs
     python: quadrix/world/block_support.py

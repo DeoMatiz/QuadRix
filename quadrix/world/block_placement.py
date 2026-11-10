@@ -20,8 +20,10 @@
     сессией worldgen).
 
 Что не портировано в этой сессии (отдельные модули):
-  * ``block_survival.rs`` целиком (правила Fire/Cactus/Path/...);
   * ``item_use.rs``, ``world_ray.rs``.
+
+``can_survive`` делегирует в :mod:`quadrix.world.block_survival`
+(полный порт ``block_survival.rs`` этой сессии).
 
 Имена и поля сохранены как в Rust. ``is_solid`` использует ту же формулу, что
 ``BlockDefinitionProperties::calculate_solid``, но флаги ``force_solid_on/off``
@@ -486,15 +488,14 @@ class BlockPlacement:
     ) -> bool:
         """``BlockState.canSurvive`` (block_survival.rs:640).
 
-        ``# FALLBACK: block_survival pending`` — полный порт (Fire/Cactus/
-        Path/Mushroom/Multiface/...) следующая сессия. Здесь упрощённое и
-        консервативное правило опоры: блоку нужна твёрдая опора снизу.
-        Полные кубы ваниль допускает и в воздухе — это послабление вернётся
-        вместе с block_survival.
+        Полный порт правил живёт в :mod:`quadrix.world.block_survival`
+        (``BlockSurvivalRegistry``): Fire/Cactus/Path/Mushroom/Multiface/
+        Support/... — по одной записи ``survival-rules.json`` на состояние.
         """
-        del ctx  # контекст полного правила пока не нужен
-        below = relative(position, Direction.DOWN)
-        return self.is_solid(world.get_block(below))
+        del ctx  # контекст полному правилу не нужен
+        from quadrix.world.block_survival import default_survival
+
+        return default_survival().can_survive(world, state, position)
 
     # -- getStateForPlacement (level/place.rs) --
 
