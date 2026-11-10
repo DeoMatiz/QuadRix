@@ -617,18 +617,33 @@ files:
   - rust: horizon-world/src/chunk_status.rs
     python: quadrix/world/chunk_status.py
     test: tests/world/test_chunk_status.py
-    status: pending
+    status: done
     lines_rust: ~100
-    depends_on: [quadrix/world/chunk.py]
-    note: "Chunk load status enum."
+    lines_python: ~80
+    depends_on: []
+    note: >
+      ChunkStatus (10 статусов), MAX_STRUCTURE_DISTANCE, ALL, FINAL_HEIGHTMAPS,
+      index/parent/name/parse/by_name/from_nbt/to_nbt/is_level_chunk/heightmaps.
+      5 tests.
 
   - rust: horizon-world/src/heightmap.rs
     python: quadrix/world/heightmap.py
     test: tests/world/test_heightmap.py
-    status: pending
+    status: done
     lines_rust: ~600
+    lines_python: ~300
     depends_on: [quadrix/world/chunk.py]
-    note: "Heightmap (motion/light/спавн)."
+    note: >
+      HeightmapType (6: WORLD_SURFACE, MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES,
+      OCEAN_FLOOR, WORLD_SURFACE_WG, OCEAN_FLOOR_WG), HeightmapState/Chunk
+      (Protocol), Heightmap с new/from_longs/update/prime/set_raw_data/get/set/
+      first_available/highest_taken/below_update/any_first_available_at_least/
+      send_to_client/keep_after_worldgen/is_opaque. 10 tests.
+      ⚠️ name() переопределён на IntEnum (Rust name() = minecraft:* / WORLD_SURFACE);
+      nbt_name сохранён для совместимости с chunk.py.
+      ⚠️ BitStorage в heightmap.py импортируется лениво (разрыв цикла с chunk.py).
+      ⚠️ chunk.py минимально изменён: удалены дубли Heightmap/HeightmapType,
+      импорт из heightmap.py.
 
   - rust: horizon-world/src/world_ray.rs
     python: quadrix/world/world_ray.py
