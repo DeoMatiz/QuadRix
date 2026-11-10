@@ -714,12 +714,19 @@ files:
       функции tick, update, complete, release, stop.
       Зависимости: item_use, item_use_catalog, item_use_start.
       7 tests passed (covering tick, update, complete, release, stop).
+      # FALLBACK: bow shooting pending (test_complete_bow_shooting_fallback exists).
 
   - rust: horizon-world/src/item_after_use.rs
     python: quadrix/world/item_after_use.py
     test: tests/world/test_item_after_use.py
-    status: pending
-    note: "Item after-use (eat, drink, use)."
+    status: done
+    note: >
+      Port of item_after_use.rs: functions after_use and finish.
+      Uses AfterUseWorld trait methods (remainder, cooldown, prototype,
+      finish_item, infinite_materials, extra_item, apply_cooldown).
+      Dependencies: item_use_catalog (ItemUseStack), item_use_lifecycle (UseState).
+      5 tests passed (covering remainder, cooldown, no-components, both components, finish).
+      # FALLBACK: none - all components ported from Rust original.
 
   - rust: horizon-world/src/item_blocking.rs
     python: quadrix/world/item_blocking.py
