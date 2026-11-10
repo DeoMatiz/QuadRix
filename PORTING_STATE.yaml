@@ -632,8 +632,11 @@ files:
   - rust: horizon-world/src/simple_container.rs
     python: quadrix/world/simple_container.py
     test: tests/world/test_simple_container.py
-    status: pending
-    note: "Container (inventory slots)."
+    status: done
+    note: >
+      Container (inventory slots). 8 tests passed: creation, set/get, replace,
+      remove, clear, is_empty, size, count_item. Uses ItemStack, Items from
+      quadrix.items.
 
   - rust: horizon-world/src/player_inventory.rs
     python: quadrix/world/player_inventory.py
