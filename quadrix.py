@@ -800,8 +800,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         data_dir=args.data_dir,
         verbose=args.verbose,
         connect_timeout=args.connect_timeout,
-        control_host=args.control_host,
-        control_port=args.control_port,
     )
     if args.daemon:
         from quadrix.control.server import ControlServer
