@@ -99,6 +99,19 @@ from quadrix.protocol.packets.handshake import (
     _Packet,
     _PacketSet,
 )
+from quadrix.items.item_data import (
+    Component,
+    ComponentMap,
+    ComponentPatch,
+    DelimitedSlot as _DelimitedSlot,
+    Slot as _Slot,
+    Stack as ItemStack,
+    Template as _Template,
+    read_component,
+    read_stack,
+    write_component,
+    write_stack,
+)
 from quadrix.protocol.packets.status import Ping as StatusPing
 from quadrix.world.nbt import Tag, TagType
 
@@ -172,6 +185,11 @@ __all__ = [
     "Particle",
     "Profile",
     "ItemStack",
+    # проводные кодеки компонент (реэкспорт из quadrix.items.item_data)
+    "ComponentMap",
+    "ComponentPatch",
+    "read_stack",
+    "write_stack",
     # PART 3: сущности и синхронизация игроков — serverbound
     "Interact",
     "PaddleBoat",
@@ -861,10 +879,11 @@ class SetCarriedItem(_Packet):
 # Все поля названы дословно как в Rust: AddEntity несёт pitch/yaw/head_yaw
 # (i8), а не градусы; MoveEntity* — `VecDelta` (три i16 в 1/4096 блока);
 # PlayerInfoUpdate — байтовый bitset действий; SetEquipment — пары
-# (slot, Optional<Stack>). ItemStack пока без компонентов: items.rs ещё
-# не портирован, поэтому patch с положительными компонентами честно
-# отвергается ProtocolError, а пустой patch (обычный стек) кодируется
-# ровно как Slot в Rust (count, item, positive, negative, removed).
+# (slot, Optional<Stack>). ItemStack теперь — реальная проводная форма
+# ``Stack`` из ``quadrix.items.item_data`` (item.rs:948): count, item
+# (protocol_id), added-компоненты и removed-виды. Непустые патчи компонент
+# читаются и пишутся через ``read_component``/``write_component``, а не
+# отвергаются; пустой патч (обычный стек) кодируется ровно как Slot в Rust.
 
 # ---- общие структуры ---------------------------------------------------
 
@@ -895,86 +914,14 @@ class Property:
         _OPT_STR_1024.write(self.signature, w)
 
 
-@dataclass(frozen=True)
-class ItemStack:
-    """Stack из item.rs. Компоненты (added) пока не портированы.
-
-    Поля совпадают с Rust: item, count, added, removed. Пустой patch
-    (added == () и removed == ()) — это обычный стек и кодируется
-    дословно как Slot / Template.
-    """
-
-    item: int
-    count: int
-    added: Tuple[Tuple[int, object], ...] = ()
-    removed: Tuple[int, ...] = ()
-
-
-class _Slot:
-    """ItemStack.OPTIONAL_STREAM_CODEC: count, item, затем patch."""
-
-    @classmethod
-    def read(cls, r: Reader) -> Optional[ItemStack]:
-        count = r.varint()
-        if count <= 0:
-            return None
-        item = r.varint()
-        positive = r.count(65536)
-        negative = r.count(65536)
-        if positive:
-            # Значения компонентов живут в items.rs; до его портирования
-            # нельзя узнать границы каждого компонента на проводе.
-            raise ProtocolError(
-                "[QuadRix] item components are not ported yet (items.rs pending)"
-            )
-        removed = tuple(r.varint() for _ in range(negative))
-        return ItemStack(item=item, count=count, removed=removed)
-
-    @classmethod
-    def write(cls, v: Optional[ItemStack], w: Writer) -> None:
-        if v is None or v.count <= 0:
-            w.varint(0)
-            return
-        if v.added:
-            raise ProtocolError(
-                "[QuadRix] item components are not ported yet (items.rs pending)"
-            )
-        w.varint(v.count)
-        w.varint(v.item)
-        w.varint(len(v.added))
-        w.varint(len(v.removed))
-        for kind in v.removed:
-            w.varint(kind)
-
-
-class _Template:
-    """ItemStackTemplate.STREAM_CODEC: item, count, затем patch."""
-
-    @classmethod
-    def read(cls, r: Reader) -> ItemStack:
-        item = r.varint()
-        count = r.varint()
-        positive = r.count(65536)
-        negative = r.count(65536)
-        if positive:
-            raise ProtocolError(
-                "[QuadRix] item components are not ported yet (items.rs pending)"
-            )
-        removed = tuple(r.varint() for _ in range(negative))
-        return ItemStack(item=item, count=count, removed=removed)
-
-    @classmethod
-    def write(cls, v: ItemStack, w: Writer) -> None:
-        if v.added:
-            raise ProtocolError(
-                "[QuadRix] item components are not ported yet (items.rs pending)"
-            )
-        w.varint(v.item)
-        w.varint(v.count)
-        w.varint(len(v.added))
-        w.varint(len(v.removed))
-        for kind in v.removed:
-            w.varint(kind)
+# ItemStack / _Slot / _Template — псевдонимы проводных кодеков из
+# item_data.rs (item.rs:948-1130). Дублирующих классов здесь больше нет:
+#   * ``ItemStack``  == ``item_data.Stack``  (item, count, added, removed);
+#   * ``_Slot``      == ``item_data.Slot``   (ItemStack.OPTIONAL_STREAM_CODEC);
+#   * ``_Template``  == ``item_data.Template`` (ItemStackTemplate.STREAM_CODEC).
+# Старые имена оставлены для обратной совместимости PART 1-6 и вне кода.
+# ``read_stack``/``write_stack`` и ``ComponentPatch``/``ComponentMap``
+# реэкспортируются, чтобы вызывающие могли писать патчи компонент напрямую.
 
 
 @dataclass(frozen=True)
@@ -3043,11 +2990,11 @@ class CommandSuggestion(_Packet):
 # (не window_id), `state` (не state_id); у ContainerClick — `input` (не
 # mode) и `changed` пар «(slot, Option<Hashed>)».
 #
-# Слоты (Slot) кодируются тем же `_Slot` из PART 3: count, item, затем
-# patch. Непустые патчи компонентов по-прежнему дают ProtocolError —
-# items.rs ещё не портирован, поэтому значения компонентов на проводе
-# прочитать нельзя. SetCreativeModeSlot использует DelimitedSlot, но при
-# пустом патче он побайтово совпадает со Slot, так что снова `_Slot`.
+# Слоты (Slot) кодируются тем же `_Slot` из PART 3 (== item_data.Slot):
+# count, item, затем патч компонент. Непустые патчи читаются реально
+# (`read_component`/`write_component`), ProtocolError больше не бросается.
+# SetCreativeModeSlot использует DelimitedSlot (item.rs:1067): как Slot, но
+# каждое значение компоненты идёт за своей длиной.
 #
 # HashedStack (item.rs:1135) — самодостаточная wire-форма (item, count,
 # пары (kind, hash), removed-виды), items.rs для неё НЕ нужен. Ею несут
@@ -3150,33 +3097,33 @@ class _BookPages:
 class NetCost:
     """ItemCost.STREAM_CODEC (play.rs:99): item, count и компоненты.
 
-    Форма на проводе не несёт patch-removal count: список идёт сразу.
-    Компоненты непустые не читаются (items.rs pending) → ProtocolError.
+    Форма на проводе не несёт patch-removal count: список идёт сразу
+    (`Vec<(i32, Component)>`). Значения компонент читаются/пишутся теми же
+    ``read_component``/``write_component``, что и в ``ComponentPatch``.
     """
 
     item: int
     count: int
-    components: Tuple[Tuple[int, object], ...] = ()
+    components: Tuple[Tuple[int, Component], ...] = ()
 
     @classmethod
     def read(cls, r: Reader) -> "NetCost":
         item = r.varint()
         count = r.varint()
         n = r.count(r.remaining())
-        if n:
-            raise ProtocolError(
-                "[QuadRix] item components are not ported yet (items.rs pending)"
-            )
-        return cls(item, count)
+        components = tuple(
+            (kind, read_component(kind, r))
+            for kind in (r.varint() for _ in range(n))
+        )
+        return cls(item, count, components)
 
     def write(self, w: Writer) -> None:
-        if self.components:
-            raise ProtocolError(
-                "[QuadRix] item components are not ported yet (items.rs pending)"
-            )
         w.varint(self.item)
         w.varint(self.count)
         w.varint(len(self.components))
+        for kind, comp in self.components:
+            w.varint(kind)
+            write_component(kind, comp, w)
 
 
 @dataclass(frozen=True)
@@ -3541,18 +3488,22 @@ class EditBook(_Packet):
 
 @dataclass
 class SetCreativeModeSlot(_Packet):
-    """ServerboundSetCreativeModeSlotPacket: слот и предмет (Short, Slot)."""
+    """ServerboundSetCreativeModeSlotPacket: слот и предмет (Short, Slot).
+
+    Rust: ``item: Option<Stack> => DelimitedSlot`` (item.rs:1067): как Slot,
+    но каждое значение компоненты идёт за байтовой длиной.
+    """
 
     slot: int
     item: Optional[ItemStack]
 
     @classmethod
     def read(cls, r: Reader) -> "SetCreativeModeSlot":
-        return cls(Short.read(r), _Slot.read(r))
+        return cls(Short.read(r), _DelimitedSlot.read(r))
 
     def write(self, w: Writer) -> None:
         Short.write(self.slot, w)
-        _Slot.write(self.item, w)
+        _DelimitedSlot.write(self.item, w)
 
 
 @dataclass

@@ -1758,13 +1758,15 @@ def test_serverbound_container_slot_state_and_select_trade_round_trip():
     assert trade_body == bytes([trade_id, 2])
 
 
-def test_nonexistent_patches_are_rejected():
-    # Непустые патчи компонентов невозможны: items.rs ещё pending.
+def test_invalid_component_payload_is_rejected():
+    # Непустые патчи компонент теперь реально кодируются. Но значение
+    # компоненты обязано быть вариантом ``Component`` из item_data; чужая
+    # полезная нагрузка (object()) по-прежнему отвергается при записи.
     packet = ContainerSetSlot(
         container=0,
         state=1,
         slot=0,
-        item=ItemStack(item=1, count=1, added=((5, object()),)),
+        item=ItemStack(item=1, count=1, added=[(5, object())]),
     )
     with pytest.raises(ProtocolError):
         Clientbound.encode(packet)
@@ -2026,4 +2028,183 @@ def test_play_rs_fully_implemented():
     # Плюс таблицы dispatch покрывают все ID из ids.py.
     assert len(ID_TO_CLASS) == len(ids.play.clientbound.NAMES)
     assert len(SERVERBOUND_ID_TO_CLASS) == len(ids.play.serverbound.NAMES)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# PART 3/5 — компоненты ItemStack на проводе (item.rs)
+#
+# _Slot / _Template / DelimitedSlot больше не отвергают непустые патчи
+# компонент: значения читаются и пишутся через item_data. Здесь проверяем
+# реальные компоненты (damage, custom_name) в пакетах PART 3 и PART 5.
+# ═════════════════════════════════════════════════════════════════════
+
+
+from quadrix.items.item_data import (  # noqa: E402 — блок компонент
+    ComponentInt,
+    ComponentText,
+    component_id,
+)
+from quadrix.items.items import ITEM_REGISTRY  # noqa: E402
+
+
+def protocol_item(name: str) -> int:
+    """Сетевой id предмета = индекс в реестре сетевого порядка."""
+    return ITEM_REGISTRY.registry_order.index(name)
+
+
+DAMAGE_COMPONENT = component_id("minecraft:damage")
+CUSTOM_NAME_COMPONENT = component_id("minecraft:custom_name")
+
+
+def test_play_set_equipment_round_trip_with_components():
+    # SetEquipment несёт пары (slot, Option<Stack>); Stack с damage.
+    packet = SetEquipment(
+        id=7,
+        slots=[
+            (0, None),
+            (1, ItemStack(item=protocol_item("minecraft:diamond_sword"), count=1,
+                          added=[(DAMAGE_COMPONENT, ComponentInt(50))])),
+        ],
+    )
+
+    packet_id, _ = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of("set_equipment", State.PLAY, Direction.CLIENTBOUND)
+    assert packet.slots[0] == (0, None)
+    stack = packet.slots[1][1]
+    assert stack.item == protocol_item("minecraft:diamond_sword")
+    assert stack.damage() == 50
+
+
+def test_play_container_set_content_round_trip_with_components():
+    packet = ContainerSetContent(
+        container=0,
+        state=1,
+        items=[
+            None,
+            ItemStack(item=protocol_item("minecraft:stone"), count=32),
+            ItemStack(item=protocol_item("minecraft:diamond_sword"), count=1,
+                      added=[(DAMAGE_COMPONENT, ComponentInt(50))]),
+        ],
+        carried=None,
+    )
+
+    packet_id, _ = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "container_set_content", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert packet.items[1].count == 32
+    assert packet.items[1].added == []
+    assert packet.items[2].damage() == 50
+
+
+def test_play_container_set_slot_round_trip_with_custom_name():
+    name = string("test")
+    packet = ContainerSetSlot(
+        container=0,
+        state=1,
+        slot=36,
+        item=ItemStack(
+            item=protocol_item("minecraft:stone"),
+            count=1,
+            added=[(CUSTOM_NAME_COMPONENT, ComponentText(name))],
+        ),
+    )
+
+    packet_id, _ = round_trip(Clientbound, packet)
+
+    assert packet_id == id_of(
+        "container_set_slot", State.PLAY, Direction.CLIENTBOUND
+    )
+    comp = packet.item.component(CUSTOM_NAME_COMPONENT)
+    assert isinstance(comp, ComponentText)
+    assert comp.tag == name
+
+
+def test_play_set_creative_mode_slot_round_trip_with_components():
+    # Rust: item => DelimitedSlot (каждая компонента за своей длиной).
+    packet = SetCreativeModeSlot(
+        slot=36,
+        item=ItemStack(item=protocol_item("minecraft:diamond_sword"), count=1,
+                       added=[(DAMAGE_COMPONENT, ComponentInt(50))]),
+    )
+
+    packet_id, _ = round_trip(Serverbound, packet)
+
+    assert packet_id == id_of(
+        "set_creative_mode_slot", State.PLAY, Direction.SERVERBOUND
+    )
+    assert packet.item.damage() == 50
+
+
+def test_play_set_cursor_item_and_inventory_round_trip_with_components():
+    cursor = SetCursorItem(
+        item=ItemStack(item=protocol_item("minecraft:stone"), count=5)
+    )
+    inventory = SetPlayerInventory(
+        slot=36,
+        item=ItemStack(item=protocol_item("minecraft:stone"), count=5),
+    )
+
+    cursor_id, _ = round_trip(Clientbound, cursor)
+    inventory_id, _ = round_trip(Clientbound, inventory)
+
+    assert cursor_id == id_of(
+        "set_cursor_item", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert inventory_id == id_of(
+        "set_player_inventory", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert cursor.item.count == 5
+    assert inventory.item.count == 5
+
+
+def test_play_merchant_offers_round_trip_with_item_cost_components():
+    # ItemCost.STREAM_CODEC: item, count, список (kind, Component) без
+    # patch-removal count.
+    offer = NetOffer(
+        cost_a=NetCost(
+            item=protocol_item("minecraft:stone"),
+            count=32,
+            components=((DAMAGE_COMPONENT, ComponentInt(3)),),
+        ),
+        result=ItemStack(item=protocol_item("minecraft:diamond_sword"), count=1,
+                         added=[(DAMAGE_COMPONENT, ComponentInt(50))]),
+        cost_b=None,
+        out_of_stock=False,
+        uses=0,
+        max_uses=7,
+        xp=1,
+        special_price=0,
+        price_multiplier=1.0,
+        demand=0,
+    )
+    offers = MerchantOffers(
+        container=1,
+        offers=[offer],
+        level=1,
+        xp=3,
+        show_progress=True,
+        can_restock=False,
+    )
+
+    packet_id, _ = round_trip(Clientbound, offers)
+
+    assert packet_id == id_of(
+        "merchant_offers", State.PLAY, Direction.CLIENTBOUND
+    )
+    assert offers.offers[0].cost_a.components == ((DAMAGE_COMPONENT, ComponentInt(3)),)
+    assert offers.offers[0].result.damage() == 50
+
+
+def test_play_item_stack_trailing_bytes_are_rejected():
+    # Лишний байт после реального Stack — ProtocolError (тело не дочитано).
+    packet = SetCursorItem(
+        item=ItemStack(item=protocol_item("minecraft:stone"), count=1)
+    )
+    _, body = round_trip(Clientbound, packet)
+    packet_id = body[0]
+    with pytest.raises(ProtocolError):
+        Clientbound.decode(packet_id, body[1:] + b"\x00")
 
