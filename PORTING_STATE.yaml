@@ -1650,11 +1650,25 @@ files:
     status: pending
     note: "Game rules."
 
-  - rust: horizon-core/src/registries.rs
-    python: quadrix/core/registries.py
-    test: tests/core/test_registries.py
-    status: pending
-    note: "Registries (block, item, entity)."
+  - rust: horizon-client-core/src/registries.rs
+    python: quadrix/core/registries.py
+    test: tests/core/test_registries.py
+    status: done
+    lines_python: 327
+    note: "Registries — состояние источников команд (валидация/автодополнение
+      аргументов), а НЕ generic Registry<T> id↔name (тот — horizon-world/
+      registry.rs, уже портирован как quadrix.world.registry + block-registry.nbt).
+      Поля как в Rust: permission/items/block_tags/by_registry/block_tag_members/
+      clock_time_markers/advancement_criteria/trigger_scores и т.д. (BTreeMap→dict,
+      BTreeSet→set, Vec→list, Option→Optional). RegistryIds(ids,tags),
+      CustomCompletionAction(Add/Remove/Set) + from_id, modify_custom_completions,
+      custom_tab_suggestions. Заполнение из экспорта vanilla command-registries.json:
+      fill_from_export/from_export/fill_from_exported (RELOADED-реестры не берём,
+      пустые поля заполняются, summonable/entity_types sort+dedup), ids()/tags().
+      Загрузка — через from_export(json.load(.local/command-registries/
+      registries.json)); отдельного файлового лоадера в Rust нет. 12 tests
+      (реальный registries.json: 40 effects, 161 entity_types, 1658 item ids,
+      48 участников minecraft:logs, 1866 advancement_criteria)."
 
   - rust: horizon-core/src/pattern.rs
     python: quadrix/core/pattern.py
