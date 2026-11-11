@@ -40,6 +40,7 @@ from typing import Any, Callable, Optional
 from quadrix.core import lang
 from quadrix.core.lang import Language, LanguageInfo, PathSource
 from quadrix.core.text import Text
+from quadrix.render.graphics import Extras, HorizonGraphics
 from quadrix.render.ui import (
     Batch,
     Button,
@@ -329,8 +330,41 @@ class Settings:
     gui_scale: int = GUI_SCALE_DEFAULT
     menu_blur: int = MENU_BLUR_DEFAULT
     language: str = LANGUAGE_DEFAULT
+    # -- ванильные графические опции (settings.rs L226-253) --------------
+    fullscreen: bool = False
+    smooth_lighting: bool = True
+    clouds: str = "true"
+    cloud_range: int = 128
+    particles: int = 0
+    entity_distance: float = 1.0
+    entity_shadows: bool = True
+    biome_blend: int = 2
+    graphics_preset: str = "fancy"
+    mipmap_levels: int = 4
+    weather_radius: int = 10
+    chunk_fade: float = 0.75
+    vignette: bool = True
+    autosave_indicator: bool = True
+    cutout_leaves: bool = True
+    improved_transparency: bool = False
+    attack_indicator: int = 1
+    inactivity_fps_limit: str = "afk"
+    prioritize_chunk_updates: int = 0
+    # -- Horizon (graphics.rs::Graphics, extras.rs::Extras) --------------
+    horizon: HorizonGraphics = field(default_factory=HorizonGraphics)
+    extras: Extras = field(default_factory=Extras)
+    #: ``Monitor.videoModes`` окна (заполняет игра); для строки Exclusive Mode.
+    video_modes: list[Any] = field(default_factory=list)
     # Полный набор значений файла (typed-поля выше — его проекция).
     file: dict[str, Any] = field(default_factory=dict)
+
+    def video_mode_index(self) -> int:
+        """Индекс выбранного видеорежима (``-1``, если режимов нет)."""
+        chosen = self.file.get("fullscreenResolution")
+        for i, mode in enumerate(self.video_modes or []):
+            if mode == chosen:
+                return i
+        return -1
 
     # -- чтение / запись (vanilla options.txt) ---------------------------
 
@@ -339,6 +373,29 @@ class Settings:
         """Порт ``Settings::from_file`` — типизированный вид словаря опций."""
         def num(key: str, default: Any) -> Any:
             return f.get(key, default)
+
+        def boolean(key: str, default: bool) -> bool:
+            """``options_file::V::Bool`` — строка "true"/"false"."""
+            value = f.get(key, default)
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() == "true"
+
+        def name(key: str, default: str) -> str:
+            value = f.get(key, default)
+            return default if value is None else str(value)
+
+        def integer(key: str, default: int) -> int:
+            try:
+                return int(f.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        def number(key: str, default: float) -> float:
+            try:
+                return float(f.get(key, default))
+            except (TypeError, ValueError):
+                return default
 
         return cls(
             fov=float(num("fov", FOV_DEFAULT)),
@@ -350,11 +407,30 @@ class Settings:
             master_volume=float(num("soundCategory_master", MASTER_VOLUME_DEFAULT)),
             gamma=float(num("gamma", GAMMA_DEFAULT)),
             max_fps=int(num("maxFps", MAX_FPS_DEFAULT)),
-            vsync=bool(num("enableVsync", True)),
-            view_bobbing=bool(num("bobView", True)),
+            vsync=boolean("enableVsync", True),
+            view_bobbing=boolean("bobView", True),
             gui_scale=max(0, int(num("guiScale", GUI_SCALE_DEFAULT))),
             menu_blur=int(num("menuBackgroundBlurriness", MENU_BLUR_DEFAULT)),
             language=str(num("lang", LANGUAGE_DEFAULT)),
+            fullscreen=boolean("fullscreen", False),
+            smooth_lighting=boolean("ao", True),
+            clouds=name("renderClouds", "true"),
+            cloud_range=integer("cloudRange", 128),
+            particles=integer("particles", 0),
+            entity_distance=number("entityDistanceScaling", 1.0),
+            entity_shadows=boolean("entityShadows", True),
+            biome_blend=integer("biomeBlendRadius", 2),
+            graphics_preset=name("graphicsPreset", "fancy"),
+            mipmap_levels=integer("mipmapLevels", 4),
+            weather_radius=integer("weatherRadius", 10),
+            chunk_fade=number("chunkSectionFadeInTime", 0.75),
+            vignette=boolean("vignette", True),
+            autosave_indicator=boolean("showAutosaveIndicator", True),
+            cutout_leaves=boolean("cutoutLeaves", True),
+            improved_transparency=boolean("improvedTransparency", False),
+            attack_indicator=integer("attackIndicator", 1),
+            inactivity_fps_limit=name("inactivityFpsLimit", "afk"),
+            prioritize_chunk_updates=integer("prioritizeChunkUpdates", 0),
             file=dict(f),
         )
 
@@ -387,6 +463,25 @@ class Settings:
         f["guiScale"] = int(self.gui_scale)
         f["menuBackgroundBlurriness"] = int(self.menu_blur)
         f["lang"] = str(self.language)
+        f["fullscreen"] = bool(self.fullscreen)
+        f["ao"] = bool(self.smooth_lighting)
+        f["renderClouds"] = str(self.clouds)
+        f["cloudRange"] = int(self.cloud_range)
+        f["particles"] = int(self.particles)
+        f["entityDistanceScaling"] = float(self.entity_distance)
+        f["entityShadows"] = bool(self.entity_shadows)
+        f["biomeBlendRadius"] = int(self.biome_blend)
+        f["graphicsPreset"] = str(self.graphics_preset)
+        f["mipmapLevels"] = int(self.mipmap_levels)
+        f["weatherRadius"] = int(self.weather_radius)
+        f["chunkSectionFadeInTime"] = float(self.chunk_fade)
+        f["vignette"] = bool(self.vignette)
+        f["showAutosaveIndicator"] = bool(self.autosave_indicator)
+        f["cutoutLeaves"] = bool(self.cutout_leaves)
+        f["improvedTransparency"] = bool(self.improved_transparency)
+        f["attackIndicator"] = int(self.attack_indicator)
+        f["inactivityFpsLimit"] = str(self.inactivity_fps_limit)
+        f["prioritizeChunkUpdates"] = int(self.prioritize_chunk_updates)
         return f
 
     def serialize(self) -> str:
@@ -1182,104 +1277,6 @@ class OptionsSubScreen(Screen):
         return self.back_button.handle_click(mx, my)
 
 
-class GraphicsScreen(OptionsSubScreen):
-    """Video/Graphics: FOV, дальности, VSync, bobbing и GUI Scale.
-
-    GUI Scale — ``options_ui.rs::Opt::GuiScale`` (Video Settings): значение
-    циклится Auto → 1 → … → ``calculate_scale`` → Auto. Размер интерфейса
-    применяет ``App`` (``gui_scaled_size`` + ``calculate_scale``).
-    """
-
-    def __init__(self, settings=None, stack=None, width=854.0, height=480.0,
-                 framebuffer=None):
-        #: Размер кадрового буфера для ``calculate_scale`` (autо-масштаб).
-        self.framebuffer = framebuffer or (int(width), int(height))
-        super().__init__("video", settings, stack, width, height)
-        self.page = "graphics"
-
-    def build(self) -> None:
-        super().build()
-        s = self.settings
-        cx = math.floor(self.width / 2.0)
-        top = 29.0
-        self.sliders = [
-            Slider(cx - 154.0, top, 150.0, 20.0, value=float(s.fov),
-                   min=FOV_MIN, max=FOV_MAX,
-                   label=lang.get_or("options.fov", "FOV"), on_change=self._set_fov),
-            Slider(cx - 154.0, top + 24.0, 150.0, 20.0, value=float(s.render_distance),
-                   min=RENDER_DISTANCE_MIN, max=RENDER_DISTANCE_MAX,
-                   label=lang.get_or("options.renderDistance", "Render Distance"),
-                   on_change=self._set_render_distance),
-            Slider(cx - 154.0, top + 48.0, 150.0, 20.0, value=float(s.simulation_distance),
-                   min=SIMULATION_DISTANCE_MIN, max=SIMULATION_DISTANCE_MAX,
-                   label=lang.get_or("options.simulationDistance", "Simulation Distance"),
-                   on_change=self._set_simulation_distance),
-        ]
-        self.checkboxes = [
-            Checkbox(cx + 4.0, top, lang.get_or("options.vsync", "VSync"),
-                     value=bool(s.vsync), on_change=self._set_vsync, hit_width=100.0),
-            Checkbox(cx + 4.0, top + 24.0, lang.get_or("options.viewBobbing", "View Bobbing"),
-                     value=bool(s.view_bobbing), on_change=self._set_bobbing, hit_width=100.0),
-        ]
-        self.gui_scale_button = Button(
-            cx + 4.0, top + 48.0, 150.0, MAIN_MENU_BUTTON_HEIGHT,
-            "", on_click=self._cycle_gui_scale,
-        )
-        self._sync_gui_scale_label()
-
-    def _gui_scale_text(self) -> str:
-        """``Opt::GuiScale`` label: ``options.generic_value`` (caption, value)."""
-        caption = lang.get_or("options.guiScale", "GUI Scale")
-        value = (
-            lang.get_or("options.guiScale.auto", "Auto")
-            if int(self.settings.gui_scale) == 0
-            else str(int(self.settings.gui_scale))
-        )
-        fmt = lang.get_or("options.generic_value", "%s: %s")
-        return fmt.replace("%s", caption, 1).replace("%s", value, 1)
-
-    def _sync_gui_scale_label(self) -> None:
-        if hasattr(self, "gui_scale_button"):
-            self.gui_scale_button.label = self._gui_scale_text()
-
-    def _cycle_gui_scale(self) -> None:
-        """Порт ``Opt::cycle`` для ``GuiScale`` (вперёд, как ЛКМ в Rust)."""
-        maximum = calculate_scale(self.framebuffer, 0, False)
-        value = min(int(self.settings.gui_scale), maximum)
-        self.settings.gui_scale = 0 if value == maximum else value + 1
-        self._sync_gui_scale_label()
-
-    def _set_fov(self, v): self.settings.fov = float(v)
-    def _set_render_distance(self, v): self.settings.render_distance = int(round(v))
-    def _set_simulation_distance(self, v): self.settings.simulation_distance = int(round(v))
-    def _set_vsync(self, v): self.settings.vsync = bool(v)
-    def _set_bobbing(self, v): self.settings.view_bobbing = bool(v)
-
-    def title_key(self) -> str:
-        return "options.video"
-
-    def render(self, batch, font=None):
-        self._sync_gui_scale_label()
-        super().render(batch, font)
-        for s in self.sliders:
-            s.render(batch, font)
-        for c in self.checkboxes:
-            c.render(batch, font)
-        self.gui_scale_button.render(batch, font)
-
-    def handle_click(self, mx, my):
-        for s in self.sliders:
-            if _in_rect(s.x, s.y, s.w, s.h, mx, my):
-                s.click(mx)
-                return True
-        for c in self.checkboxes:
-            if c.handle_click(mx, my):
-                return True
-        if self.gui_scale_button.handle_click(mx, my):
-            return True
-        return self.back_button.handle_click(mx, my)
-
-
 class SoundScreen(OptionsSubScreen):
     """Music & Sounds: громкость мастера."""
 
@@ -1557,6 +1554,9 @@ class LanguageScreen(Screen):
 
     def handle_scroll(self, dy: float) -> bool:
         return self.list.handle_scroll(dy)
+
+
+from quadrix.render.graphics_ui import GraphicsScreen  # noqa: E402  (цикл: импорт после Screen)
 
 
 __all__ = [

@@ -386,28 +386,48 @@ def test_calculate_scale_matches_rust_cases() -> None:
     assert gui_scaled_size((1921, 1081), 4) == (481, 271)
 
 
-def test_graphics_gui_scale_button_cycles_auto_1_max_auto() -> None:
+def test_graphics_gui_scale_row_cycles_auto_1_max_auto() -> None:
     settings = Settings(gui_scale=0)
     screen = GraphicsScreen(
         settings=settings, stack=None, width=427.0, height=240.0,
         framebuffer=(854, 480),
     )
-    button = screen.gui_scale_button
+
+    def row_point() -> tuple[float, float]:
+        cols, lines, _content = screen.layout(settings)
+        target = next(
+            line for line in lines
+            if line.setting is not None and line.setting.kind == "Opt"
+            and line.setting.name == "GuiScale"
+        )
+        # Строка ниже видимой части (General длинная): прокрутить к ней.
+        screen.scroll = max(0.0, target.y - 20.0)
+        cols, lines, _content = screen.layout(settings)
+        for line in lines:
+            if (line.setting is not None and line.setting.kind == "Opt"
+                    and line.setting.name == "GuiScale"):
+                return (cols.list_x + 20.0, screen.row_y(cols, line) + 10.0)
+        raise AssertionError("GUI Scale row missing")
+
+    def value() -> str:
+        from quadrix.render.graphics import item_label
+        return item_label(settings, "Opt", "GuiScale")
+
     # Подпись: "GUI Scale: Auto" (options.generic_value).
-    assert "Auto" in button.label
+    assert "Auto" in value()
 
-    def click() -> None:
-        assert screen.handle_click(button.x + 1.0, button.y + 1.0) is True
-
-    click()
+    x, y = row_point()
+    assert screen.handle_click(x, y) is True
     assert settings.gui_scale == 1
-    assert button.label.endswith("1")
+    assert value().endswith("1")
 
-    click()
+    x, y = row_point()
+    screen.handle_click(x, y)
     assert settings.gui_scale == 2  # max для 854x480
-    click()
+    x, y = row_point()
+    screen.handle_click(x, y)
     assert settings.gui_scale == 0  # Auto снова
-    assert "Auto" in button.label
+    assert "Auto" in value()
 
 
 def test_language_row_click_applies_immediately() -> None:

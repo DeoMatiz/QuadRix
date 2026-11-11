@@ -580,9 +580,22 @@ def test_app_gui_scale_click_changes_logical_size() -> None:
     graphics = app.screen_stack.current
     assert isinstance(graphics, GraphicsScreen)
 
-    button = graphics.gui_scale_button
-    x = button.x + 1.0
-    y = button.y + 1.0
+    cols, lines, _content = graphics.layout(app.settings)
+    row = next(
+        line for line in lines
+        if line.setting is not None and line.setting.kind == "Opt"
+        and line.setting.name == "GuiScale"
+    )
+    # Строка ниже видимой части (General длинная): прокрутить к ней.
+    graphics.scroll = max(0.0, row.y - 20.0)
+    cols, lines, _content = graphics.layout(app.settings)
+    row = next(
+        line for line in lines
+        if line.setting is not None and line.setting.kind == "Opt"
+        and line.setting.name == "GuiScale"
+    )
+    x = cols.list_x + 20.0
+    y = graphics.row_y(cols, row) + 10.0
     assert app.handle_event(
         "click",
         x * app.width / app.gui_width,
