@@ -1545,11 +1545,21 @@ files:
     status: pending
     note: "NBT value (для path)."
 
-  - rust: horizon-core/src/snbt.rs
-    python: quadrix/core/snbt.py
-    test: tests/core/test_snbt.py
-    status: pending
-    note: "SNBT (string NBT) parser."
+  - rust: horizon-core/src/snbt.rs
+    python: quadrix/core/snbt.py
+    test: tests/core/test_snbt.py
+    status: done
+    lines_python: 463
+    note: "SNBT парсер (TagParser/Snbt из horizon-world/nbt.rs::parse_snbt) и
+      писатель (StringTagVisitor, snbt_text.rs::to_snbt), плюс Java-числа
+      (java_double/java_float) и quote_and_escape. parse/parse_snbt (возвращает
+      (Tag, used)) / to_snbt. Компаунд в Rust — BTreeMap<JavaString,Tag>,
+      писатель сортирует ключи по UTF-16 (be-байты). Суффиксы b/s/L/f/d,
+      true/false → Byte(1)/Byte(0), [B;/[I;/[L; массивы, вложенность до 512
+      (SNBT_MAX_DEPTH), trailing comma отвергается. Tag переиспользован из
+      quadrix/world/nbt.py. НЕ портировано: pretty/pretty_indented/
+      pretty_piston/java_hash_order (цветная форма команд, зависит от
+      command-слоя) — следующий этап. 25 tests."
 
   - rust: horizon-core/src/lang.rs
     python: quadrix/core/lang.py
