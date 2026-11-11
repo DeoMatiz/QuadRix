@@ -121,11 +121,27 @@ files:
     status: pending
     note: "BlockPos, ChunkPos, SectionPos, Vec3i. Частично в buf.py/geometry.py."
 
-  - rust: horizon-core/src/text.rs
-    python: quadrix/core/text.py
-    test: tests/core/test_text.py
-    status: pending
-    note: "Text component (vanilla JSON chat component). Нужен для чата, tooltip, NBT."
+  - rust: horizon-client-core/src/text.rs
+    python: quadrix/core/text.py
+    test: tests/core/test_text.py
+    status: done
+    lines_python: 1105
+    note: >-
+      Text component: Style (color/shadow_color/bold/italic/underlined/
+      strikethrough/obfuscated/click/hover/hover_item/hover_entity/insertion/
+      font/inline_object), Span, Text (spans + source JSON). COLORS 16 legacy
+      codes, named_color, legacy_format, format_translation (%s, %n$s, %%) и
+      resolve_legacy/strip_legacy. ClickEvent (open_url/change_page/
+      suggest_command/run_command/copy_to_clipboard/show_dialog/custom/
+      open_file), HoverEvent (show_text/show_item/show_entity), InlineObject.
+      component() (to vanilla JSON) + from_json/to_json (расширение поверх
+      Rust), to_plain_string, to_ansi (консоль), slice/chars, translate/
+      translatable/translate_with_fallback/tr, copyable/teleport_link/
+      option_name_value. 39 tests.
+      FALLBACK: lang.rs не портирован — _CURRENT_LANG=None, ClientLanguage.
+      getOrDefault возвращает ключ; scoreboard::tag_to_json не портирован —
+      _tag_to_json конвертирует Python/NBT Tag рекурсивно; show_dialog/
+      custom payload, фиксируется здесь.
 
   - rust: horizon-core/src/jmath.rs
     python: quadrix/core/jmath.py
