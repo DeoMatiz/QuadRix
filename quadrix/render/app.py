@@ -45,7 +45,10 @@ from quadrix.render.menu import (
     Screen,
     ScreenStack,
     Settings,
+    calculate_scale,
     draw_text,
+    effective_gui_scale,
+    gui_scaled_size,
     load_language,
     solid,
 )
@@ -181,6 +184,14 @@ class App:
         self.settings = settings if settings is not None else Settings()
         self.width = int(width)
         self.height = int(height)
+        # GUI scale (``window.rs``): 0 = auto, иначе 1..max. Экраны и мышь
+        # работают в логических (GUI) пикселях, кадр — в пикселях буфера.
+        self.gui_scale = effective_gui_scale(
+            self.settings, (self.width, self.height)
+        )
+        self.gui_width, self.gui_height = gui_scaled_size(
+            (self.width, self.height), self.gui_scale
+        )
         self.font: Optional[Font] = font
         if self.font is None and load_font:
             self.font = self._safe_font()
@@ -228,8 +239,8 @@ class App:
     def _build_main_menu(self) -> MainMenu:
         """Главное меню с обработчиками (порт ``Title`` / ``StartupMenu``)."""
         return MainMenu(
-            float(self.width),
-            float(self.height),
+            float(self.gui_width),
+            float(self.gui_height),
             on_quit=self.quit,
             on_singleplayer=self.open_singleplayer,
             on_multiplayer=self.open_multiplayer,
@@ -252,6 +263,51 @@ class App:
             if callable(build):
                 build()
 
+    def _on_language_applied(self, code: str) -> None:
+        """Язык применён экраном; обновить подписи экранов под ним.
+
+        Текущий ``LanguageScreen`` не пересобираем: он сам обновил свои
+        подписи, а пересборка сбросила бы прокрутку и позицию выбора.
+        """
+        self.settings.language = code
+        stack = getattr(self.screen_stack, "_stack", [])
+        for screen in list(stack):
+            if screen is self.screen_stack.current:
+                continue
+            build = getattr(screen, "build", None)
+            if callable(build):
+                build()
+
+    def _sync_gui_scale(self, *, force: bool = False) -> None:
+        """Пересчитать GUI scale и размеры экранов (``Window.setGuiScale``)."""
+        scale = effective_gui_scale(self.settings, (self.width, self.height))
+        gui_width, gui_height = gui_scaled_size(
+            (self.width, self.height), scale
+        )
+        if not force and (scale, gui_width, gui_height) == (
+            self.gui_scale, self.gui_width, self.gui_height
+        ):
+            return
+        self.gui_scale = scale
+        self.gui_width, self.gui_height = gui_width, gui_height
+        stack = getattr(self, "screen_stack", None)
+        if stack is not None:
+            stack.on_resize(float(gui_width), float(gui_height))
+        self._set_ui_projection()
+        _log(f"GUI scale: {scale} ({gui_width}x{gui_height})")
+
+    def _screen_pos(self, mx: float, my: float) -> tuple[float, float]:
+        """Пиксели кадрового буфера → логические (GUI) координаты.
+
+        Порт ``window.rs::scaled_pos``: ``pos * gui_scaled / screen``.
+        """
+        width = float(self.width) or 1.0
+        height = float(self.height) or 1.0
+        return (
+            mx * self.gui_width / width,
+            my * self.gui_height / height,
+        )
+
     # ------------------------------------------------------------------
     # навигация (порт ``Gui.setScreen`` / ``StartupMenu``)
     # ------------------------------------------------------------------
@@ -268,6 +324,7 @@ class App:
             stack=self.screen_stack,
             width=self.screen_stack.current.width,
             height=self.screen_stack.current.height,
+            framebuffer=(self.width, self.height),
         )
         self.screen_stack.push(screen)
         _log("экран: OptionsScreen")
@@ -280,6 +337,7 @@ class App:
             stack=self.screen_stack,
             width=self.screen_stack.current.width,
             height=self.screen_stack.current.height,
+            on_apply=self._on_language_applied,
         )
         self.screen_stack.push(screen)
         _log("экран: LanguageScreen")
@@ -442,8 +500,8 @@ class App:
         """
         if self.program is None:
             return
-        width = float(self.width) or 1.0
-        height = float(self.height) or 1.0
+        width = float(self.gui_width) or 1.0
+        height = float(self.gui_height) or 1.0
         # x∈[0,w] -> [-1,1]; y∈[0,h] -> [1,-1] (экранная ось Y направлена вниз).
         projection = np.array(
             [
@@ -483,7 +541,8 @@ class App:
         ``True``, если экран событие принял (порт ``Game::window_event``).
         """
         if kind == "click":
-            return bool(self.screen_stack.handle_click(float(args[0]), float(args[1])))
+            mx, my = self._screen_pos(float(args[0]), float(args[1]))
+            return bool(self.screen_stack.handle_click(mx, my))
         if kind == "key":
             key = args[0]
             ch = args[1] if len(args) > 1 else None
@@ -492,7 +551,8 @@ class App:
             return bool(self.screen_stack.handle_scroll(float(args[0])))
         if kind == "move":
             # Курсор переместился — обновляем подсветку наведения (hover).
-            return bool(self.screen_stack.handle_move(float(args[0]), float(args[1])))
+            mx, my = self._screen_pos(float(args[0]), float(args[1]))
+            return bool(self.screen_stack.handle_move(mx, my))
         if kind == "resize":
             self.width = int(args[0]) or self.width
             self.height = int(args[1]) or self.height
@@ -500,9 +560,8 @@ class App:
             resize = getattr(self.backend, "resize", None)
             if callable(resize):
                 resize(self.width, self.height)
-            self.screen_stack.on_resize(float(args[0]), float(args[1]))
-            # Проекция привязана к размеру framebuffer — пересчитываем.
-            self._set_ui_projection()
+            # GUI scale (auto) зависит от размера буфера — пересчитать.
+            self._sync_gui_scale(force=True)
             return True
         return False
 
@@ -521,6 +580,7 @@ class App:
         backend нет или нечего рисовать).
         """
         self._apply_settings()
+        self._sync_gui_scale()
         self.batch.clear()
         backend = self.backend
         if backend is None:

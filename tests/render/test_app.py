@@ -21,6 +21,8 @@ from quadrix.core import lang
 from quadrix.core import text as core_text
 from quadrix.render.app import App, GameScreen, RenderSettings
 from quadrix.render.menu import (
+    GraphicsScreen,
+    LanguageScreen,
     MainMenu,
     OptionsScreen,
     ScreenStack,
@@ -168,6 +170,9 @@ def test_app_handle_event_click_opens_options() -> None:
 
     options = menu.buttons[3]  # Options... (0=Single,1=Multi,2=Realms,3=Options)
     x, y = _button_center(options)
+    # Экраны и кнопки живут в GUI-пикселях; мышь приходит в пикселях буфера.
+    x *= app.width / app.gui_width
+    y *= app.height / app.gui_height
     assert app.handle_event("click", x, y) is True
 
     assert app.screen_stack.depth() == 2
@@ -525,7 +530,8 @@ def test_click_dispatches_to_screen_stack() -> None:
     handled = app.handle_event("click", 12.0, 34.0)
 
     assert handled is True
-    assert screen.clicks == [(12.0, 34.0)]
+    # 854x480 при auto-масштабе (2) → логическое поле 427x240.
+    assert screen.clicks == [(6.0, 17.0)]
 
 
 def test_backend_event_handler_dispatches() -> None:
@@ -553,8 +559,61 @@ def test_handle_event_resize_updates_projection() -> None:
     app.setup()
     first = backend.program.uniforms["projection"]
 
-    assert app.handle_event("resize", 640.0, 480.0) is True
+    assert app.handle_event("resize", 1000.0, 800.0) is True
 
-    assert app.width == 640
-    assert app.height == 480
+    assert app.width == 1000
+    assert app.height == 800
+    # auto-масштаб вырос до 3 → логическое поле 334x267 (проекция иная).
+    assert (app.gui_width, app.gui_height) == (334, 267)
     assert backend.program.uniforms["projection"] != first
+
+# ---------------------------------------------------------------------------
+# GUI scale и язык через App (реальный путь клика: буфер → GUI-пиксели)
+# ---------------------------------------------------------------------------
+
+def test_app_gui_scale_click_changes_logical_size() -> None:
+    app = App.init(FakeBackend(), Settings(gui_scale=0), width=854, height=480)
+    assert (app.gui_width, app.gui_height) == (427, 240)
+
+    options = app.open_options()
+    options.open_page("graphics")
+    graphics = app.screen_stack.current
+    assert isinstance(graphics, GraphicsScreen)
+
+    button = graphics.gui_scale_button
+    x = button.x + 1.0
+    y = button.y + 1.0
+    assert app.handle_event(
+        "click",
+        x * app.width / app.gui_width,
+        y * app.height / app.gui_height,
+    ) is True
+    assert app.settings.gui_scale == 1
+
+    app.render()
+    assert (app.gui_width, app.gui_height) == (854, 480)
+    # Экран пересобрался под новый логический размер.
+    assert graphics.width == 854.0 and graphics.height == 480.0
+
+
+def test_app_language_row_click_applies_without_leaving_screen() -> None:
+    app = App.init(FakeBackend(), Settings(language="en_us"),
+                   width=854, height=480)
+    language = app.open_language()
+    assert isinstance(language, LanguageScreen)
+
+    row = next(i for i, info in enumerate(language.list.items)
+               if info.code != "en_us")
+    info = language.list.items[row]
+    language.list.scroll_to(row)
+    y = language.list.row_y(row) + 2.0
+    assert app.handle_event(
+        "click",
+        (language.list.x + 10.0) * app.width / app.gui_width,
+        y * app.height / app.gui_height,
+    ) is True
+
+    assert app.settings.language == info.code
+    assert lang.code() == info.code
+    # Выбор виден сразу, экран остаётся открытым до Done/back.
+    assert app.screen_stack.current is language

@@ -15,7 +15,11 @@
       ``options.sounds``, ``options.video``, ``options.controls``,
       ``options.language``, ``options.chat``, ``options.resourcepack``,
       ``options.accessibility``; сетка 2 столбца; FOV-слайдер. Экран языка
-      (``Page::Language``): строки 220x18 с шагом 18, кнопка Done.
+      (``Page::Language``): строки 220x18 с шагом 18, кнопка Done; выбор
+      языка применяется сразу, Done/back закрывает экран. GUI Scale
+      (``Page::Video``, ``Opt::GuiScale``) циклится Auto → 1..max, а
+      ``window.rs::calculate_scale``/``gui_scaled_size`` задают логический
+      размер интерфейса (см. ``App._sync_gui_scale``).
     * ``horizon-client-render/src/settings.rs`` — ``struct Settings``:
       значения по умолчанию (fov 70, render_distance 12, ...), диапазоны,
       кодировка ``options.txt`` и список источников звука.
@@ -264,6 +268,49 @@ def _decode_value(text: str) -> Any:
     except ValueError:
         pass
     return text
+
+
+def calculate_scale(
+    framebuffer: tuple[int, int],
+    max_scale: int = 0,
+    enforce_unicode: bool = False,
+) -> int:
+    """Порт ``window.rs::calculate_scale`` — максимальный GUI scale.
+
+    Rust:
+    ``while scale != max_scale && scale < width && scale < height
+    && width / (scale + 1) >= 320 && height / (scale + 1) >= 240``.
+    ``max_scale == 0`` означает «до упора» (auto).
+    """
+    width, height = int(framebuffer[0]), int(framebuffer[1])
+    scale = 1
+    while (
+        scale != max_scale
+        and scale < width
+        and scale < height
+        and width // (scale + 1) >= 320
+        and height // (scale + 1) >= 240
+    ):
+        scale += 1
+    if enforce_unicode and scale % 2 != 0:
+        scale += 1
+    return scale
+
+
+def gui_scaled_size(framebuffer: tuple[int, int], gui_scale: int) -> tuple[int, int]:
+    """Порт ``window.rs::gui_scaled_size`` (``Window.setGuiScale``).
+
+    ``ceil(size / gui_scale)``: логический размер интерфейса, который
+    получают экраны и ввод.
+    """
+    scale = max(1, int(gui_scale))
+    width, height = int(framebuffer[0]), int(framebuffer[1])
+    return math.ceil(width / scale), math.ceil(height / scale)
+
+
+def effective_gui_scale(settings: "Settings", framebuffer: tuple[int, int]) -> int:
+    """Действующий масштаб: ``0`` = auto (``calculate_scale``), иначе значение."""
+    return int(settings.gui_scale) or calculate_scale(framebuffer, 0, False)
 
 
 @dataclass
@@ -683,6 +730,10 @@ class Screen:
         """Экран изменил размер (порт ``Screen.resize``)."""
         self.width = float(width)
         self.height = float(height)
+        # Виджеты хранят абсолютные координаты — пересобрать под новый размер.
+        build = getattr(self, "build", None)
+        if callable(build):
+            build()
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
         """Нарисовать экран в батч PART 1 (по умолчанию — фон)."""
@@ -941,10 +992,13 @@ class OptionsScreen(Screen):
         stack: Optional[ScreenStack] = None,
         width: float = 854.0,
         height: float = 480.0,
+        framebuffer: Optional[tuple[int, int]] = None,
     ) -> None:
         super().__init__(width, height)
         self.settings = settings if settings is not None else Settings()
         self.stack = stack
+        #: Размер кадрового буфера (для GUI scale); App передаёт реальный.
+        self.framebuffer = framebuffer or (int(width), int(height))
         self.buttons: list[Button] = []
         self.online_button: Optional[Button] = None
         self.fov_slider: Optional[Slider] = None
@@ -1017,7 +1071,8 @@ class OptionsScreen(Screen):
                                     width=self.width, height=self.height)
         elif page == "graphics":
             screen = GraphicsScreen(settings=self.settings, stack=self.stack,
-                                    width=self.width, height=self.height)
+                                    width=self.width, height=self.height,
+                                    framebuffer=self.framebuffer)
         elif page == "sound":
             screen = SoundScreen(settings=self.settings, stack=self.stack,
                                  width=self.width, height=self.height)
@@ -1098,8 +1153,12 @@ class OptionsSubScreen(Screen):
         self.page = page
         self.settings = settings if settings is not None else Settings()
         self.stack = stack
+        self.build()
+
+    def build(self) -> None:
+        """Виджеты страницы; пересобираются при resize/смене GUI scale."""
         self.back_button = Button(
-            math.floor(width / 2.0) - 100.0, height - 27.0, 200.0,
+            math.floor(self.width / 2.0) - 100.0, self.height - 27.0, 200.0,
             MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("gui.back", "Back"), on_click=self._back,
         )
@@ -1124,13 +1183,24 @@ class OptionsSubScreen(Screen):
 
 
 class GraphicsScreen(OptionsSubScreen):
-    """Video/Graphics: FOV, дальности прорисовки и симуляции, VSync, bobbing."""
+    """Video/Graphics: FOV, дальности, VSync, bobbing и GUI Scale.
 
-    def __init__(self, settings=None, stack=None, width=854.0, height=480.0):
+    GUI Scale — ``options_ui.rs::Opt::GuiScale`` (Video Settings): значение
+    циклится Auto → 1 → … → ``calculate_scale`` → Auto. Размер интерфейса
+    применяет ``App`` (``gui_scaled_size`` + ``calculate_scale``).
+    """
+
+    def __init__(self, settings=None, stack=None, width=854.0, height=480.0,
+                 framebuffer=None):
+        #: Размер кадрового буфера для ``calculate_scale`` (autо-масштаб).
+        self.framebuffer = framebuffer or (int(width), int(height))
         super().__init__("video", settings, stack, width, height)
         self.page = "graphics"
+
+    def build(self) -> None:
+        super().build()
         s = self.settings
-        cx = width / 2.0
+        cx = math.floor(self.width / 2.0)
         top = 29.0
         self.sliders = [
             Slider(cx - 154.0, top, 150.0, 20.0, value=float(s.fov),
@@ -1151,6 +1221,33 @@ class GraphicsScreen(OptionsSubScreen):
             Checkbox(cx + 4.0, top + 24.0, lang.get_or("options.viewBobbing", "View Bobbing"),
                      value=bool(s.view_bobbing), on_change=self._set_bobbing, hit_width=100.0),
         ]
+        self.gui_scale_button = Button(
+            cx + 4.0, top + 48.0, 150.0, MAIN_MENU_BUTTON_HEIGHT,
+            "", on_click=self._cycle_gui_scale,
+        )
+        self._sync_gui_scale_label()
+
+    def _gui_scale_text(self) -> str:
+        """``Opt::GuiScale`` label: ``options.generic_value`` (caption, value)."""
+        caption = lang.get_or("options.guiScale", "GUI Scale")
+        value = (
+            lang.get_or("options.guiScale.auto", "Auto")
+            if int(self.settings.gui_scale) == 0
+            else str(int(self.settings.gui_scale))
+        )
+        fmt = lang.get_or("options.generic_value", "%s: %s")
+        return fmt.replace("%s", caption, 1).replace("%s", value, 1)
+
+    def _sync_gui_scale_label(self) -> None:
+        if hasattr(self, "gui_scale_button"):
+            self.gui_scale_button.label = self._gui_scale_text()
+
+    def _cycle_gui_scale(self) -> None:
+        """Порт ``Opt::cycle`` для ``GuiScale`` (вперёд, как ЛКМ в Rust)."""
+        maximum = calculate_scale(self.framebuffer, 0, False)
+        value = min(int(self.settings.gui_scale), maximum)
+        self.settings.gui_scale = 0 if value == maximum else value + 1
+        self._sync_gui_scale_label()
 
     def _set_fov(self, v): self.settings.fov = float(v)
     def _set_render_distance(self, v): self.settings.render_distance = int(round(v))
@@ -1162,11 +1259,13 @@ class GraphicsScreen(OptionsSubScreen):
         return "options.video"
 
     def render(self, batch, font=None):
+        self._sync_gui_scale_label()
         super().render(batch, font)
         for s in self.sliders:
             s.render(batch, font)
         for c in self.checkboxes:
             c.render(batch, font)
+        self.gui_scale_button.render(batch, font)
 
     def handle_click(self, mx, my):
         for s in self.sliders:
@@ -1176,6 +1275,8 @@ class GraphicsScreen(OptionsSubScreen):
         for c in self.checkboxes:
             if c.handle_click(mx, my):
                 return True
+        if self.gui_scale_button.handle_click(mx, my):
+            return True
         return self.back_button.handle_click(mx, my)
 
 
@@ -1185,9 +1286,13 @@ class SoundScreen(OptionsSubScreen):
     def __init__(self, settings=None, stack=None, width=854.0, height=480.0):
         super().__init__("sounds", settings, stack, width, height)
         self.page = "sound"
-        cx = width / 2.0
+
+    def build(self) -> None:
+        super().build()
+        cx = math.floor(self.width / 2.0)
         self.slider = Slider(
-            cx - 154.0, 29.0, 150.0, 20.0, value=float(settings.master_volume if settings else MASTER_VOLUME_DEFAULT),
+            cx - 154.0, 29.0, 150.0, 20.0,
+            value=float(self.settings.master_volume),
             min=0.0, max=1.0,
             label=lang.get_or("soundCategory_master", "Master Volume"),
             on_change=self._set_master,
@@ -1214,10 +1319,15 @@ class ControlsScreen(OptionsSubScreen):
     """Controls: чувствительность и переключатели (toggle sprint и т.п.)."""
 
     def __init__(self, settings=None, stack=None, width=854.0, height=480.0):
+        self.toggle_sprint = False
+        self.auto_jump = False
         super().__init__("controls", settings, stack, width, height)
         self.page = "controls"
+
+    def build(self) -> None:
+        super().build()
         s = self.settings
-        cx = width / 2.0
+        cx = math.floor(self.width / 2.0)
         self.slider = Slider(
             cx - 154.0, 29.0, 150.0, 20.0, value=float(s.sensitivity),
             min=0.0, max=1.0,
@@ -1226,12 +1336,12 @@ class ControlsScreen(OptionsSubScreen):
         )
         self.checkboxes = [
             Checkbox(cx + 4.0, 29.0, lang.get_or("options.toggleSprint", "Toggle Sprint"),
-                     value=False, on_change=self._set_toggle_sprint, hit_width=120.0),
+                     value=self.toggle_sprint, on_change=self._set_toggle_sprint,
+                     hit_width=120.0),
             Checkbox(cx + 4.0, 53.0, lang.get_or("options.autoJump", "Auto-Jump"),
-                     value=False, on_change=self._set_auto_jump, hit_width=120.0),
+                     value=self.auto_jump, on_change=self._set_auto_jump,
+                     hit_width=120.0),
         ]
-        self.toggle_sprint = False
-        self.auto_jump = False
 
     def _set_sensitivity(self, v):
         self.settings.sensitivity = float(v)
@@ -1281,16 +1391,25 @@ class LanguageScreen(Screen):
         width: float = 854.0,
         height: float = 480.0,
         languages: Optional[list[LanguageInfo]] = None,
+        on_apply: Optional[Callable[[str], None]] = None,
     ) -> None:
         super().__init__(width, height)
         self.settings = settings if settings is not None else Settings()
         self.stack = stack
+        #: Вызывается после применения языка (App перестраивает экраны).
+        self.on_apply = on_apply
         self.root = Path(root)
         self.languages: list[LanguageInfo] = (
             languages if languages is not None else available_languages(self.root)
         )
         self.choice: str = self.settings.language
-        cx = math.floor(width / 2.0)
+        self.build()
+
+    def build(self) -> None:
+        """Виджеты ``Page::Language``; пересобираются при resize/GUI scale."""
+        query = self.search.value if hasattr(self, "search") else ""
+        scroll = self.list.scroll if hasattr(self, "list") else 0.0
+        cx = math.floor(self.width / 2.0)
         # options_ui.rs L3305-3382: заголовок y=4, поиск (cx-100,17,200x20),
         # список (cx-110, top=36, 220x18, шаг 18), предупреждение y=h-45,
         # Font (cx-154,h-28) + Done (cx+4,h-28).
@@ -1298,23 +1417,32 @@ class LanguageScreen(Screen):
             cx - 100.0, 17.0, 200.0, h=20.0, max_length=64,
             on_change=self._on_search,
         )
+        self.search.value = query
+        items = list(self.languages)
+        q = query.lower()
+        if q:
+            items = [
+                info for info in items
+                if q in info.label().lower() or q in info.code.lower()
+            ]
         self.list = ScrollableList(
             x=cx - 110.0,
             y=36.0,
             w=LANGUAGE_ROW_WIDTH,
-            h=height - 53.0 - 36.0,
-            items=list(self.languages),
+            h=self.height - 53.0 - 36.0,
+            items=items,
             item_height=LANGUAGE_ROW_STEP,
             label_of=lambda info: info.label(),
             on_select=self._on_select,
         )
         self.list.selected = self._index_of(self.choice)
+        self.list.scroll = min(scroll, self.list.max_scroll())
         self.font_button = Button(
-            cx - 154.0, height - 28.0, 150.0, MAIN_MENU_BUTTON_HEIGHT,
+            cx - 154.0, self.height - 28.0, 150.0, MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("options.font", "Font..."), on_click=self._open_font,
         )
         self.done_button = Button(
-            cx + 4.0, height - 28.0, 150.0, MAIN_MENU_BUTTON_HEIGHT,
+            cx + 4.0, self.height - 28.0, 150.0, MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("gui.done", "Done"), on_click=self.apply,
         )
 
@@ -1325,7 +1453,21 @@ class LanguageScreen(Screen):
         return None
 
     def _on_select(self, index: int, info: LanguageInfo) -> None:
+        """Клик по строке (``options_ui.rs::WKind::LanguageRow``).
+
+        Rust запоминает выбор и применяет его при закрытии; здесь тот же
+        результат виден сразу: клик по другой строке немедленно применяет
+        язык (иначе интерфейс ничем не подтверждает выбор). Повторный клик
+        по уже выбранной строке закрывает экран, как ``back()`` в Rust.
+        """
+        if info.code == self.settings.language:
+            self.apply()
+            return
+        self.list.selected = index
         self.choice = info.code
+        self.set_language(info.code)
+        if self.on_apply is not None:
+            self.on_apply(info.code)
 
     def _on_search(self, query: str) -> None:
         """Фильтр поиска (options_ui.rs L3337-3342): label или код."""
@@ -1352,15 +1494,26 @@ class LanguageScreen(Screen):
         lang.set(language)
         self.choice = code
         self.settings.language = code
+        # Подписи виджетов зафиксированы при создании — обновляем их сразу,
+        # иначе после смены языка на этом же экране остаётся старый текст.
+        if hasattr(self, "font_button"):
+            self.font_button.label = lang.get_or("options.font", "Font...")
+        if hasattr(self, "done_button"):
+            self.done_button.label = lang.get_or("gui.done", "Done")
         return language
 
-    def apply(self) -> Language:
-        """Кнопка Done: применить выбранный язык (``lang.set``)."""
+    def apply(self) -> Optional[Language]:
+        """Применить выбранный язык и закрыть экран (``back()`` в Rust)."""
         selected = self.list.selected
         items = self.list.items
         if selected is not None and 0 <= selected < len(items):
             self.choice = items[selected].code
-        return self.set_language(self.choice)
+        language = self.set_language(self.choice)
+        if self.on_apply is not None:
+            self.on_apply(self.choice)
+        if self.stack is not None:
+            self.stack.pop()
+        return language
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
         draw_menu_background(batch, font, self.width, self.height)
@@ -1447,6 +1600,9 @@ __all__ = [
     "SoundScreen",
     "TextInput",
     "available_languages",
+    "calculate_scale",
+    "effective_gui_scale",
+    "gui_scaled_size",
     "draw_text",
     "load_language",
     "solid",

@@ -27,6 +27,8 @@ from quadrix.render.menu import (
     Settings,
     TextInput,
     available_languages,
+    calculate_scale,
+    gui_scaled_size,
     load_language,
 )
 from quadrix.render.ui import Batch, Font
@@ -368,3 +370,75 @@ def test_scrollable_list_scroll_and_click() -> None:
     assert lst.scroll == pytest.approx(lst.max_scroll())
     lst.handle_scroll(-1000.0)
     assert lst.scroll == 0.0
+
+
+# ---------------------------------------------------------------------------
+# GUI scale (window.rs::calculate_scale / gui_scaled_size) и Opt::GuiScale
+# ---------------------------------------------------------------------------
+
+def test_calculate_scale_matches_rust_cases() -> None:
+    # Значения из horizon-client-input/src/window.rs (L758-761).
+    assert calculate_scale((854, 480), 0, False) == 2
+    assert calculate_scale((1920, 1080), 0, False) == 4
+    assert calculate_scale((1920, 1080), 3, False) == 3
+    assert calculate_scale((1920, 1080), 3, True) == 4
+    # gui_scaled_size из того же теста Rust.
+    assert gui_scaled_size((1921, 1081), 4) == (481, 271)
+
+
+def test_graphics_gui_scale_button_cycles_auto_1_max_auto() -> None:
+    settings = Settings(gui_scale=0)
+    screen = GraphicsScreen(
+        settings=settings, stack=None, width=427.0, height=240.0,
+        framebuffer=(854, 480),
+    )
+    button = screen.gui_scale_button
+    # Подпись: "GUI Scale: Auto" (options.generic_value).
+    assert "Auto" in button.label
+
+    def click() -> None:
+        assert screen.handle_click(button.x + 1.0, button.y + 1.0) is True
+
+    click()
+    assert settings.gui_scale == 1
+    assert button.label.endswith("1")
+
+    click()
+    assert settings.gui_scale == 2  # max для 854x480
+    click()
+    assert settings.gui_scale == 0  # Auto снова
+    assert "Auto" in button.label
+
+
+def test_language_row_click_applies_immediately() -> None:
+    settings = Settings(language="en_us")
+    screen = LanguageScreen(settings=settings, width=427.0, height=240.0)
+    # Вторая строка списка (первая — не обязательно не-en_us).
+    target = next(i for i, info in enumerate(screen.list.items)
+                  if info.code != "en_us")
+    info = screen.list.items[target]
+    y = screen.list.row_y(target) + 1.0
+    assert screen.handle_click(screen.list.x + 1.0, y) is True
+
+    assert settings.language == info.code
+    assert lang.code() == info.code
+
+
+def test_language_done_applies_and_pops() -> None:
+    settings = Settings(language="en_us")
+    stack = ScreenStack(MainMenu(427.0, 240.0))
+    screen = LanguageScreen(settings=settings, stack=stack,
+                            width=427.0, height=240.0)
+    stack.push(screen)
+    assert stack.current is screen
+
+    target = next(i for i, info in enumerate(screen.list.items)
+                  if info.code != "en_us")
+    screen.list.selected = target
+    screen.choice = screen.list.items[target].code
+    assert screen.handle_click(
+        screen.done_button.x + 1.0, screen.done_button.y + 1.0
+    ) is True
+
+    assert settings.language == screen.list.items[target].code
+    assert stack.current is not screen
