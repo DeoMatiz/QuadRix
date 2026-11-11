@@ -127,11 +127,21 @@ files:
     status: pending
     note: "Text component (vanilla JSON chat component). Нужен для чата, tooltip, NBT."
 
-  - rust: horizon-core/src/jmath.rs
-    python: quadrix/core/jmath.py
-    test: tests/core/test_jmath.py
-    status: pending
-    note: "Java-compatible math (sin/cos/floor/bits)."
+  - rust: horizon-core/src/jmath.rs
+    python: quadrix/core/jmath.py
+    test: tests/core/test_jmath.py
+    status: done
+    lines_python: 1301
+    note: >-
+      HotSpot-exact Math: round_f32/round, exact sin/cos (Windows),
+      aarch64 sin/cos (fdlibm+FMA), fdlibm log/log10/cbrt/hypot/asin/atan/atan2,
+      Java helpers floor/ceil/sqrt/signum/clamp/floorDiv/floorMod/min/max/
+      toRadians/toDegrees/nextAfter/copySign, Integer/Long (numberOfLeadingZeros,
+      bitCount, highest/lowestOneBit), Float/Double bit conversions. Also ports
+      geometry/trig.rs vanilla sine table (SCALE, SIN_TABLE, trig_sin/cos,
+      trig_atan2). Deps: stdlib only (math, struct, fractions). 78 tests, all
+      Rust jmath.rs/trig.rs vectors bit-exact. FALLBACK: math.pow edge cases
+      (0^-n) and math.cbrt for <3.11; math.fma for aarch64 on <3.13.
 
   - rust: horizon-core/src/random/*.rs
     python: quadrix/core/random.py
