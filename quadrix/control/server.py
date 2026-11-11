@@ -438,7 +438,7 @@ class ControlServer:
         """Dispatch a command and return a Future for the response.
 
         Supported commands: move, jump, sneak, sprint, fly, chat, place, break,
-        look, state, stop.
+        look, turn, state, stop.
 
         For backward compatibility with tests: this method also executes
         dispatch_internal synchronously and sets the future result immediately,
@@ -489,17 +489,24 @@ class ControlServer:
             _request_id = args.get("id") if args else None
 
         if cmd == "move":
+            # ``ticks`` в протоколе — ДЕСЯТЫЕ ДОЛИ БЛОКА (move forward 10 = 1 блок).
+            # Ходьба ≈ 0.215 блока/тик, поэтому берём ~0.2 блока/тик:
+            # ticks_actual = round(N / 2); хотя бы 1 тик.
+            decimals = int(args.get("ticks", 10))
+            ticks_actual = max(1, int(round(decimals / 2.0)))
+            blocks = decimals / 10.0
+            direction = args.get("direction", "forward")
             if self.client is None:
-                # Headless mode: respect args, return default ticks=1 if not specified
-                ticks = int(args.get("ticks", 1))
-                direction = args.get("direction", "forward")
-                return {"id": _request_id, "ok": True, "result": {"direction": direction, "ticks": ticks}}
+                # Headless mode: not actually move, but report the conversion.
+                return {
+                    "id": _request_id,
+                    "ok": True,
+                    "result": {"direction": direction, "blocks": blocks, "ticks": ticks_actual},
+                }
             if getattr(self.client, "motion", None) is None:
                 return {"id": _request_id, "ok": False, "error": "motion not ready"}
             from quadrix.motion.core import PlayerInput
 
-            direction = args.get("direction", "forward")
-            ticks = int(args.get("ticks", 1))
             fwd, strafe = 0.0, 0.0
             if direction == "forward":
                 fwd = 1.0
@@ -519,8 +526,12 @@ class ControlServer:
                 sneak=bool(pm.sneaking),
                 sprint=bool(pm.sprinting),
             )
-            self.client.pending_input_ticks = max(ticks, 1)
-            return {"id": _request_id, "ok": True, "result": {"direction": direction, "ticks": ticks}}
+            self.client.pending_input_ticks = ticks_actual
+            return {
+                "id": _request_id,
+                "ok": True,
+                "result": {"direction": direction, "blocks": blocks, "ticks": ticks_actual},
+            }
 
         if cmd == "jump":
             if self.client is None:
@@ -619,6 +630,33 @@ class ControlServer:
             pitch = float(args.get("pitch", 0.0))
             self.client.motion.yaw = yaw
             self.client.motion.pitch = pitch
+            return {"id": _request_id, "ok": True, "result": {"yaw": yaw, "pitch": pitch}}
+
+        if cmd == "turn":
+            # Относительный поворот: left/right меняют yaw, up/down — pitch.
+            # Знак pitch — как в Minecraft/Horizon: +pitch смотрит вниз,
+            # поэтому "up" уменьшает pitch, "down" увеличивает.
+            axis = str(args.get("axis", "left")).lower()
+            degrees = float(args.get("degrees", 15.0))
+            if self.client is None:
+                return {"id": _request_id, "ok": True, "result": {"yaw": 0.0, "pitch": 0.0}}
+            if getattr(self.client, "motion", None) is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready"}
+            pm = self.client.motion
+            yaw = float(pm.yaw)
+            pitch = float(getattr(pm, "pitch", 0.0))
+            if axis == "left":
+                yaw = (yaw + degrees) % 360.0
+            elif axis == "right":
+                yaw = (yaw - degrees) % 360.0
+            elif axis == "up":
+                pitch = max(-90.0, min(90.0, pitch - degrees))
+            elif axis == "down":
+                pitch = max(-90.0, min(90.0, pitch + degrees))
+            else:
+                return {"id": _request_id, "ok": False, "error": f"unknown axis: {axis}"}
+            pm.yaw = yaw
+            pm.pitch = pitch
             return {"id": _request_id, "ok": True, "result": {"yaw": yaw, "pitch": pitch}}
 
         if cmd == "state":

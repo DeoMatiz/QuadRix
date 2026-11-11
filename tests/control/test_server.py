@@ -127,14 +127,26 @@ def test_state_without_health_defaults_to_20():
 
 
 def test_move_sets_pending_input():
-    """move forward 20 -> client.pending_input.forward == 1.0, ticks == 20."""
+    """move forward 20 (2 блока) -> forward == 1.0, ticks == 10."""
     server, client = _make_server()
     resp = server.dispatch_internal("move", {"direction": "forward", "ticks": 20})
     assert resp["ok"] is True
     assert client.pending_input is not None
     assert client.pending_input.forward == 1.0
     assert client.pending_input.strafe == 0.0
-    assert client.pending_input_ticks == 20
+    assert client.pending_input_ticks == 10
+    assert resp["result"]["blocks"] == 2.0
+    assert resp["result"]["ticks"] == 10
+
+
+def test_move_ticks_from_decimals():
+    """move forward 10 = 1 блок -> 5 тиков (10 десятых / 2)."""
+    server, client = _make_server()
+    resp = server.dispatch_internal("move", {"direction": "forward", "ticks": 10})
+    assert resp["ok"] is True
+    assert client.pending_input_ticks == 5
+    assert resp["result"]["blocks"] == 1.0
+    assert resp["result"]["ticks"] == 5
 
 
 def test_move_directions_map_to_input():
@@ -214,6 +226,113 @@ def test_look_updates_motion():
     assert resp["ok"] is True
     assert client.motion.yaw == 45.0
     assert client.motion.pitch == -10.0
+
+
+def test_look_applies():
+    """look 90 45 -> yaw=90, pitch=45 прямо в client.motion."""
+    server, client = _make_server()
+    resp = server.dispatch_internal("look", {"yaw": 90.0, "pitch": 45.0})
+    assert resp["ok"] is True
+    assert client.motion.yaw == 90.0
+    assert client.motion.pitch == 45.0
+    assert resp["result"] == {"yaw": 90.0, "pitch": 45.0}
+
+
+def test_turn_left():
+    """turn left 15 -> yaw увеличивается на 15."""
+    server, client = _make_server()
+    client.motion.yaw = 0.0
+    resp = server.dispatch_internal("turn", {"axis": "left", "degrees": 15})
+    assert resp["ok"] is True
+    assert client.motion.yaw == 15.0
+    assert resp["result"]["yaw"] == 15.0
+
+
+def test_turn_right():
+    server, client = _make_server()
+    client.motion.yaw = 30.0
+    resp = server.dispatch_internal("turn", {"axis": "right", "degrees": 15})
+    assert resp["ok"] is True
+    assert client.motion.yaw == 15.0
+
+
+def test_turn_up():
+    """turn up 15 -> pitch уменьшается (в Horizon +pitch смотрит вниз)."""
+    server, client = _make_server()
+    client.motion.pitch = 0.0
+    resp = server.dispatch_internal("turn", {"axis": "up", "degrees": 15})
+    assert resp["ok"] is True
+    assert client.motion.pitch == -15.0
+
+
+def test_turn_down_clamps():
+    server, client = _make_server()
+    client.motion.pitch = 85.0
+    resp = server.dispatch_internal("turn", {"axis": "down", "degrees": 15})
+    assert resp["ok"] is True
+    assert client.motion.pitch == 90.0
+
+
+def test_turn_unknown_axis():
+    server, _client = _make_server()
+    resp = server.dispatch_internal("turn", {"axis": "sideways", "degrees": 15})
+    assert resp["ok"] is False
+    assert "unknown axis" in resp["error"]
+
+
+def test_turn_default_degrees_is_15():
+    server, client = _make_server()
+    client.motion.yaw = 10.0
+    resp = server.dispatch_internal("turn", {"axis": "left"})
+    assert resp["ok"] is True
+    assert client.motion.yaw == 25.0
+
+
+# ---------------------------------------------------------------------------
+# quadrixctl aliases
+# ---------------------------------------------------------------------------
+
+
+def test_ctl_wasd_aliases_one_block():
+    from quadrixctl import build_request
+
+    cases = {
+        "w": "forward",
+        "s": "back",
+        "a": "left",
+        "d": "right",
+        "forward": "forward",
+        "back": "back",
+        "left": "left",
+        "right": "right",
+    }
+    for alias, direction in cases.items():
+        req = build_request(alias, 1)
+        assert req is not None
+        assert req["cmd"] == "move"
+        assert req["args"]["direction"] == direction
+        assert req["args"]["ticks"] == 10  # 1 блок
+    # w 20 — 2 блока
+    assert build_request("w 20", 1)["args"]["ticks"] == 20
+
+
+def test_ctl_turn_aliases():
+    from quadrixctl import build_request
+
+    cases = {"tl": "left", "tr": "right", "tu": "up", "td": "down"}
+    for alias, axis in cases.items():
+        req = build_request(alias, 1)
+        assert req["cmd"] == "turn"
+        assert req["args"]["axis"] == axis
+        assert req["args"]["degrees"] == 15.0
+    assert build_request("turn down 30", 1)["args"]["degrees"] == 30.0
+
+
+def test_ctl_space_alias_is_jump():
+    from quadrixctl import build_request
+
+    req = build_request("space", 1)
+    assert req["cmd"] == "jump"
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +425,7 @@ def test_json_protocol_round_trip_move():
         )
         assert response["ok"] is True
         assert response["id"] == 2
-        assert client.pending_input_ticks == 3
+        assert client.pending_input_ticks == 2
     finally:
         server.stop()
 
@@ -321,7 +440,7 @@ def test_poll_executes_queued_command():
         server.poll()
         resp = future.result()
         assert resp["ok"] is True
-        assert resp["result"]["ticks"] == 5
+        assert resp["result"]["ticks"] == 2
     finally:
         server.stop()
 

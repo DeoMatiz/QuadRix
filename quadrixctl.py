@@ -1,286 +1,181 @@
 #!/usr/bin/env python3
 """[QuadRix] Клиент управления по TCP (quadrixctl.py).
 
-REPL-интерфейс для отправки JSON-команд на TCP-сервер ControlServer,
-запущенный quadrix.py --daemon. Команды отправляются в формате JSON-lines,
-ответы печатаются с цветным выводом (зеленый ok, красный error, желтый help).
+REPL-клиент, который подключается к ControlServer в quadrix.py --daemon
+и шлёт JSON-lines команды.
 
 Использование:
-    python quadrixctl.py --host localhost --port 25566
-
-Команды (короткие алиасы):
-    move forward 20   — идти вперед 20 тиков
-    move back 10      — отstep назад
-    move left 5       — влево
-    move right 5      — вправо
-    jump              — прыжок
-    sneak             — затаиться (toggle)
-    sprint            — спринт (toggle)
-    fly               — полёт (toggle)
-    chat hello        — отправить сообщение
-    place stone       — поставить блок stone
-    break             — разрушить блок (20 тиков по умолчанию)
-    look 90 60        — установить yaw/pitch
-    state             — показать состояние игрока
-    stop              — корректно завершить клиента
-    help              — справка
-    quit              — выйти
+    python quadrixctl.py --host 127.0.0.1 --port 25566
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import socket
 import sys
-import threading
-import time
-import signal  # noqa: F401 — используется в обработке Ctrl+C
 
-from quadrix.control.server import ControlServer, _ClientWrapper
-
-# ANSI цветовой вывод
 GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
 RESET = "\033[0m"
-BOLD = "\033[1m"
 
-# Глобальный флаг остановки
-_stop_requested = False
+HELP = """Команды:
+  move forward|back|left|right N       — идти N десятых блока (10 = 1 блок)
+  turn left|right|up|down [DEG]        — повернуть голову (по умолчанию 15°)
+  jump                                 — прыжок
+  sneak|sprint|fly true|false          — переключатели
+  chat TEXT                            — отправить сообщение
+  place BLOCK [face]                   — поставить блок
+  break [TICKS]                        — ломать блок
+  look YAW PITCH                       — установить углы
+  state                                — состояние игрока
+  stop                                 — завершить демон
+  help                                 — эта справка
+  quit                                 — выйти из ctl (демон продолжит работу)
+
+Алиасы: w/forward, s/back, a/left, d/right — шаг 1 блок;
+        tl/tr/tu/td — поворот на 15°; space — прыжок.
+"""
 
 
-def _def_handler(sig, frame):  # noqa: F811 — переопределение сигнала
-    global _stop_requested
-    _stop_requested = True
-    print(f"\n{YELLOW}[QuadRix] Ctrl+C получен, отправка stop...{RESET}", flush=True)
-
-
-signal.signal(signal.SIGINT, _def_handler)
-
-
-def parse_args_args(text: str) -> dict:
-    """Parse a command line like 'move forward 20' or 'jump' into {'cmd': ..., 'args': {...}}.
-
-    Supported formats:
-        cmd arg1 arg2 ...   (positional args)
-        cmd key=value key2=value2  (keyword args)
-    """
-    text = text.strip()
-    if not text:
+def build_request(line: str, req_id: int) -> dict | None:
+    """Парсит строку в JSON-запрос. None — если это help/quit/пусто."""
+    parts = line.strip().split()
+    if not parts:
         return None
-
-    parts = text.split()
     cmd = parts[0].lower()
     rest = parts[1:]
 
-    # Try keyword-style parsing (key=value)
-    kwargs = {}
-    for p in rest:
-        if "=" in p:
-            k, v = p.split("=", 1)
-            kwargs[k] = v
-        else:
-            kwargs.setdefault("_arg", p)
+    if cmd in ("help", "h"):
+        print(YELLOW + HELP + RESET)
+        return None
+    if cmd in ("quit", "q", "exit"):
+        return {"__quit__": True}
 
-    # Build args dict based on command
     args: dict = {}
 
-    # Command mapping helpers
-    if cmd in ("move", "m"):
-        # move direction ticks
-        direction = kwargs.get("_arg", rest[0] if rest else "forward") if rest else "forward"
-        # Validate direction
-        dir_ok = direction in ("forward", "back", "left", "right")
-        if not dir_ok and rest:
-            direction = rest[0]
-        ticks = int(kwargs.get("ticks", rest[-1] if len(rest) >= 2 else "1"))
-        args = {"direction": direction, "ticks": ticks}
-        cmd = "move"
+    # Алиасы: w/s/a/d — шаг на 1 блок (10 десятых), tl/tr/tu/td — 15°.
+    _MOVE_ALIASES = {
+        "w": "forward",
+        "forward": "forward",
+        "s": "back",
+        "back": "back",
+        "a": "left",
+        "left": "left",
+        "d": "right",
+        "right": "right",
+    }
+    _TURN_ALIASES = {
+        "tl": "left",
+        "tr": "right",
+        "tu": "up",
+        "td": "down",
+    }
 
-    elif cmd in ("jump", "j"):
-        args = {}
+    if cmd in _MOVE_ALIASES:
+        args["direction"] = _MOVE_ALIASES[cmd]
+        # По умолчанию 1 блок = 10 десятых; можно указать своё N.
+        args["ticks"] = int(rest[0]) if rest else 10
+        return {"id": req_id, "cmd": "move", "args": args}
 
-    elif cmd in ("sneak", "sk"):
-        val = kwargs.get("_arg", rest[0] if rest else "false")
-        args = {"value": val.lower() in ("true", "1", "yes", "on")}
+    if cmd in _TURN_ALIASES:
+        args["axis"] = _TURN_ALIASES[cmd]
+        args["degrees"] = float(rest[0]) if rest else 15.0
+        return {"id": req_id, "cmd": "turn", "args": args}
 
-    elif cmd in ("sprint", "sp"):
-        val = kwargs.get("_arg", rest[0] if rest else "false")
-        args = {"value": val.lower() in ("true", "1", "yes", "on")}
+    if cmd == "space":
+        return {"id": req_id, "cmd": "jump", "args": {}}
 
-    elif cmd in ("fly", "f"):
-        val = kwargs.get("_arg", rest[0] if rest else "false")
-        args = {"value": val.lower() in ("true", "1", "yes", "on")}
-
-    elif cmd in ("chat", "c"):
-        text = kwargs.get("_arg", " ".join(rest)) if rest else ""
-        args = {"text": text}
-
-    elif cmd in ("place", "p"):
-        block = kwargs.get("_arg", rest[0] if rest else "stone")
-        face = kwargs.get("face", None)
-        args = {"block": block, "face": face}
-
-    elif cmd in ("break", "b"):
-        ticks = int(kwargs.get("ticks", "20"))
-        args = {"ticks": ticks}
-
-    elif cmd in ("look", "l"):
-        try:
-            yaw = float(kwargs.get("_arg", rest[0] if len(rest) >= 1 else "0.0"))
-            pitch = float(kwargs.get("_arg", rest[1] if len(rest) >= 2 else "0.0"))
-        except (ValueError, IndexError):
-            yaw = 0.0
-            pitch = 0.0
-        args = {"yaw": yaw, "pitch": pitch}
-
-    elif cmd in ("state", "s"):
-        args = {}
-
-    elif cmd in ("stop",):
-        args = {}
-
-    elif cmd in ("help", "h"):
-        # Print help and return None to indicate help was shown
-        return {"cmd": "help", "args": {}, "show_help": True}
-
+    if cmd == "move":
+        args["direction"] = rest[0] if rest else "forward"
+        args["ticks"] = int(rest[1]) if len(rest) > 1 else 10
+    elif cmd == "turn":
+        args["axis"] = rest[0] if rest else "left"
+        args["degrees"] = float(rest[1]) if len(rest) > 1 else 15.0
+    elif cmd == "jump":
+        pass
+    elif cmd in ("sneak", "sprint", "fly"):
+        v = (rest[0] if rest else "true").lower()
+        args["value"] = v in ("true", "1", "yes", "on")
+    elif cmd == "chat":
+        args["text"] = " ".join(rest)
+    elif cmd == "place":
+        args["block"] = rest[0] if rest else "stone"
+        if len(rest) > 1:
+            args["face"] = rest[1]
+    elif cmd == "break":
+        args["ticks"] = int(rest[0]) if rest else 20
+    elif cmd == "look":
+        args["yaw"] = float(rest[0]) if rest else 0.0
+        args["pitch"] = float(rest[1]) if len(rest) > 1 else 0.0
+    elif cmd == "state":
+        pass
+    elif cmd == "stop":
+        pass
     else:
-        # Unknown command
-        args = {"_unknown": cmd}
+        print(RED + f"unknown command: {cmd}" + RESET)
+        return None
 
-    return {"cmd": cmd, "args": args}
-
-
-def repl_loop(server: ControlServer) -> None:
-    """Read-eval-print loop for the CLI.
-
-    Reads lines from stdin, parses commands, sends them to the server,
-    and prints coloured responses.
-    """
-    print(f"{YELLOW}[QuadRix] Type 'help' for commands, Ctrl+C to exit{RESET}", flush=True)
-    while not _stop_requested:
-        try:
-            line = input().strip()
-        except (EOFError, KeyboardInterrupt):
-            print(f"\n{YELLOW}[QuadRix] Use 'stop' to exit{RESET}", flush=True)
-            break
-
-        if not line:
-            continue
-
-        parsed = parse_args_args(line)
-        if parsed is None:
-            continue
-
-        # Handle help specially
-        if parsed.get("show_help"):
-            print(
-                f"{YELLOW}Available commands:{RESET}",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}move forward|back|left|right TICKS{RESET}",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}jump{RESET} — прыжок",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}sneak|sprint|fly TOGGLE{RESET} — переключатели (true/false)",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}chat TEXT{RESET} — отправить сообщение",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}place BLOCK[ face]{RESET} — поставить блок",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}break[TICKS]{RESET} — разрушить блок",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}look YAW PITCH{RESET} — установить углы",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}state{RESET} — показать состояние",
-                flush=True,
-            )
-            print(
-                f"  {GREEN}stop{RESET} — завершить",
-                flush=True,
-            )
-            print(
-                f"  {YELLOW}help{RESET} — эта справка",
-                flush=True,
-                flush=True,
-            )
-            print(
-                f"  {YELLOW}quit{RESET} — выйти",
-                flush=True,
-            )
-            continue
-
-        cmd = parsed["cmd"]
-        args = parsed["args"]
-
-        # Check for unknown command
-        if cmd != "help" and "_unknown" in str(args):
-            response = server.dispatch("unknown", {})
-            print(f"{RED}[error] unknown command: {cmd}{RESET}", flush=True)
-            print(f"  {json.dumps(response, ensure_ascii=False)}", flush=True)
-            continue
-
-        # Send command to server
-        try:
-            response = server.dispatch(cmd, args)
-            ok = response.get("ok", False)
-
-            # Print response with colour
-            if ok:
-                print(f"{GREEN}[ok]{RESET}", flush=True)
-            else:
-                print(f"{RED}[error]{RESET}", flush=True)
-
-            # Print result/error
-            result = response.get("result")
-            error = response.get("error")
-            if result is not None:
-                print(f"  {json.dumps(result, ensure_ascii=False, flush=False)}", flush=True)
-            if error is not None:
-                print(f"  {json.dumps({"error": error}, ensure_ascii=False, flush=False)}", flush=True)
-
-        except Exception as exc:
-            print(f"{RED}[error] dispatch exception: {exc}{RESET}", flush=True)
+    return {"id": req_id, "cmd": cmd, "args": args}
 
 
 def main() -> None:
-    """Entry point for quadrixctl.py."""
-    parser = argparse.ArgumentParser(description="QuadRix TCP control client")
-    parser.add_argument("--host", default="127.0.0.1", help="TCP host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=25566, help="TCP port (default: 25566)")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="QuadRix TCP control client")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=25566)
+    args = ap.parse_args()
 
-    # Create ControlServer instance (without client wrapper for standalone mode)
-    # The server will be connected to by the quadrix.py --daemon process
-    server = ControlServer(host=args.host, port=args.port, client=None)
-
-    # Start the server (listen thread)
-    server.start()
-
-    print(f"{GREEN}[QuadRix] Control server listening on {args.host}:{args.port}{RESET}", flush=True)
-    print(f"{YELLOW}[QuadRix] Connect quadrix.py --daemon to the same port{RESET}", flush=True)
-
-    # Run REPL loop
     try:
-        repl_loop(server)
+        sock = socket.create_connection((args.host, args.port), timeout=5.0)
+    except OSError as exc:
+        print(RED + f"[QuadRix] connect failed {args.host}:{args.port} — {exc}" + RESET)
+        sys.exit(1)
+    sock.settimeout(None)
+    rfile = sock.makefile("r", encoding="utf-8", newline="\n")
+
+    print(GREEN + f"[QuadRix] connected to {args.host}:{args.port}" + RESET)
+    print(YELLOW + "Type 'help' for commands, 'quit' to exit" + RESET)
+
+    req_id = 0
+    try:
+        while True:
+            try:
+                line = input("quadrix> ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+            req = build_request(line, req_id + 1)
+            if req is None:
+                continue
+            if req.get("__quit__"):
+                break
+            req_id += 1
+            sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
+            resp_line = rfile.readline()
+            if not resp_line:
+                print(RED + "[QuadRix] daemon closed connection" + RESET)
+                break
+            try:
+                resp = json.loads(resp_line)
+            except json.JSONDecodeError:
+                print(RED + f"[QuadRix] bad response: {resp_line!r}" + RESET)
+                continue
+            if resp.get("ok"):
+                print(GREEN + "[ok]" + RESET)
+                if resp.get("result") is not None:
+                    print("  " + json.dumps(resp["result"], ensure_ascii=False))
+            else:
+                print(RED + "[error]" + RESET)
+                if resp.get("error"):
+                    print("  " + resp["error"])
     finally:
-        server.stop()
-        print(f"{YELLOW}[QuadRix] Client exited{RESET}", flush=True)
+        try:
+            rfile.close()
+        except Exception:
+            pass
+        sock.close()
+        print(YELLOW + "[QuadRix] disconnected" + RESET)
 
 
 if __name__ == "__main__":

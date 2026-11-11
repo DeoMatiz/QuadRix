@@ -648,7 +648,7 @@ class Client:
             self._input_thread.start()
             _log("ввод: интерактивный (WASD/space/shift, Ctrl-D — авто)")
         else:
-            _log("ввод: не-TTY, включено авто-движение (forward)")
+            _log("ввод: не-TTY, без stdin — управление только через --daemon/quadrixctl")
 
     def _stdin_loop(self) -> None:
         """Построчно разбирать управление из stdin (демон-поток)."""
@@ -682,19 +682,18 @@ class Client:
             self._manual_input = inp
 
     def _read_input(self) -> PlayerInput:
-        """Ввод этого такта: ручной, иначе простой авто-паттерн."""
+        """Ввод этого такта: ручной, иначе no-op.
+
+        Yaw/pitch здесь НЕ меняются: поворот приходит только от control-
+        сервера (``look`` / ``turn``).  Автоповорот был тестовым кодом и
+        ломал управление (yaw крутился сам по +1.5°/тик).
+        ``pending_input`` от control-сервера обрабатывается в ``tick()``
+        раньше этого метода.
+        """
         if self._manual_input is not None:
             return self._manual_input
         self._auto_clock += 1
-        # Медленно поворачиваемся и иногда прыгаем — клиент виден в движении.
-        if not self.online_mode:
-            self.motion.yaw = (self.motion.yaw + 1.5) % 360.0
-        return PlayerInput(
-            forward=1.0,
-            jump=(self._auto_clock % 40 == 0),
-            sprint=False,
-            sneak=False,
-        )
+        return PlayerInput(forward=0.0, strafe=0.0, jump=False, sprint=False, sneak=False)
 
     # -- отправка / логирование ---------------------------------------
 
