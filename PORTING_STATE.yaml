@@ -1610,11 +1610,29 @@ files:
     status: pending
     note: "Scoreboard."
 
-  - rust: horizon-core/src/component.rs
-    python: quadrix/core/component.py
-    test: tests/core/test_component.py
-    status: pending
-    note: "Chat component (расширение text.py)."
+  - rust: horizon-core/src/component.rs
+    python: quadrix/core/component.py
+    test: tests/core/test_component.py
+    status: done
+    lines_python: 697
+    note: >-
+      ВНИМАНИЕ: реальный horizon-core/src/component.rs — это НЕ data components
+      предметов (те в horizon-items/item_data.rs), а слой ТЕКСТОВЫХ компонентов
+      из команд. Портирован именно он (Rust важнее): parse_snbt (SNBT/JSON ->
+      Value: dict/list/str/bool/int/float, SNBT_MAX_DEPTH=512, суффиксы
+      b/s/l/f/d, true/false, [B;/[I;/[L;, `200b` -> 200 без диапазона i8),
+      untrusted_http_url (только http/https), style_event_object/style_flag,
+      parse_click_event (open_url/change_page/suggest_command/run_command/
+      copy_to_clipboard/show_dialog/custom, legacy `value`), object_style
+      (color/shadow_color/флаги/font/click/hover), hex_color,
+      shadow_color (packed ARGB или RGBA[4]), to_text/to_text_with
+      (ComponentSerialization: text/translate/selector/keybind/extra/inline),
+      inline_object (Player/Atlas, defaultFallback), name_text (String ->
+      Text.legacy, иначе comp_text). 24 tests.
+      FALLBACK: не портированы scoreboard.rs (json_to_tag/tag_to_json/
+      comp_text), identifier.rs (parse_identifier), key_display.rs
+      (display_name) — повторены локально в component.py. text.font_id
+      не валидирует id — добавлена проверка через parse_identifier.
 
   - rust: horizon-core/src/gamerules.rs
     python: quadrix/core/gamerules.py
