@@ -243,10 +243,12 @@ def test_app_shutdown_closes_backend() -> None:
 # quadrix.py: --gui / --no-gui и режимы
 # ---------------------------------------------------------------------------
 
-def test_cli_default_is_headless() -> None:
-    args = entry.build_parser().parse_args([])
+def test_cli_default_is_gui() -> None:
+    # По умолчанию режим — GUI: ни headless, ни явный gui не выставлены.
+    args = entry.parse_args([])
     assert args.gui is False
     assert args.no_gui is False
+    assert args.headless is False
 
 
 def test_cli_gui_flag_and_no_gui_exclusive() -> None:
@@ -257,6 +259,9 @@ def test_cli_gui_flag_and_no_gui_exclusive() -> None:
         parser.parse_args(["--gui", "--no-gui"])
 
 
-def test_cli_gui_and_daemon_incompatible() -> None:
-    # --gui и --daemon вместе → код 2, окно даже не открывается
-    assert entry.main(["--gui", "--daemon"]) == 2
+def test_cli_gui_and_daemon_prefers_headless() -> None:
+    # --gui и --daemon вместе: окно и control-сервер несовместимы,
+    # daemon выигрывает — режим становится headless (не аварийный код 2).
+    args = entry.parse_args(["--gui", "--daemon"])
+    assert args.headless is True
+    assert args.gui is False

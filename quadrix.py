@@ -59,8 +59,10 @@ __all__ = [
     "Client",
     "ClientError",
     "ClientWorld",
+    "GuiUnavailable",
     "build_parser",
     "main",
+    "parse_args",
     "run_gui",
 ]
 
@@ -83,6 +85,15 @@ RESOURCE_PACK_DECLINED: int = 1
 
 class ClientError(Exception):
     """Ошибка подключения/протокола с понятным человеку текстом."""
+
+
+class GuiUnavailable(RuntimeError):
+    """GUI не может открыть окно: нет дисплея, драйвера или пакетов glfw.
+
+    Наследует ``RuntimeError`` намеренно: раньше ``run_gui`` превращал
+    любую проблему GUI в код возврата 1.  Теперь недоступность дисплея
+    отличается от прочих ошибок, чтобы ``main`` мог уйти в headless.
+    """
 
 
 def _log(message: str) -> None:
@@ -794,14 +805,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     display = parser.add_mutually_exclusive_group()
     display.add_argument(
+        "--headless",
+        action="store_true",
+        help="headless-режим без окна (по умолчанию — GUI)",
+    )
+    display.add_argument(
         "--gui",
         action="store_true",
-        help="запустить окно GUI (App: меню → игра) вместо headless",
+        help="явно запустить окно GUI (App: меню → игра); это режим по умолчанию",
     )
     display.add_argument(
         "--no-gui",
         action="store_true",
-        help="headless-режим (по умолчанию, как раньше)",
+        help="alias для --headless: headless-режим без окна",
     )
     parser.add_argument(
         "--width", type=int, default=854, help="ширина окна GUI (default: 854)"
@@ -812,12 +828,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Разобрать argv и нормализовать режимы GUI/headless/daemon.
+
+    Правила (AGENTS.md: GUI — режим по умолчанию):
+
+    * ни ``--gui``, ни ``--headless``/``--no-gui`` не заданы → GUI;
+    * ``--headless`` или ``--no-gui`` → headless (``args.headless=True``);
+    * ``--daemon`` подразумевает headless: окно и control-сервер
+      несовместимы, поэтому daemon всегда выигрывает у ``--gui``.
+    """
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    # --no-gui — просто более старый alias для --headless.
+    if args.no_gui:
+        args.headless = True
+
+    # --daemon требует headless: окно и control-сервер несовместимы.
+    # Если пользователь просил --gui, предупреждаем и уходим в headless.
+    if args.daemon:
+        if args.gui:
+            _log("--daemon и --gui несовместимы; --daemon implies headless")
+        elif not args.headless:
+            _log("--daemon implies headless")
+        args.headless = True
+        args.gui = False
+
+    return args
+
+
 def run_gui(args: argparse.Namespace) -> int:
     """Запустить окно GUI: главный цикл ``App`` (порт ``entry.rs::main``).
 
-    Headless-путь (``main``) не затрагивается: GUI включается только
-    флагом ``--gui``. Настройки читаются из ``options.txt`` в ``--data-dir``,
-    экран открывается на ``MainMenu``, тик — 20 Гц.
+    Если окно не создаётся (нет дисплея/драйвера/пакетов ``glfw``),
+    поднимается :class:`GuiUnavailable` — ``main`` тогда переходит на
+    headless-путь вместо аварийного завершения.
     """
     from quadrix.render.app import App
     from quadrix.render.backend import BackendType, create_backend
@@ -831,10 +877,19 @@ def run_gui(args: argparse.Namespace) -> int:
         except (OSError, ValueError) as exc:
             _log(f"options.txt не прочитан ({options_path}): {exc}")
 
-    backend = create_backend(
-        BackendType.MODERNGL, args.width, args.height, "QuadRix"
-    )
-    app = App.init(backend, settings, width=backend.width, height=backend.height)
+    # Создание бэкенда и окна — единственное место, где отсутствие
+    # дисплея неотличимо от реальной ошибки: превращаем его в
+    # GuiUnavailable, чтобы main мог уйти в headless.
+    try:
+        backend = create_backend(
+            BackendType.MODERNGL, args.width, args.height, "QuadRix"
+        )
+        app = App.init(
+            backend, settings, width=backend.width, height=backend.height
+        )
+    except RuntimeError as exc:
+        raise GuiUnavailable(str(exc)) from exc
+
     try:
         app.setup()
         app.loop(max_ticks=args.ticks)
@@ -856,17 +911,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         if reconfigure is not None:
             with suppress(ValueError, OSError):
                 reconfigure(encoding="utf-8")
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_args(argv)
 
-    # --gui и --daemon несовместимы: GUI владеет циклом кадра, control-сервер
-    # рассчитан на headless-клиент. Выбор за пользователем.
-    if args.gui and args.daemon:
-        _log("--gui и --daemon несовместимы: выберите один режим")
-        return 2
-
-    if args.gui:
-        return run_gui(args)
+    # GUI — режим по умолчанию. Если окно не открывается (нет дисплея,
+    # драйвера или пакетов glfw), предупреждаем и продолжаем как headless,
+    # а не завершаемся с ошибкой.
+    if not args.headless:
+        try:
+            return run_gui(args)
+        except GuiUnavailable as exc:
+            _log(f"no display, falling back to headless ({exc})")
 
     client = Client(
         host=args.host,
