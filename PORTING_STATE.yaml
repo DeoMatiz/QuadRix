@@ -138,10 +138,11 @@ files:
       Rust), to_plain_string, to_ansi (консоль), slice/chars, translate/
       translatable/translate_with_fallback/tr, copyable/teleport_link/
       option_name_value. 39 tests.
-      FALLBACK: lang.rs не портирован — _CURRENT_LANG=None, ClientLanguage.
-      getOrDefault возвращает ключ; scoreboard::tag_to_json не портирован —
-      _tag_to_json конвертирует Python/NBT Tag рекурсивно; show_dialog/
-      custom payload, фиксируется здесь.
+      FALLBACK: lang.rs портирован (quadrix/core/lang.py): lang.set()
+      выставляет text._CURRENT_LANG, так что getOrDefault работает через
+      реальный язык (сам text.py не правился). scoreboard::tag_to_json не
+      портирован — _tag_to_json конвертирует Python/NBT Tag рекурсивно;
+      show_dialog/custom payload, фиксируется здесь.
 
   - rust: horizon-core/src/jmath.rs
     python: quadrix/core/jmath.py
@@ -1550,11 +1551,24 @@ files:
     status: pending
     note: "SNBT (string NBT) parser."
 
-  - rust: horizon-core/src/lang.rs
-    python: quadrix/core/lang.py
-    test: tests/core/test_lang.py
-    status: pending
-    note: "Language (lang files, translation)."
+  - rust: horizon-core/src/lang.rs
+    python: quadrix/core/lang.py
+    test: tests/core/test_lang.py
+    status: done
+    lines_python: 720
+    note: "LanguageInfo, Language (load/load_from, get, get_or,
+      get_or_default, tr, len/is_empty, map), ResourceSource/MemorySource/
+      PathSource/Bundled, read_lang_file (плоский JSON + снисходительный
+      Gson: #, //, /* */, имена/значения без кавычек и в одинарных, = / =>,
+      ;, BOM, числа/булевы как текст, не-текстовое значение завершает файл),
+      apply_deprecated, available (pack.mcmeta language), set/current/scoped/
+      bidirectional/code/get/get_or/get_with_fallback/has/tr. Плюс
+      format_translation (Java String.format: %s, %1$s, %d, %1$d, %%)
+      и Language.tr/translate/load/load_from, алиасы get_with_fallback/
+      get_or_default. Bundled читает crates/horizon-client/assets/horizon/
+      lang/ (de_ch заменяет ß→ss). Интеграция с text.py: lang.set()
+      выставляет text._CURRENT_LANG (FALLBACK заменён без правок text.py).
+      26 tests (реальный en_us.json + ru_ru.json, lenient-ридер, scoped)."
 
   - rust: horizon-core/src/identifier.rs
     python: quadrix/core/identifier.py
