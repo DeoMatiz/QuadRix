@@ -112,6 +112,29 @@ class ModernglBackend:
             raise RuntimeError("[QuadRix] create_context() не вызван")
         return self.ctx.program(vertex_shader=vert_src, fragment_shader=frag_src)
 
+    def create_texture(self, image: Any) -> Any:
+        """Загрузить RGBA-картинку (numpy ``HxWx4`` uint8) в ``moderngl.Texture``.
+
+        Используется для атласа шрифта (``Font.atlas_image``).  Батч UI
+        ожидает именно ``moderngl.Texture`` (``Batch.flush`` -> ``draw`` ->
+        ``texture.use(location=0)``).
+        """
+        if self.ctx is None:
+            raise RuntimeError("[QuadRix] create_context() не вызван")
+        import moderngl
+
+        arr = np.asarray(image)
+        if arr.ndim != 3 or arr.shape[2] != 4:
+            raise RuntimeError(
+                f"[QuadRix] create_texture ждёт HxWx4, получено {arr.shape}"
+            )
+        height, width = int(arr.shape[0]), int(arr.shape[1])
+        pixels = np.ascontiguousarray(arr, dtype=np.uint8).tobytes()
+        texture = self.ctx.texture((width, height), 4, pixels)
+        # UI рисуется без сглаживания — шрифт должен оставаться резким.
+        texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        return texture
+
     def draw(
         self,
         vbo: Any,
@@ -132,6 +155,13 @@ class ModernglBackend:
         """
         if self.ctx is None:
             raise RuntimeError("[QuadRix] create_context() не вызван")
+        if program is None:
+            # Без программы moderngl падает глубже с AttributeError
+            # ('NoneType' has no attribute '_attribute_locations'); сообщаем
+            # понятно, что App.setup() не создал UI-пайплайн.
+            raise RuntimeError(
+                "[QuadRix] program not initialized, call setup() first"
+            )
 
         owns_buffer = False
         buffer = vbo

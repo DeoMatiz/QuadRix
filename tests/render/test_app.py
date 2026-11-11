@@ -15,6 +15,8 @@ from types import ModuleType
 
 import pytest
 
+import numpy as np
+
 from quadrix.core import lang
 from quadrix.core import text as core_text
 from quadrix.render.app import App, GameScreen, RenderSettings
@@ -265,3 +267,94 @@ def test_cli_gui_and_daemon_prefers_headless() -> None:
     args = entry.parse_args(["--gui", "--daemon"])
     assert args.headless is True
     assert args.gui is False
+
+
+# ---------------------------------------------------------------------------
+# App.setup: создание UI-пайплайна и текстуры (баг program=None на кадре)
+# ---------------------------------------------------------------------------
+
+class FakeUniform:
+    """Заглушка uniform-а: запоминает записанные байты."""
+
+    def __init__(self, store: dict, name: str) -> None:
+        self._store = store
+        self._name = name
+
+    def write(self, data: bytes) -> None:
+        self._store[self._name] = data
+
+
+class FakeProgram:
+    """Заглушка шейдерной программы: принимает ``program["uniform"]``."""
+
+    def __init__(self) -> None:
+        self.uniforms: dict[str, bytes] = {}
+
+    def __getitem__(self, name: str) -> FakeUniform:
+        return FakeUniform(self.uniforms, name)
+
+
+class UiBackend(FakeBackend):
+    """FakeBackend + создание UI-ресурсов, как настоящий moderngl-бэкенд."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pipelines = 0
+        self.textures = 0
+        self.program = FakeProgram()
+        self.image: object = None
+
+    def create_pipeline(self, vert_src: str, frag_src: str) -> FakeProgram:
+        self.pipelines += 1
+        self.vert_src = vert_src
+        self.frag_src = frag_src
+        return self.program
+
+    def create_texture(self, image: object) -> object:
+        self.textures += 1
+        self.image = image
+        return object()
+
+
+class _StubFont:
+    """Мини-шрифт: только ``atlas_image`` (нужен ``setup`` для текстуры)."""
+
+    def __init__(self) -> None:
+        self.atlas_image = np.zeros((4, 4, 4), dtype=np.uint8)
+
+
+def test_app_setup_creates_ui_program_and_texture() -> None:
+    """Причина падения: setup() оставлял program/texture = None."""
+    backend = UiBackend()
+    app = App.init(backend, Settings(), width=320, height=240, font=_StubFont())
+
+    app.setup()
+
+    assert app.program is not None
+    assert app.texture is not None
+    assert backend.pipelines == 1
+    assert backend.textures == 1
+
+
+def test_app_setup_writes_ui_projection() -> None:
+    """ui.vert ждёт uniform ``projection``; setup обязан его записать."""
+    backend = UiBackend()
+    app = App.init(backend, Settings(), width=320, height=240, font=_StubFont())
+
+    app.setup()
+
+    # Ортопроекция 4x4 float32 = 64 байта, записана в program["projection"].
+    assert "projection" in backend.program.uniforms
+    assert len(backend.program.uniforms["projection"]) == 64
+
+
+def test_moderngl_draw_requires_program() -> None:
+    """draw(program=None) → понятный RuntimeError, а не AttributeError."""
+    from quadrix.render.backend_moderngl import ModernglBackend
+
+    backend = ModernglBackend()
+    backend.ctx = object()  # контекст «есть», чтобы дойти до проверки program
+    data = np.zeros((3, 8), dtype=np.float32)
+
+    with pytest.raises(RuntimeError, match="program not initialized"):
+        backend.draw(data, None)

@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+
 from quadrix.core import lang
 from quadrix.core.lang import Language
 from quadrix.render.menu import (
@@ -346,8 +348,62 @@ class App:
         if self.font is None:
             self.font = self._safe_font()
         self.set_language(self.settings.language)
+        self._create_ui_resources()
         _log(f"setup: backend={type(self.backend).__name__ if self.backend else None}")
         return self
+
+    def _create_ui_resources(self) -> None:
+        """Создать UI-пайплайн и текстуру атласа шрифта.
+
+        ``render`` передаёт ``self.program``/``self.texture`` в
+        ``Batch.flush``, а тот — в ``backend.draw``.  Без программы
+        moderngl падает на первом кадре
+        (``'NoneType' object has no attribute '_attribute_locations'``).
+        Без backend (тесты без дисплея) GPU-ресурсы не нужны — выходим.
+        """
+        if self.backend is None:
+            return
+
+        create_pipeline = getattr(self.backend, "create_pipeline", None)
+        if self.program is None and callable(create_pipeline):
+            # Шейдеры ui.vert/ui.frag лежат в quadrix/render/shaders.
+            from quadrix.render.backend_moderngl import load_shader
+
+            self.program = create_pipeline(
+                load_shader("ui.vert"), load_shader("ui.frag")
+            )
+            self._set_ui_projection()
+
+        create_texture = getattr(self.backend, "create_texture", None)
+        if (
+            self.texture is None
+            and self.font is not None
+            and callable(create_texture)
+        ):
+            self.texture = create_texture(self.font.atlas_image)
+
+    def _set_ui_projection(self) -> None:
+        """Записать ортопроекцию (GUI-пиксели → clip space) в ``ui.vert``.
+
+        Без неё uniform ``projection`` остаётся нулевым, и все квады
+        схлопываются в точку. Начало координат — верхний левый угол.
+        """
+        if self.program is None:
+            return
+        width = float(self.width) or 1.0
+        height = float(self.height) or 1.0
+        # x∈[0,w] -> [-1,1]; y∈[0,h] -> [1,-1] (экранная ось Y направлена вниз).
+        projection = np.array(
+            [
+                [2.0 / width, 0.0, 0.0, -1.0],
+                [0.0, -2.0 / height, 0.0, 1.0],
+                [0.0, 0.0, -1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        # moderngl ждёт column-major, numpy даёт row-major → транспонируем.
+        self.program["projection"].write(projection.T.tobytes())
 
     def _safe_font(self) -> Optional[Font]:
         """Загрузить шрифт из ``.local``; ``None`` при любой ошибке (рисуем без текста)."""
