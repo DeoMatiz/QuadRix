@@ -1876,8 +1876,25 @@ files:
   - rust: horizon-client-render/src/ui.rs (84 КБ)
     python: quadrix/render/ui.py
     test: tests/render/test_ui.py
-    status: pending
-    note: "UI."
+    status: done
+    part: 1
+    parts_total: 3
+    lines_python: 713
+    test_status: "15 passed"
+    note: >-
+      GUI PART 1 (примитивы): Font (bitmap из font/default.json →
+      include/default.json: ascii.png, accented.png, nonlatin_european.png;
+      space из include/space.json), glyph/advance/width/width_text/render,
+      упаковка цвета rgba (a<<24|b<<16|g<<8|r как hud.rs), Quad, Rect, Glyph,
+      Batch (add_quad/add_quads/vertices/flush — один draw call, формат
+      pos2+uv2+color4), Button (фон+текст, on_click/handle_click/click),
+      Slider (value/min/max/on_change/set_value/click/render), Layout.
+      Шейдеры quad.wgsl → GLSL 330: quadrix/render/shaders/ui.vert + ui.frag
+      (текстура×цвет, компилируются в moderngl).
+      FALLBACK: unihex/ttf провайдеры (unifont, CJK) pending — PART 2;
+      nine-slice спрайты ванильных виджетов (_button/slider) — PART 2
+      (фон кнопки/слайдера пока сплошная заливка через белый пиксель атласа).
+      PART 2 (меню/настройки/язык) и PART 3 (интеграция) — pending.
 
   - rust: horizon-client-render/src/graphics_ui.rs (143 КБ)
     python: quadrix/render/graphics_ui.py
