@@ -308,3 +308,206 @@ def test_normal_noise_create_reference_stack_layout():
     # Второй Perlin каждой октавы смещён на множитель 1.0181...
     assert frequencies[0] == 1.0 / 8.0
     assert math.isclose(frequencies[1], frequencies[0] * 1.018_126_888_217_522_7)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART 2 — simplex.rs, volume.rs, объёмные пути stack.rs
+#
+# Эталонные биты сняты с Rust-тестов
+# ``horizon-core/src/noise/{simplex,volume,perlin,stack}.rs``.
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+from quadrix.core.geometry import Axis  # noqa: E402
+from quadrix.core.jmath import f32_from_bits  # noqa: E402
+from quadrix.core.noise import (  # noqa: E402
+    DensityError,
+    DensityVolume,
+    SimplexNoise,
+)
+
+
+# ── simplex.rs ───────────────────────────────────────────────────────────────
+
+
+def test_simplex_reference_values_skipped_offsets():
+    # Тот же поток, что у Perlin: таблицы перестановок совпадают.
+    random = LegacyRandom(0)
+    perlin = PerlinNoise(random)
+    assert random.next_long() == -6_819_959_017_335_327_829
+
+    random = LegacyRandom(0)
+    simplex = SimplexNoise.with_skipped_offsets(random, True)
+    assert simplex.table().offsets() == (0.0, 0.0, 0.0)
+    assert simplex.table().permutations() == perlin.table().permutations()
+    assert random.next_long() == -6_819_959_017_335_327_829
+    # Значения, снятые с vanilla-сервера.
+    assert f32_bits(simplex.get2(0.25, 0.75)) == 3_146_180_247
+    assert f32_bits(simplex.get3(0.25, 0.5, 0.75)) == 1_062_011_824
+    # NaN проходит по арифметическому пути, а не как ноль.
+    assert math.isnan(simplex.get3(math.nan, 0.0, 0.0))
+
+
+def test_simplex_2d_determinism_and_range():
+    first = SimplexNoise(LegacyRandom(7))
+    second = SimplexNoise(LegacyRandom(7))
+    assert first.table().permutations() == second.table().permutations()
+    assert first.range() == [-2.0, 2.0]
+    max_abs = 0.0
+    for i in range(1000):
+        x = i * 0.37 - 12.5
+        z = i * 0.11 + 3.25
+        a = first.get2(x, z)
+        b = second.get2(x, z)
+        assert a == b
+        assert math.isfinite(a)
+        max_abs = max(max_abs, abs(a))
+    # Declared range (Rust SimplexNoise::range) — [-2, 2].
+    assert max_abs <= 2.0
+
+
+def test_simplex_3d_determinism_and_range():
+    first = SimplexNoise(LegacyRandom(11))
+    second = SimplexNoise(LegacyRandom(11))
+    max_abs = 0.0
+    for i in range(1000):
+        x = i * 0.23 - 5.0
+        y = i * 0.05 + 1.0
+        z = i * 0.71 - 20.0
+        a = first.get3(x, y, z)
+        b = second.get3(x, y, z)
+        assert a == b
+        assert math.isfinite(a)
+        max_abs = max(max_abs, abs(a))
+    assert max_abs <= 2.0
+
+
+# ── volume.rs ────────────────────────────────────────────────────────────────
+
+
+def test_density_volume_bounds_and_index():
+    with pytest.raises(DensityError) as dims:
+        DensityVolume.new([0, 1, 1], [0, 0, 0], [1, 1, 1])
+    assert dims.value.kind == DensityError.NONPOSITIVE_DIMENSIONS
+
+    with pytest.raises(DensityError) as steps:
+        DensityVolume.new([1, 1, 1], [0, 0, 0], [1, 0, 1])
+    assert steps.value.kind == DensityError.NONPOSITIVE_STEPS
+
+    with pytest.raises(DensityError) as too_large:
+        DensityVolume.new([2_147_483_647] * 3, [0, 0, 0], [1, 1, 1])
+    assert too_large.value.kind == DensityError.VOLUME_TOO_LARGE
+
+    volume = DensityVolume.new([2, 3, 4], [2_147_483_647, 0, -1], [2, 4, 8])
+    assert volume.size() == 24
+    # wrapping_add: i32::MAX + 2 → i32::MIN + 1.
+    assert volume.block(Axis.X, 1) == -2_147_483_647
+    assert volume.block(Axis.X, 2) is None
+    assert volume.index([1, 2, 3]) == 23
+    assert volume.index([1, 3, 3]) is None
+    # index_of_block: точные узловые сэмплы, между ними — промах.
+    assert volume.index_of_block([2_147_483_647, 0, -1]) == 0
+    assert volume.index_of_block([2_147_483_647, 1, -1]) is None
+
+
+def test_density_volume_bulk_preserves_tail_and_rejects_short():
+    noise = PerlinNoise(LegacyRandom(0))
+    volume = DensityVolume.new([1, 1, 1], [0, 0, 0], [1, 1, 1])
+    random = LegacyRandom(0)
+    values = [f32_from_bits(random.next_int() & 0xFFFF_FFFF) for _ in range(5)]
+    tail = values[1:]
+    noise.add_to_volume(values, volume, 1.0, 1.0, 1.0)
+    assert f32_bits(values[0]) == 3_184_062_705
+    # Хвост за объёмом не тронут.
+    assert values[1:] == tail
+
+    before = list(values)
+    too_large = DensityVolume.new([2, 2, 2], [0, 0, 0], [1, 1, 1])
+    with pytest.raises(DensityError) as short:
+        noise.add_to_volume(values, too_large, 1.0, 1.0, 1.0)
+    assert short.value.kind == DensityError.BUFFER_TOO_SHORT
+    # Отказ до записи: буфер не изменён.
+    assert values == before
+
+
+def test_perlin_bulk_matches_scalar_get3_tall_and_tabulated():
+    noise = PerlinNoise(LegacyRandom(0))
+    # size_y > 64 — куча; малый y_scale — частые смены ячеек (табуляция CornerTerms).
+    volume = DensityVolume.new([2, 100, 3], [0, 0, 0], [1, 1, 1])
+    amplitude = f32_from_bits(f32_bits(1.3))
+    buffer = [0.0] * volume.size()
+    noise.add_to_volume(buffer, volume, 1.0, 0.5, amplitude)
+    index = 0
+    for z in range(3):
+        for x in range(2):
+            for y in range(100):
+                expected = noise.get3(
+                    float(volume.coordinate(0, x)),
+                    float(volume.coordinate(1, y)) * 0.5,
+                    float(volume.coordinate(2, z)),
+                )
+                expected = f32_from_bits(f32_bits(amplitude * expected))
+                assert f32_bits(buffer[index]) == f32_bits(expected)
+                index += 1
+
+
+def test_smeared_perlin_bulk_matches_scalar_get3():
+    noise = SmearedPerlinNoise(LegacyRandom(2), 4.0)
+    volume = DensityVolume.new([2, 6, 2], [0, 0, 0], [1, 1, 1])
+    buffer = [0.0] * volume.size()
+    noise.add_to_volume(buffer, volume, 1.0, 1.0, 1.0)
+    index = 0
+    for z in range(2):
+        for x in range(2):
+            for y in range(6):
+                expected = noise.get3(
+                    float(volume.coordinate(0, x)),
+                    float(volume.coordinate(1, y)),
+                    float(volume.coordinate(2, z)),
+                )
+                assert f32_bits(buffer[index]) == f32_bits(expected)
+                index += 1
+
+
+# ── stack.rs: объёмная часть ─────────────────────────────────────────────────
+
+
+def test_stack_bulk_composes_layers_bit_exact():
+    stack = (
+        NoiseStack.builder()
+        .add(PerlinNoise(LegacyRandom(0)), 1.0, 1.0)
+        .add(PerlinNoise(LegacyRandom(1)), 2.0, 0.5)
+        .build()
+    )
+    volume = DensityVolume.new([3, 5, 4], [0, 0, 0], [1, 1, 1])
+    buffer = [0.0] * volume.size()
+    stack.add_to_volume(buffer, volume, 1.0, 1.0, 1.0)
+    index = 0
+    for z in range(4):
+        for x in range(3):
+            for y in range(5):
+                expected = stack.get3(
+                    float(volume.coordinate(0, x)),
+                    float(volume.coordinate(1, y)),
+                    float(volume.coordinate(2, z)),
+                )
+                assert f32_bits(buffer[index]) == f32_bits(expected)
+                index += 1
+
+
+def test_simplex_bulk_uses_scalar_traversal():
+    noise = SimplexNoise(LegacyRandom(9))
+    volume = DensityVolume.new([2, 3, 2], [0, 0, 0], [1, 1, 1])
+    buffer = [0.0] * volume.size()
+    noise.add_to_volume(buffer, volume, 1.0, 1.0, 1.0)
+    index = 0
+    for z in range(2):
+        for x in range(2):
+            for y in range(3):
+                expected = noise.get3(
+                    float(volume.coordinate(0, x)),
+                    float(volume.coordinate(1, y)),
+                    float(volume.coordinate(2, z)),
+                )
+                assert f32_bits(buffer[index]) == f32_bits(expected)
+                index += 1

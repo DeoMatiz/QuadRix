@@ -205,27 +205,42 @@ files:
   - rust: horizon-core/src/noise/simplex.rs
     python: quadrix/core/noise.py
     test: tests/core/test_noise.py
-    status: pending
+    status: done
     part: 2
-    note: "SimplexNoise (перенос в PART 2). Скалярный Noise/NoiseStack уже есть в noise.py."
+    note: >-
+      SimplexNoise: new (offset_scale 256) / with_skipped_offsets, table/range,
+      corner (radius 0.5 для 2D, 0.6 для 3D), get2 (skew/unskew, 12 из 16
+      направлений), get3. Биты совпадают с Rust #[cfg(test)]: get2(0.25,0.75)
+      [3146180247], get3(0.25,0.5,0.75) [1062011824], NaN проходит по
+      арифметике. Объёмный путь — скалярный из трейта Noise.
 
   - rust: horizon-core/src/noise/stack.rs
     python: quadrix/core/noise.py
     test: tests/core/test_noise.py
-    status: pending
+    status: done
     part: 2
     note: >-
       Скалярная часть (Noise Protocol, NoiseLayer, NoiseStack, get2/get3,
       NoiseStackBuilder, build с Interval.of) портирована в PART 1 — нужна
-      NormalNoise.create. Объёмные пути add_to_volume/add_to_needed — PART 2
-      (зависят от volume.rs / DensityVolume).
+      NormalNoise.create. PART 2: объёмные пути add_to_volume/add_to_needed
+      (add_layers перемасштабирует частоту/амплитуду каждого слоя и вызывает
+      реализацию слоя). Тест сверяет объёмный путь с get3 поэлементно
+      (бит-в-бит).
 
   - rust: horizon-core/src/noise/volume.rs
     python: quadrix/core/noise.py
     test: tests/core/test_noise.py
-    status: pending
+    status: done
     part: 2
-    note: "DensityVolume/DensityError и объёмные циклы — PART 2."
+    note: >-
+      DensityVolume (sizes/minimum/steps/size, maximum/index/block/
+      index_of_block/coordinate с i32-переполнением), DensityError. Плюс
+      объёмный путь Perlin/SmearedPerlin (perlin.rs add_to_volume/add_to_needed:
+      кэш X/Z dot, батч по 4 Y, CornerTerms, STACK_Y 64, TABULATE_CHANGES 4) и
+      скалярный обход трейта. Раскладка Z, X, Y (Y внутри). Эталоны из Rust:
+      bulk seed 0 бит первого сэмпла [3184062705], хвост не тронут, короткий
+      буфер → BufferTooShort до записи. Объёмный путь бит-в-бит совпадает с
+      get3 (включая size_y > 64 и табуляцию).
 
   # ==========================================================================
   # PHASE 1 — fluids — 100%

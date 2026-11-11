@@ -887,3 +887,591 @@ def parity_factor(
             last = max(last, index)
     distance = _i32_add(_i32(last - first), 1)
     return base_amplitude * 0.5 * (1.0 / 3.0) / (0.1 * (1.0 + 1.0 / float(distance)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PART 2 — simplex.rs, volume.rs и объёмные пути stack.rs
+#
+# Правила точности те же, что в PART 1:
+#   * координаты симплекса — double, угловые слагаемые — double (как в Rust);
+#   * объёмные пути Perlin считают dot-произведения и fades в f32;
+#   * порядок операций и раскладка буфера (Z, X, Y — Y самый внутренний) сохранены.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# volume.rs::DensityVolume::block принимает элемент Axis.
+from .geometry import Axis  # noqa: E402
+
+
+# ── simplex.rs ───────────────────────────────────────────────────────────────
+
+
+class SimplexNoise:
+    """Симплекс-шум vanilla (2D/3D): skew/unskew и 12 из 16 направлений Perlin."""
+
+    __slots__ = ("_table",)
+
+    def __init__(self, random) -> None:
+        # Rust SimplexNoise::new: offset_scale = 256.0.
+        self._table = GradientTable.new(random, 256.0)
+
+    @classmethod
+    def with_skipped_offsets(cls, random, skip_offsets: bool) -> "SimplexNoise":
+        obj = cls.__new__(cls)
+        obj._table = GradientTable.new(random, 0.0 if skip_offsets else 256.0)
+        return obj
+
+    def table(self) -> GradientTable:
+        return self._table
+
+    def range(self) -> List[float]:
+        return [-2.0, 2.0]
+
+    @staticmethod
+    def _corner(gradient: int, point: Sequence[float], radius: float) -> float:
+        attenuation = (
+            radius
+            - point[0] * point[0]
+            - point[1] * point[1]
+            - point[2] * point[2]
+        )
+        # Отрицательное затухание даёт ноль; NaN идёт по обычной арифметике.
+        if attenuation < 0.0:
+            return 0.0
+        squared = attenuation * attenuation
+        g = GRADIENTS[gradient]
+        return (
+            squared
+            * squared
+            * (
+                float(g[0]) * point[0]
+                + float(g[1]) * point[1]
+                + float(g[2]) * point[2]
+            )
+        )
+
+    def get2(self, x: float, y: float) -> float:
+        table = self._table
+        offsets = table.offsets()
+        x = x + offsets[0]
+        y = y + offsets[1]
+        root3 = math.sqrt(3.0)
+        skew = 0.5 * (root3 - 1.0)
+        unskew = (3.0 - root3) / 6.0
+        shift = (x + y) * skew
+        i = floor_i32(x + shift)
+        j = floor_i32(y + shift)
+        shift = float(_i32_add(i, j)) * unskew
+        dx = x - (float(i) - shift)
+        dy = y - (float(j) - shift)
+        if dx > dy:
+            a, b = 1, 0
+        else:
+            a, b = 0, 1
+        i = i & 255
+        j = j & 255
+
+        def grad(da: int, db: int) -> int:
+            return table.permute(_i32_add(_i32_add(i, da), table.permute(_i32_add(j, db)))) % 12
+
+        first = self._corner(grad(0, 0), [dx, dy, 0.0], 0.5)
+        second = self._corner(
+            grad(a, b),
+            [dx - float(a) + unskew, dy - float(b) + unskew, 0.0],
+            0.5,
+        )
+        third = self._corner(
+            grad(1, 1),
+            [dx - 1.0 + 2.0 * unskew, dy - 1.0 + 2.0 * unskew, 0.0],
+            0.5,
+        )
+        return _f32(70.0 * (first + second + third))
+
+    def get3(self, x: float, y: float, z: float) -> float:
+        table = self._table
+        offsets = table.offsets()
+        shifted = [x + offsets[0], y + offsets[1], z + offsets[2]]
+        skew = (shifted[0] + shifted[1] + shifted[2]) * (1.0 / 3.0)
+        cell = [floor_i32(v + skew) for v in shifted]
+        unskew = (
+            float(_i32_add(_i32_add(cell[0], cell[1]), cell[2])) * (1.0 / 6.0)
+        )
+        point = [shifted[i] - (float(cell[i]) - unskew) for i in range(3)]
+        px, py, pz = point
+        if px >= py:
+            if py >= pz:
+                a, b = [1, 0, 0], [1, 1, 0]
+            elif px >= pz:
+                a, b = [1, 0, 0], [1, 0, 1]
+            else:
+                a, b = [0, 0, 1], [1, 0, 1]
+        elif py < pz:
+            a, b = [0, 0, 1], [0, 1, 1]
+        elif px < pz:
+            a, b = [0, 1, 0], [0, 1, 1]
+        else:
+            a, b = [0, 1, 0], [1, 1, 0]
+        cell = [v & 255 for v in cell]
+
+        def grad(delta: Sequence[int]) -> int:
+            inner = table.permute(_i32_add(cell[2], delta[2]))
+            mid = table.permute(_i32_add(_i32_add(cell[1], delta[1]), inner))
+            return table.permute(_i32_add(_i32_add(cell[0], delta[0]), mid)) % 12
+
+        first = self._corner(grad([0, 0, 0]), point, 0.6)
+        second = self._corner(
+            grad(a),
+            [point[i] - float(a[i]) + (1.0 / 6.0) for i in range(3)],
+            0.6,
+        )
+        third = self._corner(
+            grad(b),
+            [point[i] - float(b[i]) + (1.0 / 3.0) for i in range(3)],
+            0.6,
+        )
+        fourth = self._corner(
+            grad([1, 1, 1]),
+            [v - 1.0 + 0.5 for v in point],
+            0.6,
+        )
+        return _f32(32.0 * (first + second + third + fourth))
+
+    def add_to_volume(
+        self,
+        buffer: List[float],
+        volume: "DensityVolume",
+        xz_scale: float,
+        y_scale: float,
+        amplitude: float,
+    ) -> None:
+        # SimplexNoise не переопределяет объёмный путь в Rust — используется
+        # скалярный обход из трейта Noise.
+        return _default_add_to_volume(
+            self, buffer, volume, xz_scale, y_scale, amplitude
+        )
+
+    def add_to_needed(
+        self,
+        buffer: List[float],
+        volume: "DensityVolume",
+        xz_scale: float,
+        y_scale: float,
+        amplitude: float,
+        needed: Sequence[int],
+    ) -> None:
+        return _default_add_to_volume(
+            self, buffer, volume, xz_scale, y_scale, amplitude
+        )
+
+
+# ── volume.rs ────────────────────────────────────────────────────────────────
+
+
+class DensityError(Exception):
+    """Ошибка объёма плотности (варианты как в Rust-энуме)."""
+
+    NONPOSITIVE_DIMENSIONS = "NonpositiveDimensions"
+    NONPOSITIVE_STEPS = "NonpositiveSteps"
+    VOLUME_TOO_LARGE = "VolumeTooLarge"
+    BUFFER_TOO_SHORT = "BufferTooShort"
+
+    _MESSAGES = {
+        NONPOSITIVE_DIMENSIONS: "density dimensions must be positive",
+        NONPOSITIVE_STEPS: "density coordinate steps must be positive",
+        VOLUME_TOO_LARGE: "density volume exceeds the Java array index domain",
+        BUFFER_TOO_SHORT: "density buffer is smaller than its volume",
+    }
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        super().__init__(self._MESSAGES[kind])
+
+
+class DensityVolume:
+    """Ограниченный объём плотности с шагом. Плоская раскладка — Z, X, Y (Y внутри).
+
+    Умножение и сложение блочных координат сохраняют i32-переполнение Java.
+    """
+
+    __slots__ = ("_sizes", "_minimum", "_steps", "_size")
+
+    def __init__(
+        self,
+        sizes: Sequence[int],
+        minimum: Sequence[int],
+        steps: Sequence[int],
+        size: int,
+    ) -> None:
+        self._sizes = [int(v) for v in sizes]
+        self._minimum = [_i32(v) for v in minimum]
+        self._steps = [_i32(v) for v in steps]
+        self._size = int(size)
+
+    @classmethod
+    def new(
+        cls, sizes: Sequence[int], minimum: Sequence[int], steps: Sequence[int]
+    ) -> "DensityVolume":
+        if any(v <= 0 for v in sizes):
+            raise DensityError(DensityError.NONPOSITIVE_DIMENSIONS)
+        if any(v <= 0 for v in steps):
+            raise DensityError(DensityError.NONPOSITIVE_STEPS)
+        size = 1
+        for v in sizes:
+            size *= v
+        if size > I32_MAX:
+            raise DensityError(DensityError.VOLUME_TOO_LARGE)
+        return cls(sizes, minimum, steps, size)
+
+    def sizes(self) -> List[int]:
+        return list(self._sizes)
+
+    def minimum(self) -> List[int]:
+        return list(self._minimum)
+
+    def steps(self) -> List[int]:
+        return list(self._steps)
+
+    def size(self) -> int:
+        return self._size
+
+    def maximum(self) -> List[int]:
+        return [
+            _i32(self.coordinate(axis, self._sizes[axis]) - 1) for axis in range(3)
+        ]
+
+    def index(self, position: Sequence[int]):  # -> Optional[int]
+        if any(position[i] >= self._sizes[i] for i in range(3)):
+            return None
+        return position[1] + (position[0] + position[2] * self._sizes[0]) * self._sizes[1]
+
+    def block(self, axis, index: int):  # -> Optional[int]
+        axis_index = axis.value if isinstance(axis, Axis) else int(axis)
+        if index >= self._sizes[axis_index]:
+            return None
+        return self.coordinate(axis_index, index)
+
+    def index_of_block(self, position: Sequence[int]):  # -> Optional[int]
+        relative = [_i32(position[i] - self._minimum[i]) for i in range(3)]
+        for axis in range(3):
+            extent = _i32(self._sizes[axis] * self._steps[axis])
+            value = relative[axis]
+            if value < 0 or value >= extent or value % self._steps[axis] != 0:
+                return None
+        return self.index([relative[i] // self._steps[i] for i in range(3)])
+
+    def coordinate(self, axis: int, index: int) -> int:
+        return _i32_add(self._minimum[axis], _i32(_i32(index) * self._steps[axis]))
+
+
+# ── объёмные пути Perlin / stack ─────────────────────────────────────────────
+
+# Столбцы Y до этой высоты держат сэмплы на стеке (как STACK_Y в Rust).
+STACK_Y = 64
+# Смена Y-ячейки в столбце, с которой табулируются CornerTerms.
+TABULATE_CHANGES = 4
+
+
+class CornerTerms:
+    """Угловые слагаемые одного столбца: XZ dot и Y-градиент по углу и индексу.
+
+    Индекс угла — как в сэмплере: бит 0 — X, бит 1 — Z (в Redex тот же порядок).
+    """
+
+    __slots__ = ("_terms",)
+
+    def __init__(self, dx: float, dz: float) -> None:
+        terms: List[List[tuple[float, float]]] = []
+        for corner in range(4):
+            row: List[tuple[float, float]] = []
+            for gradient in range(16):
+                gx, gy, gz = PERLIN_GRADIENTS[gradient]
+                dot = _f32(
+                    _f32(gx * _f32(dx - float(corner & 1)))
+                    + _f32(gz * _f32(dz - float(corner >> 1)))
+                )
+                row.append((dot, gy))
+            terms.append(row)
+        self._terms = terms
+
+    def get(self, corner: int, gradient: int) -> tuple[float, float]:
+        return self._terms[(corner & 1) | ((corner >> 1) & 2)][gradient & 15]
+
+
+def _add_four(
+    column: List[float],
+    base: int,
+    offsets: Sequence[float],
+    fades: Sequence[float],
+    y0: int,
+    corner,
+    fade_x: float,
+    fade_z: float,
+    amplitude: float,
+) -> None:
+    """Добавить четыре Y-сэмпла, по одному на дорожку (как add_four в Rust)."""
+    dy = [offsets[y0 + lane] for lane in range(4)]
+    fy = [fades[y0 + lane] for lane in range(4)]
+    values = [[0.0, 0.0, 0.0, 0.0] for _ in range(8)]
+    for i in range(8):
+        bit = float((i >> 1) & 1)
+        for lane in range(4):
+            dot, gradient = corner(i, lane)
+            values[i][lane] = _f32(dot + _f32(gradient * _f32(dy[lane] - bit)))
+    for lane in range(4):
+        v = [values[i][lane] for i in range(8)]
+        pos = base + y0 + lane
+        column[pos] = _f32(
+            column[pos] + _f32(amplitude * lerp3([fade_x, fy[lane], fade_z], v))
+        )
+
+
+def _perlin_add_volume(
+    noise,
+    buffer: List[float],
+    volume: DensityVolume,
+    xz_scale: float,
+    y_scale: float,
+    amplitude: float,
+    fudge_y_scale,
+    needed,
+) -> None:
+    """Объёмный путь Perlin с кэшированием X/Z dot и циклом по Y."""
+    if len(buffer) < volume.size():
+        raise DensityError(DensityError.BUFFER_TOO_SHORT)
+    size_x, size_y, size_z = volume.sizes()
+    if needed is not None and not (size_y <= 64 and len(needed) >= size_x * size_z):
+        needed = None
+    table = noise.table()
+    table_offsets = table.offsets()
+    cells = [0] * size_y
+    fades = [0.0] * size_y
+    offsets = [0.0] * size_y
+    for y in range(size_y):
+        input_y = float(volume.coordinate(1, y)) * y_scale
+        shifted_y = wrap(input_y) + table_offsets[1]
+        cell = floor_i32(shifted_y)
+        dy = shifted_y - float(cell)
+        cells[y] = cell
+        fades[y] = smoothstep(_f32(dy))
+        if fudge_y_scale is None:
+            offsets[y] = _f32(dy)
+        else:
+            offsets[y] = _f32(dy - compute_fudge_y(input_y, dy, fudge_y_scale))
+    changes = 0
+    for k in range(size_y - 1):
+        if cells[k] != cells[k + 1]:
+            changes += 1
+    tabulate = changes >= TABULATE_CHANGES
+    index = 0
+    for z in range(size_z):
+        shifted_z = wrap(float(volume.coordinate(2, z)) * xz_scale) + table_offsets[2]
+        cell_z = floor_i32(shifted_z)
+        dz = _f32(shifted_z - float(cell_z))
+        fade_z = smoothstep(dz)
+        for x in range(size_x):
+            wanted = needed[x + z * size_x] if needed is not None else None
+            if wanted == 0:
+                index += size_y
+                continue
+            shifted_x = wrap(float(volume.coordinate(0, x)) * xz_scale) + table_offsets[0]
+            cell_x = floor_i32(shifted_x)
+            dx = _f32(shifted_x - float(cell_x))
+            fade_x = smoothstep(dx)
+            p = table.permute(cell_x)
+            q = table.permute(_i32_add(cell_x, 1))
+            terms = CornerTerms(dx, dz) if tabulate else None
+            previous_y = I32_MIN
+            xz_dots = [0.0] * 8
+            y_gradients = [0.0] * 8
+            y = 0
+            while y < size_y:
+                if wanted is not None and ((wanted >> y) & 1) == 0:
+                    y += 1
+                    continue
+                cell = cells[y]
+                if terms is not None and y + 4 <= size_y:
+                    block = cells[y : y + 4]
+                    if (
+                        block[0] != block[1]
+                        and block[1] != block[2]
+                        and block[2] != block[3]
+                    ):
+                        indices = [
+                            noise._gradient_indices_at(p, q, block[lane], cell_z)
+                            for lane in range(4)
+                        ]
+                        _add_four(
+                            buffer,
+                            index,
+                            offsets,
+                            fades,
+                            y,
+                            lambda i, lane, _idx=indices, _t=terms: _t.get(i, _idx[lane][i]),
+                            fade_x,
+                            fade_z,
+                            amplitude,
+                        )
+                        y += 4
+                        continue
+                if previous_y != cell:
+                    if terms is not None:
+                        idx = noise._gradient_indices_at(p, q, cell, cell_z)
+                        for i in range(8):
+                            xz_dots[i], y_gradients[i] = terms.get(i, idx[i])
+                    else:
+                        gradients = noise._gradients_at(p, q, cell, cell_z)
+                        for i in range(8):
+                            xz_dots[i] = _f32(
+                                _f32(gradients[i][0] * _f32(dx - float(i & 1)))
+                                + _f32(gradients[i][2] * _f32(dz - float((i >> 2) & 1)))
+                            )
+                            y_gradients[i] = gradients[i][1]
+                    previous_y = cell
+                if (
+                    y + 4 <= size_y
+                    and cells[y + 1] == cell
+                    and cells[y + 2] == cell
+                    and cells[y + 3] == cell
+                ):
+                    _add_four(
+                        buffer,
+                        index,
+                        offsets,
+                        fades,
+                        y,
+                        lambda i, _lane, _xd=xz_dots, _yg=y_gradients: (_xd[i], _yg[i]),
+                        fade_x,
+                        fade_z,
+                        amplitude,
+                    )
+                    y += 4
+                    continue
+                dy = offsets[y]
+                values = [
+                    _f32(
+                        xz_dots[i]
+                        + _f32(y_gradients[i] * _f32(dy - float((i >> 1) & 1)))
+                    )
+                    for i in range(8)
+                ]
+                pos = index + y
+                buffer[pos] = _f32(
+                    buffer[pos]
+                    + _f32(amplitude * lerp3([fade_x, fades[y], fade_z], values))
+                )
+                y += 1
+            index += size_y
+
+
+def _default_add_to_volume(
+    noise,
+    buffer: List[float],
+    volume: DensityVolume,
+    xz_scale: float,
+    y_scale: float,
+    amplitude: float,
+) -> None:
+    """Скалярный объёмный обход из трейта Noise (Z, X, Y)."""
+    if len(buffer) < volume.size():
+        raise DensityError(DensityError.BUFFER_TOO_SHORT)
+    size_x, size_y, size_z = volume.sizes()
+    index = 0
+    for z in range(size_z):
+        zc = float(volume.coordinate(2, z)) * xz_scale
+        for x in range(size_x):
+            xc = float(volume.coordinate(0, x)) * xz_scale
+            for y in range(size_y):
+                yc = float(volume.coordinate(1, y)) * y_scale
+                buffer[index] = _f32(
+                    buffer[index] + _f32(amplitude * noise.get3(xc, yc, zc))
+                )
+                index += 1
+
+
+def _noise_add_to_volume(
+    noise,
+    buffer: List[float],
+    volume: DensityVolume,
+    xz_scale: float,
+    y_scale: float,
+    amplitude: float,
+    needed=None,
+) -> None:
+    """Диспетчер объёмного сложения: используется конкретная реализация."""
+    if isinstance(noise, SmearedPerlinNoise):
+        return _perlin_add_volume(
+            noise._base,
+            buffer,
+            volume,
+            xz_scale,
+            y_scale,
+            amplitude,
+            noise._fudge_y_scale,
+            needed,
+        )
+    if isinstance(noise, PerlinNoise):
+        return _perlin_add_volume(
+            noise, buffer, volume, xz_scale, y_scale, amplitude, None, needed
+        )
+    if isinstance(noise, NoiseStack):
+        return _stack_add_layers(
+            noise, buffer, volume, xz_scale, y_scale, amplitude, needed
+        )
+    return _default_add_to_volume(noise, buffer, volume, xz_scale, y_scale, amplitude)
+
+
+def _stack_add_layers(
+    stack: NoiseStack,
+    buffer: List[float],
+    volume: DensityVolume,
+    xz_scale: float,
+    y_scale: float,
+    amplitude: float,
+    needed,
+) -> None:
+    """add_layers: каждый слой перемасштабируется и складывается в объём."""
+    if len(buffer) < volume.size():
+        raise DensityError(DensityError.BUFFER_TOO_SHORT)
+    for layer in stack.layers():
+        _noise_add_to_volume(
+            layer.noise,
+            buffer,
+            volume,
+            xz_scale * layer.frequency,
+            y_scale * layer.frequency,
+            _f32(amplitude * layer.amplitude),
+            needed,
+        )
+
+
+# Методы трейта Noise в Rust живут на типах; в PART 1 классы уже определены,
+# поэтому объёмные методы присоединяем здесь, не трогая существующий код.
+
+
+def _noise_stack_add_to_volume(
+    self, buffer, volume, xz_scale, y_scale, amplitude
+):
+    return _stack_add_layers(self, buffer, volume, xz_scale, y_scale, amplitude, None)
+
+
+def _noise_stack_add_to_needed(
+    self, buffer, volume, xz_scale, y_scale, amplitude, needed
+):
+    return _stack_add_layers(self, buffer, volume, xz_scale, y_scale, amplitude, needed)
+
+
+def _sampler_add_to_volume(self, buffer, volume, xz_scale, y_scale, amplitude):
+    return _noise_add_to_volume(self, buffer, volume, xz_scale, y_scale, amplitude)
+
+
+def _sampler_add_to_needed(
+    self, buffer, volume, xz_scale, y_scale, amplitude, needed
+):
+    return _noise_add_to_volume(self, buffer, volume, xz_scale, y_scale, amplitude, needed)
+
+
+PerlinNoise.add_to_volume = _sampler_add_to_volume
+PerlinNoise.add_to_needed = _sampler_add_to_needed
+SmearedPerlinNoise.add_to_volume = _sampler_add_to_volume
+SmearedPerlinNoise.add_to_needed = _sampler_add_to_needed
+NoiseStack.add_to_volume = _noise_stack_add_to_volume
+NoiseStack.add_to_needed = _noise_stack_add_to_needed
