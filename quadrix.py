@@ -55,7 +55,14 @@ from quadrix.protocol.packets.handshake import LOGIN
 from quadrix.world.chunk import BlockEntity, Chunk, ChunkData as WorldChunkData
 from quadrix.world.registry import BlockStateId, load_registry
 
-__all__ = ["Client", "ClientError", "ClientWorld", "build_parser", "main"]
+__all__ = [
+    "Client",
+    "ClientError",
+    "ClientWorld",
+    "build_parser",
+    "main",
+    "run_gui",
+]
 
 #: Один такт игры: 20 Гц (как ``game.rs`` / ``motion.rs``).
 TICK_RATE: int = 20
@@ -785,7 +792,58 @@ def build_parser() -> argparse.ArgumentParser:
         default=25566,
         help="port control server (default: 25566)",
     )
+    display = parser.add_mutually_exclusive_group()
+    display.add_argument(
+        "--gui",
+        action="store_true",
+        help="запустить окно GUI (App: меню → игра) вместо headless",
+    )
+    display.add_argument(
+        "--no-gui",
+        action="store_true",
+        help="headless-режим (по умолчанию, как раньше)",
+    )
+    parser.add_argument(
+        "--width", type=int, default=854, help="ширина окна GUI (default: 854)"
+    )
+    parser.add_argument(
+        "--height", type=int, default=480, help="высота окна GUI (default: 480)"
+    )
     return parser
+
+
+def run_gui(args: argparse.Namespace) -> int:
+    """Запустить окно GUI: главный цикл ``App`` (порт ``entry.rs::main``).
+
+    Headless-путь (``main``) не затрагивается: GUI включается только
+    флагом ``--gui``. Настройки читаются из ``options.txt`` в ``--data-dir``,
+    экран открывается на ``MainMenu``, тик — 20 Гц.
+    """
+    from quadrix.render.app import App
+    from quadrix.render.backend import BackendType, create_backend
+    from quadrix.render.menu import Settings
+
+    settings = Settings()
+    options_path = Path(args.data_dir) / "options.txt"
+    if options_path.exists():
+        try:
+            settings = Settings.load(options_path)
+        except (OSError, ValueError) as exc:
+            _log(f"options.txt не прочитан ({options_path}): {exc}")
+
+    backend = create_backend(
+        BackendType.MODERNGL, args.width, args.height, "QuadRix"
+    )
+    app = App.init(backend, settings, width=backend.width, height=backend.height)
+    try:
+        app.setup()
+        app.loop(max_ticks=args.ticks)
+        return 0
+    except RuntimeError as exc:
+        _log(f"GUI недоступен: {exc}")
+        return 1
+    finally:
+        app.shutdown()
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -800,6 +858,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 reconfigure(encoding="utf-8")
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # --gui и --daemon несовместимы: GUI владеет циклом кадра, control-сервер
+    # рассчитан на headless-клиент. Выбор за пользователем.
+    if args.gui and args.daemon:
+        _log("--gui и --daemon несовместимы: выберите один режим")
+        return 2
+
+    if args.gui:
+        return run_gui(args)
 
     client = Client(
         host=args.host,

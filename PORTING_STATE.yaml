@@ -1877,10 +1877,10 @@ files:
     python: quadrix/render/ui.py
     test: tests/render/test_ui.py
     status: done
-    part: 2
+    part: 3
     parts_total: 3
     lines_python: 713
-    test_status: "15 passed"
+    test_status: "15 passed (ui) + 21 (menu) + 12 (app)"
     note: >-
       GUI PART 1 (примитивы): Font (bitmap из font/default.json →
       include/default.json: ascii.png, accented.png, nonlatin_european.png;
@@ -1895,7 +1895,8 @@ files:
       nine-slice спрайты ванильных виджетов (_button/slider) — PART 2
       (фон кнопки/слайдера пока сплошная заливка через белый пиксель атласа).
       PART 2 (меню/настройки/язык) — done (quadrix/render/menu.py).
-      PART 3 (интеграция) — pending.
+      PART 3 (интеграция) — done (quadrix/render/app.py: App, меню→игра,
+      --gui, настройки→рендер, язык→text; quadrix.py --gui/--no-gui).
 
   - rust: >-
       horizon-client/src/title.rs (MainMenu),
@@ -1926,6 +1927,31 @@ files:
       и options.json (тот же словарь). FALLBACK: nine-slice спрайты,
       логотип, панорама/фон из текстур — PART 3.
 
+  - rust: >-
+      horizon-client/src/entry.rs (main),
+      horizon-client/src/game/startup_menu.rs (StartupMenu,
+      меню → игра),
+      horizon-client/src/game.rs (fn tick 20 Гц, fn render, enum Screen)
+    python: quadrix/render/app.py
+    test: tests/render/test_app.py
+    status: done
+    part: 3
+    parts_total: 3
+    lines_python: 455
+    test_status: "12 passed"
+    note: >-
+      GUI PART 3 (интеграция): App — главный цикл (init → setup →
+      loop → shutdown). Фиксированный тик 20 Гц (game.rs) + рендер в
+      каждом кадре; render = ScreenStack.render(batch) → backend.draw
+      (Batch.flush, один draw call). screen_stack = ScreenStack(MainMenu);
+      переключение MainMenu → (Singleplayer | Multiplayer) → GameScreen
+      (заглушка, FALLBACK: полный gameplay — следующая фаза) и → OptionsScreen;
+      handle_event click/key/scroll/resize → ScreenStack. Настройки → рендер:
+      RenderSettings (fov, render_distance, master_volume) пересобирается
+      каждый кадр из Settings и передаётся GameScreen. Язык → текст:
+      set_language → lang.set → quadrix/core/text._CURRENT_LANG. quadrix.py:
+      --gui запускает App (moderngl backend), --no-gui/по умолчанию —
+      headless (как раньше); --gui и --daemon несовместимы (код 2).
   - rust: horizon-client-render/src/graphics_ui.rs (143 КБ)
     python: quadrix/render/graphics_ui.py
     test: tests/render/test_graphics_ui.py
