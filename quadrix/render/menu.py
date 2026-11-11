@@ -96,9 +96,12 @@ ENTRY_COLOR = rgba(24, 24, 24, 255)
 BOX_BORDER = rgba(160, 160, 160, 255)
 BOX_FILL = rgba(0, 0, 0, 255)
 CHECK_COLOR = rgba(255, 255, 255, 255)
+# options_ui.rs L3369: warning languageAccuracyWarning — rgba(0xBA,0xBA,0xBA,255).
+LANGUAGE_WARNING_COLOR = rgba(0xBA, 0xBA, 0xBA, 255)
 
 # options_ui.rs::Page::Main — категории в ванильном порядке (i18n-ключ, экран).
-OPTION_CATEGORIES: list[tuple[str, str]] = [
+# Ровно 11 слотов из Rust (options_ui.rs L3075-3098), включая Horizon settings и mods.
+OPTION_CATEGORIES: list[tuple[str, Optional[str]]] = [
     ("options.skinCustomisation", "skin"),
     ("options.sounds", "sound"),
     ("options.video", "graphics"),
@@ -107,7 +110,38 @@ OPTION_CATEGORIES: list[tuple[str, str]] = [
     ("options.chat", "chat"),
     ("options.resourcepack", "packs"),
     ("options.accessibility", "accessibility"),
+    ("horizon.pages.open.horizon_settings", "horizon_settings"),
+    ("horizon.pages.open.mods", "mods"),
+    ("options.credits_and_attribution", "credits"),
 ]
+
+# options_ui.rs::OptionsUi::title — ключ заголовка подстраницы.
+PAGE_TITLES: dict[str, str] = {
+    "skin": "options.skinCustomisation.title",
+    "sound": "options.sounds.title",
+    "graphics": "options.videoTitle",
+    "controls": "controls.title",
+    "language": "options.language.title",
+    "chat": "options.chat.title",
+    "packs": "resourcePack.title",
+    "accessibility": "options.accessibility.title",
+    "online": "options.online.title",
+    "horizon_settings": "horizon.pages.settings",
+    "mods": "horizon.pages.mods",
+    "credits": "credits_and_attribution.screen.title",
+    "font": "options.font.title",
+}
+
+# title.rs (L1824-1847) — иконки-кнопки главного меню: (i18n-ключ, фолбэк, спрайт).
+MAIN_MENU_ICONS: list[tuple[str, str, str]] = [
+    ("gui.friends.open", "Friends", "gui/sprites/friends/friends"),
+    ("options.language", "Language...", "gui/sprites/icon/language"),
+    ("options.accessibility", "Accessibility Settings...", "gui/sprites/icon/accessibility"),
+]
+
+# ui.rs::menu_background / SoundManager: плитка «земли» 32 GUI-пикселя.
+MENU_BACKGROUND_TILE = 32.0
+MENU_BACKGROUND_SPRITE = "gui/menu_background"
 
 # Корень ресурсов для загрузки языков (FIXED, см. AGENTS.md).
 PACK_ROOT = Path(".local/horizon-client/26.3")
@@ -133,6 +167,22 @@ def solid(
         batch.add_quad(Quad(x, y, w, h, r.u0, r.v0, r.u1, r.v1, color))
     else:
         batch.add_quad(Quad(x, y, w, h, 0.0, 0.0, 1.0, 1.0, color))
+
+
+def draw_menu_background(
+    batch: Batch, font: Optional[Font], w: float, h: float
+) -> None:
+    """Фон экрана настроек: ``ui.rs::menu_background`` (плитка 32), иначе чёрный.
+
+    Заголовочный экран (MainMenu) фон НЕ рисует — за ним панорама (см. App).
+    """
+    atlas = getattr(batch, "atlas", None)
+    if atlas is not None and atlas.tiled(
+        batch, MENU_BACKGROUND_SPRITE, 0.0, 0.0, w, h, MENU_BACKGROUND_TILE
+    ):
+        return
+    # FALLBACK: нет атласа — сплошная тёмная заливка (как ui.rs при отсутствии спрайта).
+    solid(batch, font, 0.0, 0.0, w, h, BACKGROUND)
 
 
 def _in_rect(x: float, y: float, w: float, h: float, mx: float, my: float) -> bool:
@@ -592,16 +642,26 @@ class ScrollableList:
         return str(item)
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        solid(batch, font, self.x, self.y, self.w, self.h, ENTRY_COLOR)
-        if font is None:
-            return
+        """Строки списка (порт ``options_ui.rs::WKind::LanguageRow``).
+
+        Выбранная строка — белая рамка 1px + чёрная заливка; подпись
+        центрирована, ``y + 5`` (ряд 18px). Фон списка не заливается:
+        за ним ``menu_background``.
+        """
         for index, _item in self.visible_items():
             ry = self.row_y(index)
             if ry + self.item_height < self.y or ry > self.y + self.h:
                 continue
             if index == self.selected:
-                solid(batch, font, self.x + 1.0, ry, self.w - 2.0, self.item_height, SELECTION_COLOR)
-            draw_text(batch, font, self.label(index), self.x + 3.0, ry + 5.0)
+                solid(batch, font, self.x, ry, self.w, self.item_height, LABEL_COLOR)
+                solid(batch, font, self.x + 1.0, ry + 1.0, self.w - 2.0,
+                      self.item_height - 2.0, BACKGROUND)
+            if font is None:
+                continue
+            label = self.label(index)
+            tw = font.width(label)
+            tx = self.x + math.floor((self.w - tw) / 2.0)
+            draw_text(batch, font, label, tx, ry + 5.0, LABEL_COLOR)
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +698,10 @@ class Screen:
 
     def handle_scroll(self, dy: float) -> bool:
         """Колесо мыши."""
+        return False
+
+    def handle_move(self, mx: float, my: float) -> bool:
+        """Курсор переместился (подсветка наведения). ``True``, если принято."""
         return False
 
 
@@ -682,13 +746,22 @@ class ScreenStack:
     def handle_scroll(self, dy: float) -> bool:
         return self.current.handle_scroll(dy)
 
+    def handle_move(self, mx: float, my: float) -> bool:
+        return self.current.handle_move(mx, my)
+
 
 # ---------------------------------------------------------------------------
 # главное меню
 # ---------------------------------------------------------------------------
 
 class MainMenu(Screen):
-    """Главный экран (порт ``title.rs::Mode::Main``)."""
+    """Главный экран (порт ``title.rs::Mode::Main``).
+
+    Рисует логотип (спрайты ``gui/title/minecraft`` + ``edition``) и кнопки
+    в стиле заголовка (левая/правая половины спрайта 200x20). Фон НЕ
+    рисуется: за экраном панорама кубмапа (см. ``quadrix/render/panorama.py``
+    и ``App.render``).
+    """
 
     def __init__(
         self,
@@ -698,17 +771,25 @@ class MainMenu(Screen):
         on_singleplayer: Optional[Callable[[], None]] = None,
         on_multiplayer: Optional[Callable[[], None]] = None,
         on_options: Optional[Callable[[], None]] = None,
+        on_realms: Optional[Callable[[], None]] = None,
+        on_friends: Optional[Callable[[], None]] = None,
+        on_language: Optional[Callable[[], None]] = None,
+        on_accessibility: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(width, height)
         self.on_quit = on_quit
         self.on_singleplayer = on_singleplayer
         self.on_multiplayer = on_multiplayer
         self.on_options = on_options
+        self.on_realms = on_realms
+        self.on_friends = on_friends
+        self.on_language = on_language
+        self.on_accessibility = on_accessibility
         self.buttons: list[Button] = []
         self.build()
 
     def build(self) -> None:
-        """Собрать кнопки по геометрии Rust (``Title::buttons``)."""
+        """Собрать кнопки по геометрии Rust (``Title::buttons``, Mode::Main)."""
         self.buttons = []
         w = math.ceil(self.width)
         h = math.ceil(self.height)
@@ -718,26 +799,45 @@ class MainMenu(Screen):
         step = MAIN_MENU_BUTTON_STEP
         hw = MAIN_MENU_HALF_WIDTH
 
+        # title.rs L1776-1821: три полных, затем Options/Quit по 98.
         self.buttons.append(Button(
             cx - 100.0, y, bw, MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("menu.singleplayer", "Singleplayer"),
-            on_click=self._click_singleplayer,
+            on_click=self._click_singleplayer, title_style=True,
         ))
         self.buttons.append(Button(
             cx - 100.0, y + step, bw, MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("menu.multiplayer", "Multiplayer"),
-            on_click=self._click_multiplayer,
+            on_click=self._click_multiplayer, title_style=True,
+        ))
+        self.buttons.append(Button(
+            cx - 100.0, y + 2.0 * step, bw, MAIN_MENU_BUTTON_HEIGHT,
+            lang.get_or("menu.online", "Minecraft Realms"),
+            on_click=self._click_realms, title_style=True,
         ))
         self.buttons.append(Button(
             cx - 100.0, y + 4.0 * step, hw, MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("menu.options", "Options..."),
-            on_click=self._click_options,
+            on_click=self._click_options, title_style=True,
         ))
         self.buttons.append(Button(
             cx + 2.0, y + 4.0 * step, hw, MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("menu.quit", "Quit Game"),
-            on_click=self._click_quit,
+            on_click=self._click_quit, title_style=True,
         ))
+        # title.rs L1824-1847: иконки-кнопки 20x20 в строке y+72, шаг 24.
+        openers = [
+            self._click_friends,
+            self._click_language,
+            self._click_accessibility,
+        ]
+        for i, (key, plain, icon) in enumerate(MAIN_MENU_ICONS):
+            self.buttons.append(Button(
+                cx - 34.0 + i * 24.0, y + 72.0, 20.0, MAIN_MENU_BUTTON_HEIGHT,
+                lang.get_or(key, plain),
+                on_click=openers[i], title_style=True,
+                icon=icon, icon_size=15.0,
+            ))
 
     def on_resize(self, width: float, height: float) -> None:
         super().on_resize(width, height)
@@ -753,6 +853,10 @@ class MainMenu(Screen):
         if self.on_multiplayer is not None:
             self.on_multiplayer()
 
+    def _click_realms(self) -> None:
+        if self.on_realms is not None:
+            self.on_realms()
+
     def _click_options(self) -> None:
         if self.on_options is not None:
             self.on_options()
@@ -761,27 +865,63 @@ class MainMenu(Screen):
         if self.on_quit is not None:
             self.on_quit()
 
+    def _click_friends(self) -> None:
+        if self.on_friends is not None:
+            self.on_friends()
+
+    def _click_language(self) -> None:
+        if self.on_language is not None:
+            self.on_language()
+
+    def _click_accessibility(self) -> None:
+        if self.on_accessibility is not None:
+            self.on_accessibility()
+
     def title(self) -> str:
-        """Заголовок: ванильное лого через спрайты — PART 3, сейчас текст."""
+        """Текст-фолбэк логотипа (без атласа спрайтов)."""
         return lang.get_or("menu.title", "Minecraft")
 
     # -- рендер / ввод ---------------------------------------------------
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        solid(batch, font, 0.0, 0.0, self.width, self.height, BACKGROUND)
+        self._render_logo(batch, font)
+        for button in self.buttons:
+            button.render(batch, font)
+
+    def _render_logo(self, batch: Batch, font: Optional[Font]) -> None:
+        """Логотип: ``title.rs::draw_logo`` (спрайт-регионы 256x44 + 128x14)."""
+        atlas = getattr(batch, "atlas", None)
+        cx = math.floor(math.ceil(self.width) / 2.0)
+        if atlas is not None:
+            drew = atlas.region(
+                batch, "gui/title/minecraft", cx - 128.0, 30.0, 256.0, 44.0,
+                256.0, 64.0,
+            )
+            drew = atlas.region(
+                batch, "gui/title/edition", cx - 64.0, 30.0 + 44.0 - 7.0, 128.0, 14.0,
+                128.0, 16.0,
+            ) and drew
+            if drew:
+                return
+        # FALLBACK: нет атласа — рисуем название текстом (логотип-спрайт недоступен).
         if font is not None:
             text = self.title()
             tx = (self.width - font.width(text)) / 2.0
-            ty = math.floor(self.height / 4.0) - 20.0
-            draw_text(batch, font, text, tx, ty, TITLE_COLOR)
-        for button in self.buttons:
-            button.render(batch, font)
+            draw_text(batch, font, text, tx, 40.0, TITLE_COLOR)
 
     def handle_click(self, mx: float, my: float) -> bool:
         for button in self.buttons:
             if button.handle_click(mx, my):
                 return True
         return False
+
+    def handle_move(self, mx: float, my: float) -> bool:
+        handled = False
+        for button in self.buttons:
+            inside = button.contains(mx, my)
+            button.hovered = inside and button.active
+            handled = handled or inside
+        return handled
 
 
 # ---------------------------------------------------------------------------
@@ -806,16 +946,17 @@ class OptionsScreen(Screen):
         self.settings = settings if settings is not None else Settings()
         self.stack = stack
         self.buttons: list[Button] = []
+        self.online_button: Optional[Button] = None
         self.fov_slider: Optional[Slider] = None
         self.done_button: Optional[Button] = None
         self.build()
 
     def build(self) -> None:
-        """Построить виджеты по геометрии Rust (``Page::Main``)."""
+        """Построить виджеты по геометрии Rust (``Page::Main`` L3053-3109)."""
         self.buttons = []
         w = self.width
         h = self.height
-        cx = (w / 2.0)
+        cx = math.floor(w / 2.0)
         # FOV-слайдер: option_widget(Opt::Fov, cx-154, 29, 150).
         self.fov_slider = Slider(
             x=cx - 154.0,
@@ -825,29 +966,38 @@ class OptionsScreen(Screen):
             value=float(self.settings.fov),
             min=FOV_MIN,
             max=FOV_MAX,
-            label=lang.get_or("options.fov", "FOV: %s"),
+            label=lang.get_or("options.fov", "FOV"),
             on_change=self._on_fov,
         )
-        # Сетка категорий: x = cx-158+4+(i%2)*158, y = gy + (i/2)*24.
+        # Online: button(cx+4, 29, 150, options.online, Push(Online)).
+        self.online_button = Button(
+            cx + 4.0, 29.0, OPTIONS_BUTTON_WIDTH, MAIN_MENU_BUTTON_HEIGHT,
+            lang.get_or("options.online", "Online..."),
+            on_click=self._make_open("online"),
+        )
+        # Сетка категорий: x = cx-158+4+(i%2)*158, y = gy + (i/2)*24,
+        # gy = min(91, h-33-rows*24), rows = ceil(n/2).
         entries = OPTION_CATEGORIES
         rows = (len(entries) + 1) // 2
-        gy = min(61.0 + 30.0, h - 33.0 - rows * OPTIONS_ROW_STEP)
+        gy = min(91.0, h - 33.0 - rows * OPTIONS_ROW_STEP)
         for i, (key, page) in enumerate(entries):
             bx = cx - 158.0 + 4.0 + (i % 2) * OPTIONS_COLUMN_STEP
             by = gy + (i // 2) * OPTIONS_ROW_STEP
             label = lang.get_or(key, key)
             self.buttons.append(
                 Button(bx, by, OPTIONS_BUTTON_WIDTH, MAIN_MENU_BUTTON_HEIGHT,
-                       label, on_click=self._make_open(page))
+                       label, on_click=self._make_open(page),
+                       active=page is not None)
             )
         self.done_button = Button(
             cx - 100.0, h - 27.0, 200.0, MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("gui.done", "Done"), on_click=self._done,
         )
 
-    def _make_open(self, page: str) -> Callable[[], None]:
+    def _make_open(self, page: Optional[str]) -> Callable[[], None]:
         def _open() -> None:
-            self.open_page(page)
+            if page is not None:
+                self.open_page(page)
         return _open
 
     def _on_fov(self, value: float) -> None:
@@ -884,13 +1034,15 @@ class OptionsScreen(Screen):
         self.build()
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        solid(batch, font, 0.0, 0.0, self.width, self.height, BACKGROUND)
+        draw_menu_background(batch, font, self.width, self.height)
         if font is not None:
             title = lang.get_or(OPTIONS_TITLE, "Options")
             tw = font.width(title)
             draw_text(batch, font, title, (self.width - tw) / 2.0, 12.0, TITLE_COLOR)
         if self.fov_slider is not None:
             self.fov_slider.render(batch, font)
+        if self.online_button is not None:
+            self.online_button.render(batch, font)
         for button in self.buttons:
             button.render(batch, font)
         if self.done_button is not None:
@@ -903,12 +1055,32 @@ class OptionsScreen(Screen):
         ):
             self.fov_slider.click(mx)
             return True
+        if self.online_button is not None and self.online_button.handle_click(mx, my):
+            return True
         for button in self.buttons:
             if button.handle_click(mx, my):
                 return True
         if self.done_button is not None and self.done_button.handle_click(mx, my):
             return True
         return False
+
+    def handle_move(self, mx: float, my: float) -> bool:
+        handled = False
+        widgets = list(self.buttons)
+        if self.online_button is not None:
+            widgets.append(self.online_button)
+        if self.done_button is not None:
+            widgets.append(self.done_button)
+        for button in widgets:
+            inside = button.contains(mx, my)
+            button.hovered = inside and button.active
+            handled = handled or inside
+        if self.fov_slider is not None:
+            self.fov_slider.hovered = _in_rect(
+                self.fov_slider.x, self.fov_slider.y, self.fov_slider.w,
+                self.fov_slider.h, mx, my,
+            )
+        return handled
 
 
 class OptionsSubScreen(Screen):
@@ -927,7 +1099,8 @@ class OptionsSubScreen(Screen):
         self.settings = settings if settings is not None else Settings()
         self.stack = stack
         self.back_button = Button(
-            (width / 2.0) - 100.0, height - 27.0, 200.0, MAIN_MENU_BUTTON_HEIGHT,
+            math.floor(width / 2.0) - 100.0, height - 27.0, 200.0,
+            MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("gui.back", "Back"), on_click=self._back,
         )
 
@@ -936,10 +1109,10 @@ class OptionsSubScreen(Screen):
             self.stack.pop()
 
     def title_key(self) -> str:
-        return "options." + self.page
+        return PAGE_TITLES.get(self.page, "options." + self.page)
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        solid(batch, font, 0.0, 0.0, self.width, self.height, BACKGROUND)
+        draw_menu_background(batch, font, self.width, self.height)
         if font is not None:
             title = lang.get_or(self.title_key(), self.page.title())
             tw = font.width(title)
@@ -1117,7 +1290,14 @@ class LanguageScreen(Screen):
             languages if languages is not None else available_languages(self.root)
         )
         self.choice: str = self.settings.language
-        cx = width / 2.0
+        cx = math.floor(width / 2.0)
+        # options_ui.rs L3305-3382: заголовок y=4, поиск (cx-100,17,200x20),
+        # список (cx-110, top=36, 220x18, шаг 18), предупреждение y=h-45,
+        # Font (cx-154,h-28) + Done (cx+4,h-28).
+        self.search = TextInput(
+            cx - 100.0, 17.0, 200.0, h=20.0, max_length=64,
+            on_change=self._on_search,
+        )
         self.list = ScrollableList(
             x=cx - 110.0,
             y=36.0,
@@ -1129,19 +1309,42 @@ class LanguageScreen(Screen):
             on_select=self._on_select,
         )
         self.list.selected = self._index_of(self.choice)
+        self.font_button = Button(
+            cx - 154.0, height - 28.0, 150.0, MAIN_MENU_BUTTON_HEIGHT,
+            lang.get_or("options.font", "Font..."), on_click=self._open_font,
+        )
         self.done_button = Button(
-            cx - 100.0, height - 45.0, 200.0, MAIN_MENU_BUTTON_HEIGHT,
+            cx + 4.0, height - 28.0, 150.0, MAIN_MENU_BUTTON_HEIGHT,
             lang.get_or("gui.done", "Done"), on_click=self.apply,
         )
 
     def _index_of(self, code: str) -> Optional[int]:
-        for i, info in enumerate(self.languages):
+        for i, info in enumerate(self.list.items):
             if info.code == code:
                 return i
         return None
 
     def _on_select(self, index: int, info: LanguageInfo) -> None:
         self.choice = info.code
+
+    def _on_search(self, query: str) -> None:
+        """Фильтр поиска (options_ui.rs L3337-3342): label или код."""
+        q = query.lower()
+        if q:
+            self.list.items = [
+                info for info in self.languages
+                if q in info.label().lower() or q in info.code.lower()
+            ]
+        else:
+            self.list.items = list(self.languages)
+        self.list.scroll = 0.0
+        self.list.selected = self._index_of(self.choice)
+
+    def _open_font(self) -> None:
+        if self.stack is not None:
+            self.stack.push(OptionsSubScreen(
+                "font", self.settings, self.stack, self.width, self.height,
+            ))
 
     def set_language(self, code: str) -> Language:
         """Загрузить и сделать текущим язык ``code``; вернуть объект языка."""
@@ -1154,29 +1357,49 @@ class LanguageScreen(Screen):
     def apply(self) -> Language:
         """Кнопка Done: применить выбранный язык (``lang.set``)."""
         selected = self.list.selected
-        if selected is not None and 0 <= selected < len(self.languages):
-            self.choice = self.languages[selected].code
+        items = self.list.items
+        if selected is not None and 0 <= selected < len(items):
+            self.choice = items[selected].code
         return self.set_language(self.choice)
 
-    def handle_key(self, key: str, ch: Optional[str] = None) -> bool:
-        if key == "escape":
-            return self.apply() is not None
-        return False
-
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        solid(batch, font, 0.0, 0.0, self.width, self.height, BACKGROUND)
+        draw_menu_background(batch, font, self.width, self.height)
         if font is not None:
             title = lang.get_or("options.language.title", "Select Language")
             tw = font.width(title)
             draw_text(batch, font, title, (self.width - tw) / 2.0, 4.0, TITLE_COLOR)
+        self.search.render(batch, font)
         self.list.render(batch, font)
+        if font is not None:
+            warning = lang.get_or(
+                "options.languageAccuracyWarning",
+                "Language translations may not be 100% accurate",
+            )
+            if warning:
+                ww = font.width(warning)
+                draw_text(
+                    batch, font, warning, (self.width - ww) / 2.0,
+                    self.height - 45.0, LANGUAGE_WARNING_COLOR,
+                )
+        self.font_button.render(batch, font)
         self.done_button.render(batch, font)
 
     def handle_click(self, mx: float, my: float) -> bool:
+        if self.search.handle_click(mx, my):
+            return True
+        if self.font_button.handle_click(mx, my):
+            return True
         if self.list.handle_click(mx, my):
             return True
         if self.done_button.handle_click(mx, my):
             return True
+        return False
+
+    def handle_key(self, key: str, ch: Optional[str] = None) -> bool:
+        if self.search.handle_key(key) or (ch is not None and self.search.handle_char(ch)):
+            return True
+        if key == "escape":
+            return self.apply() is not None
         return False
 
     def handle_scroll(self, dy: float) -> bool:
@@ -1205,6 +1428,12 @@ __all__ = [
     "OptionsScreen",
     "OptionsSubScreen",
     "PACK_ROOT",
+    "PAGE_TITLES",
+    "MAIN_MENU_ICONS",
+    "LANGUAGE_WARNING_COLOR",
+    "MENU_BACKGROUND_SPRITE",
+    "MENU_BACKGROUND_TILE",
+    "draw_menu_background",
     "RENDER_DISTANCE_DEFAULT",
     "RENDER_DISTANCE_MAX",
     "RENDER_DISTANCE_MIN",

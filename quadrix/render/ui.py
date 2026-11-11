@@ -123,6 +123,9 @@ class Quad:
     u1: float
     v1: float
     color: int
+    #: Ключ текстуры в ``Batch.textures``. ``None`` — атлас шрифта
+    #: (PART 1); строка (например ``"gui"``) — спрайтовый атлас.
+    texture: Any = None
 
     def positions(self) -> list[tuple[float, float]]:
         """Четыре угла в порядке HudBatch.quad: TL, TR, BR, BL."""
@@ -474,6 +477,11 @@ class Batch:
 
     quads: list[Quad] = field(default_factory=list)
     texture: Any = None
+    #: Ключ текстуры -> GPU-текстура. Квады с ``texture="gui"`` биндят
+    #: ``textures["gui"]``; квады с ``texture=None`` — ``self.texture``.
+    textures: dict[Any, Any] = field(default_factory=dict)
+    #: Спрайтовый атлас (``GuiAtlas``), откуда кнопки/слайдеры берут UV.
+    atlas: Any = None
 
     def add_quad(self, quad: Quad) -> None:
         self.quads.append(quad)
@@ -484,12 +492,13 @@ class Batch:
     def clear(self) -> None:
         self.quads.clear()
 
-    def vertices(self) -> np.ndarray:
+    @staticmethod
+    def _vertices(quads: list[Quad]) -> np.ndarray:
         """Массив вершин ``(6*N, 8)`` float32 (два треугольника на квад)."""
-        n = len(self.quads)
+        n = len(quads)
         arr = np.empty((n * 6, 8), dtype=np.float32)
         i = 0
-        for q in self.quads:
+        for q in quads:
             positions = q.positions()
             uvs = q.uvs()
             r, g, b, a = rgba_channels(q.color)
@@ -501,6 +510,10 @@ class Batch:
                 i += 1
         return arr
 
+    def vertices(self, quads: Optional[list[Quad]] = None) -> np.ndarray:
+        """Массив вершин ``(6*N, 8)`` float32 (два треугольника на квад)."""
+        return self._vertices(self.quads if quads is None else quads)
+
     def flush(
         self,
         backend: Any,
@@ -508,25 +521,47 @@ class Batch:
         texture: Any = None,
         **kwargs: Any,
     ) -> int:
-        """Отрисовать накопленное одним вызовом ``backend.draw``.
+        """Отрисовать накопленное. Квады группируются по текстуре (в порядке
+        художника), на каждую группу — один ``backend.draw``.
 
         Возвращает число вершин (0, если нечего рисовать).
         """
         if not self.quads:
             return 0
-        data = self.vertices()
-        count = data.shape[0]
-        backend.draw(
-            data,
-            program,
-            texture if texture is not None else self.texture,
-            vertex_format="2f 2f 4f",
-            attributes=("in_pos", "in_uv", "in_color"),
-            count=count,
-            **kwargs,
-        )
+        default_tex = texture if texture is not None else self.texture
+        # UI — 2D: после Y-флипа проекции квады обходят по часовой стрелке,
+        # поэтому отсечение граней выключаем, а прозрачность включаем.
+        options: dict[str, Any] = {
+            "depth_test": False,
+            "cull_face": False,
+            "blend": True,
+        }
+        options.update(kwargs)
+        total = 0
+        i = 0
+        n = len(self.quads)
+        while i < n:
+            key = self.quads[i].texture
+            j = i + 1
+            while j < n and self.quads[j].texture == key:
+                j += 1
+            group = self.quads[i:j]
+            data = self._vertices(group)
+            count = data.shape[0]
+            gpu_tex = default_tex if key is None else self.textures.get(key, default_tex)
+            backend.draw(
+                data,
+                program,
+                gpu_tex,
+                vertex_format="2f 2f 4f",
+                attributes=("in_pos", "in_uv", "in_color"),
+                count=count,
+                **options,
+            )
+            total += count
+            i = j
         self.quads.clear()
-        return count
+        return total
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +581,12 @@ _SLIDER_HANDLE = rgba(200, 200, 200, 255)
 
 @dataclass
 class Button:
-    """Кнопка: прямоугольник, подпись и обработчик нажатия (порт ``ui::button``)."""
+    """Кнопка: прямоугольник, подпись и обработчик нажатия (порт ``ui::button``).
+
+    Спрайты: ``gui/sprites/widget/button[_highlighted|_disabled]`` —
+    nine-slice (настройки) или половинный растяг (главное меню,
+    ``title.rs``). Если атласа нет — FALLBACK: сплошная заливка.
+    """
 
     x: float
     y: float
@@ -556,6 +596,11 @@ class Button:
     on_click: Optional[Callable[[], None]] = None
     active: bool = True
     hovered: bool = False
+    #: ``True`` — стиль главного меню (левая/правая половины спрайта).
+    title_style: bool = False
+    #: Иконка-спрайт (кнопки-иконки главного меню); подпись не рисуется.
+    icon: Optional[str] = None
+    icon_size: float = 15.0
 
     def label_plain(self) -> str:
         if isinstance(self.label, Text):
@@ -586,34 +631,73 @@ class Button:
         *,
         shadow: bool = True,
     ) -> None:
-        """Добавить квады кнопки: фон + (если есть шрифт) центрированную подпись."""
-        if not self.active:
-            bg = _BUTTON_BG_DISABLED
-        elif self.hovered:
-            bg = _BUTTON_BG_HOVER
-        else:
-            bg = _BUTTON_BG
-        # Фон: белый пиксель атласа, чтобы пройти через текстуру шрифта.
-        if font is not None:
-            batch.add_quad(_solid(font, self.x, self.y, self.w, self.h, bg))
-        else:
-            batch.add_quad(
-                Quad(self.x, self.y, self.w, self.h, 0.0, 0.0, 1.0, 1.0, bg)
-            )
+        """Добавить квады кнопки: спрайт (или фон) + подпись/иконку.
+
+        Как ``title.rs`` (L3249-3276): фон-спрайт рисуется ВСЕГДА (в том
+        числе для кнопок-иконок), затем либо иконка (без подписи), либо
+        подпись.
+        """
+        atlas = getattr(batch, "atlas", None)
+        color = _BUTTON_TEXT if self.active else _BUTTON_TEXT_DISABLED
+        drawn = False
+        if atlas is not None:
+            sprite = atlas.button_sprite(self.active, self.hovered)
+            if self.title_style:
+                drawn = atlas.title_button(batch, sprite, self.x, self.y, self.w, self.h)
+            else:
+                drawn = atlas.nine_slice(batch, sprite, self.x, self.y, self.w, self.h)
+        if not drawn:
+            # FALLBACK: сплошная заливка (нет атласа/спрайта).
+            if not self.active:
+                bg = _BUTTON_BG_DISABLED
+            elif self.hovered:
+                bg = _BUTTON_BG_HOVER
+            else:
+                bg = _BUTTON_BG
+            if font is not None:
+                batch.add_quad(_solid(font, self.x, self.y, self.w, self.h, bg))
+            else:
+                batch.add_quad(
+                    Quad(self.x, self.y, self.w, self.h, 0.0, 0.0, 1.0, 1.0, bg)
+                )
+        if self.icon is not None:
+            # Кнопка-иконка: спрайт уже нарисован, подпись не рисуется.
+            self._render_icon(batch, atlas)
+            return
+        self._render_label(batch, font, color, shadow)
+
+    def _render_label(
+        self, batch: Batch, font: Optional[Font], color: int, shadow: bool
+    ) -> None:
         if font is None:
             return
         label = self.label_plain()
         if not label:
             return
         text_w = font.width(label)
+        # title.rs draw_label_at: центр кнопки, y + floor((h - 8) / 2).
         tx = self.x + (self.w - text_w) / 2.0
-        ty = self.y + (self.h - 8.0) / 2.0
-        color = _BUTTON_TEXT if self.active else _BUTTON_TEXT_DISABLED
+        ty = self.y + math.floor((self.h - 8.0) / 2.0)
         if shadow and self.active:
             batch.add_quads(
                 font.render(label, tx + 1.0, ty + 1.0, rgba(0, 0, 0, 160))
             )
         batch.add_quads(font.render(label, tx, ty, color))
+
+    def _render_icon(self, batch: Batch, atlas: Any) -> None:
+        sprite = self.icon
+        if sprite is None:
+            return
+        size = self.icon_size
+        # CenteredIcon: центр кнопки минус половина иконки (title.rs L3266).
+        ix = self.x + math.floor(self.w / 2.0) - math.floor(size / 2.0)
+        iy = self.y + 10.0 - math.floor(size / 2.0)
+        if atlas is not None and atlas.blit(batch, sprite, ix, iy, size, size):
+            return
+        # FALLBACK: без атласа рисуем заливку в цвете кнопки.
+        batch.add_quad(
+            Quad(ix, iy, size, size, 0.0, 0.0, 1.0, 1.0, _BUTTON_BG)
+        )
 
 
 @dataclass
@@ -632,6 +716,9 @@ class Slider:
     active: bool = True
     dragging: bool = False
     handle_w: float = 8.0
+    hovered: bool = False
+    focused: bool = False
+    can_change_value: bool = False
 
     def fraction(self) -> float:
         """Доля 0..1 (как ванильный ``AbstractSliderButton.value``)."""
@@ -663,23 +750,52 @@ class Slider:
         return self.value != before
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        """Дорожка + ручка (+ подпись, если есть шрифт)."""
-        if font is None:
-            batch.add_quad(
-                Quad(self.x, self.y, self.w, self.h, 0.0, 0.0, 1.0, 1.0, _SLIDER_TRACK)
-            )
-            return
-        batch.add_quad(_solid(font, self.x, self.y, self.w, self.h, _SLIDER_TRACK))
+        """Дорожка + ручка + подпись (порт ``ui::slider_ext``).
+
+        Спрайты ``gui/sprites/widget/slider`` и ``slider_handle``; без
+        атласа — FALLBACK: сплошная заливка.
+        """
+        atlas = getattr(batch, "atlas", None)
         hx = self.x + math.floor(self.fraction() * (self.w - self.handle_w))
-        batch.add_quad(
-            _solid(font, hx, self.y, self.handle_w, self.h, _SLIDER_HANDLE)
-        )
+        track_sprite, handle_sprite = self._sprites()
+        drawn = False
+        if atlas is not None:
+            t = atlas.nine_slice(batch, track_sprite, self.x, self.y, self.w, self.h)
+            h = atlas.nine_slice(batch, handle_sprite, hx, self.y, self.handle_w, self.h)
+            drawn = t and h
+        if not drawn:
+            if font is not None:
+                batch.add_quad(_solid(font, self.x, self.y, self.w, self.h, _SLIDER_TRACK))
+                batch.add_quad(_solid(font, hx, self.y, self.handle_w, self.h, _SLIDER_HANDLE))
+            else:
+                batch.add_quad(
+                    Quad(self.x, self.y, self.w, self.h, 0.0, 0.0, 1.0, 1.0, _SLIDER_TRACK)
+                )
+                batch.add_quad(
+                    Quad(hx, self.y, self.handle_w, self.h, 0.0, 0.0, 1.0, 1.0, _SLIDER_HANDLE)
+                )
+        if font is None:
+            return
         label = self.label.plain() if isinstance(self.label, Text) else str(self.label)
         if label:
             text_w = font.width(label)
             tx = self.x + (self.w - text_w) / 2.0
             ty = self.y + (self.h - 8.0) / 2.0
             batch.add_quads(font.render(label, tx, ty, _BUTTON_TEXT))
+
+    def _sprites(self) -> tuple[str, str]:
+        """``ui.rs::slider_sprites_ext`` — дорожка и ручка."""
+        track = (
+            "gui/sprites/widget/slider_highlighted"
+            if self.dragging or (self.active and self.focused and not self.can_change_value)
+            else "gui/sprites/widget/slider"
+        )
+        handle = (
+            "gui/sprites/widget/slider_handle_highlighted"
+            if self.active and (self.hovered or self.can_change_value or self.dragging)
+            else "gui/sprites/widget/slider_handle"
+        )
+        return track, handle
 
 
 def _solid(

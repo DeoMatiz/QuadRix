@@ -33,11 +33,13 @@ import numpy as np
 
 from quadrix.core import lang
 from quadrix.core.lang import Language
+from quadrix.render.gui_atlas import GUI_TEXTURE, load_gui_atlas
 from quadrix.render.menu import (
     FOV_DEFAULT,
     MASTER_VOLUME_DEFAULT,
     PACK_ROOT,
     RENDER_DISTANCE_DEFAULT,
+    LanguageScreen,
     MainMenu,
     OptionsScreen,
     Screen,
@@ -47,6 +49,7 @@ from quadrix.render.menu import (
     load_language,
     solid,
 )
+from quadrix.render.panorama import Panorama, Rotation, load_panorama
 from quadrix.render.ui import Batch, Button, Font
 
 __all__ = [
@@ -185,6 +188,13 @@ class App:
         self.batch = Batch()
         self.program: Any = None
         self.texture: Any = None
+        #: Спрайтовый атлас GUI + GPU-текстура (кнопки/логотип/фон/иконки).
+        self.atlas: Any = None
+        self.gui_texture: Any = None
+        #: Панорама главного меню (кубмап) + её поворот/таймер.
+        self.panorama: Optional[Panorama] = None
+        self.panorama_rotation = Rotation()
+        self._started = time.monotonic()
 
         self.ticks = 0
         self.frames = 0
@@ -224,7 +234,15 @@ class App:
             on_singleplayer=self.open_singleplayer,
             on_multiplayer=self.open_multiplayer,
             on_options=self.open_options,
+            on_realms=self._noop,
+            on_friends=self._noop,
+            on_language=self.open_language,
+            on_accessibility=self._noop,
         )
+
+    def _noop(self) -> None:
+        """Заглушка действия (Friend/Realms/Accessibility — вне PART 3)."""
+        _log("действие недоступно в PART 3")
 
     def _rebuild_screens(self) -> None:
         """Перестроить экраны (после смены языка переводы должны обновиться)."""
@@ -253,6 +271,18 @@ class App:
         )
         self.screen_stack.push(screen)
         _log("экран: OptionsScreen")
+        return screen
+
+    def open_language(self) -> LanguageScreen:
+        """MainMenu → LanguageScreen (кнопка-иконка Language)."""
+        screen = LanguageScreen(
+            settings=self.settings,
+            stack=self.screen_stack,
+            width=self.screen_stack.current.width,
+            height=self.screen_stack.current.height,
+        )
+        self.screen_stack.push(screen)
+        _log("экран: LanguageScreen")
         return screen
 
     def open_singleplayer(self) -> GameScreen:
@@ -349,6 +379,10 @@ class App:
             self.font = self._safe_font()
         self.set_language(self.settings.language)
         self._create_ui_resources()
+        # Ввод: backend вызывает self.handle_event на click/key/scroll/resize.
+        set_handler = getattr(self.backend, "set_event_handler", None)
+        if callable(set_handler):
+            set_handler(self.handle_event)
         _log(f"setup: backend={type(self.backend).__name__ if self.backend else None}")
         return self
 
@@ -381,6 +415,24 @@ class App:
             and callable(create_texture)
         ):
             self.texture = create_texture(self.font.atlas_image)
+
+        # Спрайтовый атлас ванильных виджетов (кнопки, логотип, фон, иконки).
+        if self.atlas is None:
+            self.atlas = load_gui_atlas()
+        if (
+            self.atlas is not None
+            and self.gui_texture is None
+            and callable(create_texture)
+        ):
+            self.gui_texture = create_texture(self.atlas.image)
+        self.batch.atlas = self.atlas
+        if self.gui_texture is not None:
+            self.batch.textures[GUI_TEXTURE] = self.gui_texture
+
+        # Панорама главного меню (кубмап + поворот).
+        if self.panorama is None:
+            self.panorama = Panorama(load_panorama())
+        self.panorama.prepare(self.backend)
 
     def _set_ui_projection(self) -> None:
         """Записать ортопроекцию (GUI-пиксели → clip space) в ``ui.vert``.
@@ -438,8 +490,19 @@ class App:
             return bool(self.screen_stack.handle_key(key, ch))
         if kind == "scroll":
             return bool(self.screen_stack.handle_scroll(float(args[0])))
+        if kind == "move":
+            # Курсор переместился — обновляем подсветку наведения (hover).
+            return bool(self.screen_stack.handle_move(float(args[0]), float(args[1])))
         if kind == "resize":
+            self.width = int(args[0]) or self.width
+            self.height = int(args[1]) or self.height
+            # GL viewport тоже привязан к размеру кадрового буфера.
+            resize = getattr(self.backend, "resize", None)
+            if callable(resize):
+                resize(self.width, self.height)
             self.screen_stack.on_resize(float(args[0]), float(args[1]))
+            # Проекция привязана к размеру framebuffer — пересчитываем.
+            self._set_ui_projection()
             return True
         return False
 
@@ -450,17 +513,44 @@ class App:
             self.game.render_settings = self.render_settings
 
     def render(self) -> int:
-        """Кадр: экран → батч → один ``backend.draw``.
+        """Кадр: очистка + панорама + экран → батч → ``backend.draw``.
 
-        Возвращает число вершин (0, если backend нет или нечего рисовать).
+        Один ``clear()`` на кадр (панорама и UI не затирают друг друга).
+        Панорама кубмапа рисуется только под главным меню
+        (``game.rs::shows_panorama``). Возвращает число вершин (0, если
+        backend нет или нечего рисовать).
         """
         self._apply_settings()
         self.batch.clear()
-        self.screen_stack.render(self.batch, self.font)
-        if self.backend is None:
-            self.batch.clear()
+        backend = self.backend
+        if backend is None:
             return 0
-        return self.batch.flush(self.backend, self.program, self.texture)
+
+        # Очистка кадра ровно один раз: иначе каждый draw стирал бы панораму.
+        clear = getattr(backend, "clear", None)
+        if callable(clear):
+            clear()
+
+        # Панорама — фон главного меню (только MainMenu, как shows_panorama()).
+        if self.panorama is not None and isinstance(
+            self.screen_stack.current, MainMenu
+        ):
+            yaw = self.panorama_rotation.update(
+                time.monotonic(), self._panorama_speed()
+            )
+            self.panorama.draw(backend, self.width, self.height, yaw)
+
+        # Спрайтовый атлас нужен виджетам для nine-slice/логотипа.
+        self.batch.atlas = self.atlas
+        self.screen_stack.render(self.batch, self.font)
+        return self.batch.flush(backend, self.program, self.texture)
+
+    def _panorama_speed(self) -> float:
+        """Скорость вращения панорамы (``options_file.rs``: 1.0 по умолчанию)."""
+        try:
+            return float(self.settings.file.get("panoramaScrollSpeed", 1.0))
+        except (TypeError, ValueError):  # noqa: BLE001 - битое значение файла
+            return 1.0
 
     def loop(self, max_ticks: int = 0, max_frames: int = 0) -> int:
         """Главный цикл: фиксированный тик 20 Гц, рендер в каждом кадре.

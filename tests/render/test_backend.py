@@ -149,6 +149,7 @@ def test_moderngl_draw_present_close_smoke() -> None:
         assert vertices.shape == (36, 8)
 
         mvp = np.identity(4, dtype=np.float32)
+        backend.clear()
         backend.draw(vertices, program, texture, count=vertices.shape[0], mvp=mvp)
 
         # скриншот читается ДО present()

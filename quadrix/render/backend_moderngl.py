@@ -8,7 +8,7 @@ GLSL 330 core — moderngl создаёт OpenGL 3.3 core-контекст.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 
@@ -38,6 +38,14 @@ class ModernglBackend:
         self.ctx: Any = None
         self._glfw: Any = None
         self._closed = False
+
+        #: Обработчик UI-событий ``handler(kind, *args)`` — назначает ``App``.
+        self.event_handler: Optional[Callable[..., None]] = None
+        #: Последняя позиция курсора в оконных координатах (обновляет glfw).
+        self._mouse_x: float = 0.0
+        self._mouse_y: float = 0.0
+        #: glfw key-code -> строковое имя, понятное ``ScreenStack.handle_key``.
+        self._key_names: dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # контекст / окно
@@ -85,6 +93,29 @@ class ModernglBackend:
             # стандартное состояние сцены: глубина + отсечение задних граней
             self.ctx.enable(moderngl.DEPTH_TEST)
             self.ctx.enable(moderngl.CULL_FACE)
+
+            # Обратные вызовы ввода: без них glfw только опрашивается, а
+            # клики/клавиши не доходят до ``App.handle_event``.
+            self._key_names = {
+                glfw.KEY_ESCAPE: "escape",
+                glfw.KEY_ENTER: "enter",
+                glfw.KEY_KP_ENTER: "enter",
+                glfw.KEY_BACKSPACE: "backspace",
+                glfw.KEY_DELETE: "delete",
+                glfw.KEY_LEFT: "left",
+                glfw.KEY_RIGHT: "right",
+                glfw.KEY_UP: "up",
+                glfw.KEY_DOWN: "down",
+                glfw.KEY_HOME: "home",
+                glfw.KEY_END: "end",
+                glfw.KEY_TAB: "tab",
+            }
+            glfw.set_cursor_pos_callback(window, self._on_cursor)
+            glfw.set_mouse_button_callback(window, self._on_mouse_button)
+            glfw.set_scroll_callback(window, self._on_scroll)
+            glfw.set_key_callback(window, self._on_key)
+            glfw.set_char_callback(window, self._on_char)
+            glfw.set_framebuffer_size_callback(window, self._on_framebuffer_size)
         except Exception:
             # не оставляем висящее окно/инициализированный glfw
             if self.window is not None:
@@ -145,6 +176,9 @@ class ModernglBackend:
         attributes: Sequence[str] = ("in_pos", "in_normal", "in_uv"),
         count: Optional[int] = None,
         mvp: Optional[np.ndarray] = None,
+        depth_test: bool = True,
+        cull_face: bool = True,
+        blend: bool = False,
     ) -> None:
         """Один draw call.
 
@@ -152,6 +186,9 @@ class ModernglBackend:
         создаётся на месте и освобождается после кадра).
         ``texture`` — ``moderngl.Texture``; если задана, биндится в unit 0.
         ``count`` — число вершин (по умолчанию весь буфер).
+        ``depth_test``/``cull_face``/``blend`` — состояние GL для вызова:
+        2D-UI после Y-флипа проекции обходит по часовой стрелке и требует
+        ``cull_face=False`` и ``blend=True``, иначе всё отсекается/без альфы.
         """
         if self.ctx is None:
             raise RuntimeError("[QuadRix] create_context() не вызван")
@@ -162,6 +199,27 @@ class ModernglBackend:
             raise RuntimeError(
                 "[QuadRix] program not initialized, call setup() first"
             )
+
+        import moderngl
+
+        # Каждый draw выставляет состояние явно, чтобы результат не зависел
+        # от предыдущего вызова (UI-батч переключает на 2D-режим).
+        if cull_face:
+            self.ctx.enable(moderngl.CULL_FACE)
+        else:
+            self.ctx.disable(moderngl.CULL_FACE)
+        if depth_test:
+            self.ctx.enable(moderngl.DEPTH_TEST)
+        else:
+            self.ctx.disable(moderngl.DEPTH_TEST)
+        if blend:
+            self.ctx.enable(moderngl.BLEND)
+            self.ctx.blend_func = (
+                moderngl.SRC_ALPHA,
+                moderngl.ONE_MINUS_SRC_ALPHA,
+            )
+        else:
+            self.ctx.disable(moderngl.BLEND)
 
         owns_buffer = False
         buffer = vbo
@@ -185,12 +243,79 @@ class ModernglBackend:
             program, [(buffer, vertex_format, *attributes)]
         )
         try:
-            self.ctx.clear(*self.clear_color)
+            # Очистка кадра — отдельным вызовом ``clear()`` (один раз за
+            # кадр), иначе каждый draw стирает панораму/предыдущий слой.
             vao.render(self._triangles(), vertices=count)
         finally:
             vao.release()
             if owns_buffer:
                 buffer.release()
+
+    def clear(self) -> None:
+        """Очистить кадр цветом ``clear_color`` (вызывается один раз за кадр)."""
+        if self.ctx is None:
+            raise RuntimeError("[QuadRix] create_context() не вызван")
+        self.ctx.clear(*self.clear_color)
+
+    def resize(self, width: int, height: int) -> None:
+        """Обновить размер кадрового буфера и GL viewport (resize окна)."""
+        self.width = int(width)
+        self.height = int(height)
+        if self.ctx is not None:
+            self.ctx.viewport = (0, 0, int(width), int(height))
+
+    # ------------------------------------------------------------------
+    # панорама главного меню (порт gfx/panorama.rs)
+    # ------------------------------------------------------------------
+
+    def create_cube_texture(self, faces: Any) -> Any:
+        """Залить кубмап-текстуру из ``Faces`` (6 лиц, face-major).
+
+        Порт ``CubeMapTexture``: ``glTexImage2D``/``texture_cube`` ждёт шесть
+        квадратных лиц подряд, каждое с перевёрнутыми по Y строками (это уже
+        сделано в ``Faces``). Линейная фильтрация (``blur = true``).
+        """
+        if self.ctx is None:
+            raise RuntimeError("[QuadRix] create_context() не вызван")
+        import moderngl
+
+        size = int(faces.size)
+        cube = self.ctx.texture_cube((size, size), 4, faces.bytes())
+        cube.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        return cube
+
+    def draw_panorama(
+        self, cube: Any, program: Any, projection: np.ndarray
+    ) -> None:
+        """Нарисовать куб панорамы (``gl_VertexID``-куб, без vertex buffer).
+
+        Порт ``Panorama::draw``: 36 вершин, кубмап на samplerCube, матрица
+        проекции в uniform ``projection`` (column-major).
+        """
+        if self.ctx is None:
+            raise RuntimeError("[QuadRix] create_context() не вызван")
+        if program is None or cube is None:
+            return
+        import moderngl
+
+        # Куб: без отсечения граней (вид изнутри), глубина не пишется.
+        self.ctx.disable(moderngl.CULL_FACE)
+        self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.disable(moderngl.BLEND)
+
+        if "projection" in program:
+            program["projection"].write(
+                np.ascontiguousarray(projection, dtype=np.float32).T.tobytes()
+            )
+        cube.use(location=0)
+        if "panorama" in program:
+            program["panorama"] = 0
+
+        vao = self.ctx.vertex_array(program, [])
+        try:
+            vao.render(moderngl.TRIANGLES, vertices=36)
+        finally:
+            vao.release()
 
     @staticmethod
     def _triangles() -> int:
@@ -215,7 +340,10 @@ class ModernglBackend:
         # окно и кадровый буфер могут отличаться
         fb_width, fb_height = self.ctx.screen.size
         data = self.ctx.screen.read(components=4, alignment=1)
-        return np.frombuffer(data, dtype=np.uint8).reshape(fb_height, fb_width, 4)
+        pixels = np.frombuffer(data, dtype=np.uint8).reshape(fb_height, fb_width, 4)
+        # glReadPixels отдаёт строки снизу вверх — переворачиваем, чтобы
+        # первая строка массива соответствовала верху экрана.
+        return np.flipud(pixels)
 
     def present(self) -> None:
         """Показать кадр. Скриншот (если нужен) — строго до этого вызова."""
@@ -233,6 +361,82 @@ class ModernglBackend:
         if self._glfw is None or self.window is None:
             return True
         return bool(self._glfw.window_should_close(self.window))
+
+    # ------------------------------------------------------------------
+    # ввод: glfw callbacks -> event_handler (App.handle_event)
+    # ------------------------------------------------------------------
+
+    def set_event_handler(self, handler: Optional[Callable[..., None]]) -> None:
+        """Назначить обработчик UI-событий ``handler(kind, *args)``."""
+        self.event_handler = handler
+
+    def _emit(self, kind: str, *args: Any) -> None:
+        """Передать событие обработчику, если он установлен."""
+        handler = self.event_handler
+        if handler is not None:
+            handler(kind, *args)
+
+    def _to_framebuffer(self, x: float, y: float) -> tuple[float, float]:
+        """Оконные координаты курсора → пиксели кадрового буфера (DPI).
+
+        Проекция UI строится под размер framebuffer, поэтому клики нужно
+        привести к тем же пикселям.
+        """
+        glfw = self._glfw
+        if glfw is None or self.window is None:
+            return float(x), float(y)
+        win_w, win_h = glfw.get_window_size(self.window)
+        fb_w, fb_h = glfw.get_framebuffer_size(self.window)
+        if win_w > 0 and win_h > 0:
+            return float(x) * fb_w / win_w, float(y) * fb_h / win_h
+        return float(x), float(y)
+
+    def _on_cursor(self, window: Any, x: float, y: float) -> None:
+        """glfw: курсор переместился — запоминаем позицию и шлём ``move``."""
+        self._mouse_x = float(x)
+        self._mouse_y = float(y)
+        fx, fy = self._to_framebuffer(x, y)
+        self._emit("move", fx, fy)
+
+    def _on_mouse_button(
+        self, window: Any, button: int, action: int, mods: int
+    ) -> None:
+        """glfw: нажатие ЛКМ → ``("click", x, y)``."""
+        glfw = self._glfw
+        if glfw is None:
+            return
+        if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
+            x, y = self._to_framebuffer(self._mouse_x, self._mouse_y)
+            self._emit("click", x, y)
+
+    def _on_scroll(self, window: Any, xoffset: float, yoffset: float) -> None:
+        """glfw: колесо мыши → ``("scroll", dy)``."""
+        self._emit("scroll", float(yoffset))
+
+    def _on_key(
+        self, window: Any, key: int, scancode: int, action: int, mods: int
+    ) -> None:
+        """glfw: спецклавиши → ``("key", name, None)``."""
+        glfw = self._glfw
+        if glfw is None or action == glfw.RELEASE:
+            return
+        name = self._key_names.get(key)
+        if name is not None:
+            self._emit("key", name, None)
+
+    def _on_char(self, window: Any, codepoint: int) -> None:
+        """glfw: печатный символ → ``("key", "", ch)``."""
+        if codepoint < 32:
+            return
+        try:
+            ch = chr(codepoint)
+        except ValueError:
+            return
+        self._emit("key", "", ch)
+
+    def _on_framebuffer_size(self, window: Any, width: int, height: int) -> None:
+        """glfw: размер кадрового буфера изменился → ``("resize", w, h)``."""
+        self._emit("resize", float(width), float(height))
 
     def close(self) -> None:
         """Закрыть окно и завершить glfw. Повторный вызов безопасен."""

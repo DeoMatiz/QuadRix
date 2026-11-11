@@ -61,23 +61,32 @@ def test_main_menu_render_adds_quads_with_and_without_font() -> None:
     menu = MainMenu(854.0, 480.0)
     batch = Batch()
     menu.render(batch, None)
-    # фон + 4 кнопки
-    assert len(batch.quads) == 5
+    # 5 текстовых кнопок (по фону) + 3 иконки (фон + иконка-фолбэк) = 11.
+    assert len(batch.quads) == 11
 
     batch2 = Batch()
     menu.render(batch2, _font())
-    assert len(batch2.quads) > 5  # добавлены глифы заголовка/подписей
+    assert len(batch2.quads) > 11  # добавлены глифы подписей
 
 
 # ---------------------------------------------------------------------------
-# MainMenu: 4 кнопки и их геометрия
+# MainMenu: кнопки и их геометрия (title.rs::Mode::Main)
 # ---------------------------------------------------------------------------
 
-def test_main_menu_four_buttons() -> None:
+def test_main_menu_eight_buttons() -> None:
     menu = MainMenu(854.0, 480.0)
     labels = [b.label_plain() for b in menu.buttons]
-    assert labels == ["Singleplayer", "Multiplayer", "Options...", "Quit Game"]
-    assert len(menu.buttons) == 4
+    assert labels[:5] == [
+        "Singleplayer", "Multiplayer", "Minecraft Realms", "Options...", "Quit Game",
+    ]
+    assert len(menu.buttons) == 8
+    # три кнопки-иконки: Friends / Language / Accessibility (title.rs L1824-1847).
+    assert [b.icon for b in menu.buttons[5:]] == [
+        "gui/sprites/friends/friends",
+        "gui/sprites/icon/language",
+        "gui/sprites/icon/accessibility",
+    ]
+    assert all(b.title_style for b in menu.buttons)
 
 
 def test_main_menu_button_geometry_matches_rust() -> None:
@@ -85,12 +94,18 @@ def test_main_menu_button_geometry_matches_rust() -> None:
     menu = MainMenu(854.0, 480.0)
     cx = 854 // 2
     y = 480 // 4 + 48
-    single, multi, options, quit_btn = menu.buttons
+    single, multi, realms, options, quit_btn = menu.buttons[:5]
     assert (single.x, single.y, single.w) == (float(cx - 100), float(y), 200.0)
     assert (multi.x, multi.y) == (float(cx - 100), float(y + 24))
+    assert (realms.x, realms.y) == (float(cx - 100), float(y + 48))
     # Options и Quit — по 98 в одной строке на y+96 (шаг 24 * 4).
     assert (options.x, options.y, options.w) == (float(cx - 100), float(y + 96), 98.0)
     assert (quit_btn.x, quit_btn.y) == (float(cx + 2), float(y + 96))
+    # иконки: (cx-34 + i*24, y+72), 20x20.
+    for i, button in enumerate(menu.buttons[5:]):
+        assert (button.x, button.y, button.w, button.h) == (
+            float(cx - 34 + i * 24), float(y + 72), 20.0, 20.0,
+        )
 
 
 def test_main_menu_click_options_pushes_options_screen() -> None:
@@ -98,7 +113,7 @@ def test_main_menu_click_options_pushes_options_screen() -> None:
     stack = ScreenStack(menu)
     menu.on_options = lambda: stack.push(OptionsScreen(stack=stack))
 
-    opts = menu.buttons[2]  # Options...
+    opts = menu.buttons[3]  # Options...
     hit = opts.handle_click(opts.x + opts.w / 2.0, opts.y + opts.h / 2.0)
     assert hit is True
     assert stack.depth() == 2

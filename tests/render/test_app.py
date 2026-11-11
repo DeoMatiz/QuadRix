@@ -23,6 +23,7 @@ from quadrix.render.app import App, GameScreen, RenderSettings
 from quadrix.render.menu import (
     MainMenu,
     OptionsScreen,
+    ScreenStack,
     Settings,
     load_language,
 )
@@ -60,6 +61,10 @@ class FakeBackend:
         self.presents = 0
         self.closed = 0
         self.draws: list[tuple[object, dict]] = []
+        self.event_handler = None
+
+    def set_event_handler(self, handler) -> None:
+        self.event_handler = handler
 
     def create_context(self) -> object:
         self.created += 1
@@ -161,7 +166,7 @@ def test_app_handle_event_click_opens_options() -> None:
     menu = app.screen_stack.current
     assert isinstance(menu, MainMenu)
 
-    options = menu.buttons[2]  # Options...
+    options = menu.buttons[3]  # Options... (0=Single,1=Multi,2=Realms,3=Options)
     x, y = _button_center(options)
     assert app.handle_event("click", x, y) is True
 
@@ -315,6 +320,11 @@ class UiBackend(FakeBackend):
         self.image = image
         return object()
 
+    def draw(self, vbo, program=None, texture=None, **kwargs) -> None:
+        self.draw_program = program
+        self.draw_texture = texture
+        super().draw(vbo, program, texture, **kwargs)
+
 
 class _StubFont:
     """Мини-шрифт: только ``atlas_image`` (нужен ``setup`` для текстуры)."""
@@ -332,8 +342,9 @@ def test_app_setup_creates_ui_program_and_texture() -> None:
 
     assert app.program is not None
     assert app.texture is not None
-    assert backend.pipelines == 1
-    assert backend.textures == 1
+    # UI-пайплайн + панорама; атлас шрифта + спрайтовый атлас GUI.
+    assert backend.pipelines == 2
+    assert backend.textures == 2
 
 
 def test_app_setup_writes_ui_projection() -> None:
@@ -358,3 +369,192 @@ def test_moderngl_draw_requires_program() -> None:
 
     with pytest.raises(RuntimeError, match="program not initialized"):
         backend.draw(data, None)
+
+
+# ---------------------------------------------------------------------------
+# Render: проекция, present, состояние 2D-отрисовки
+# ---------------------------------------------------------------------------
+
+def test_render_sets_projection_and_draws() -> None:
+    """render() идёт через UI-программу и с записанной ортопроекцией."""
+    backend = UiBackend()
+    app = App.init(backend, Settings(), width=320, height=240)
+
+    app.setup()
+    assert "projection" in backend.program.uniforms
+
+    vertices = app.render()
+
+    assert vertices > 0
+    # Квады группируются по текстуре (спрайты GUI + глифы атласа шрифта),
+    # поэтому draw-вызовов несколько; все — через UI-программу.
+    assert len(backend.draws) >= 1
+    assert backend.draw_program is backend.program
+
+
+def test_render_calls_present() -> None:
+    """loop() обязан вызвать backend.present() (swap_buffers) на кадр."""
+    backend = UiBackend()
+    app = App.init(backend, Settings(), width=320, height=240)
+
+    app.loop(max_frames=2)
+
+    assert backend.presents >= 1
+
+
+def test_batch_flush_requests_2d_state() -> None:
+    """Batch.flush просит backend отключить отсечение и включить blend."""
+    from quadrix.render.ui import Batch, Quad, rgba
+
+    backend = FakeBackend()
+    batch = Batch()
+    batch.add_quad(Quad(0, 0, 10, 10, 0.0, 0.0, 1.0, 1.0, rgba(255, 0, 0, 255)))
+
+    count = batch.flush(backend, program=object(), texture=object())
+
+    assert count == 6
+    _vbo, kwargs = backend.draws[0]
+    assert kwargs["cull_face"] is False
+    assert kwargs["depth_test"] is False
+    assert kwargs["blend"] is True
+
+
+class _RecordingVao:
+    def __init__(self, events: list) -> None:
+        self._events = events
+
+    def render(self, mode, vertices: int) -> None:
+        self._events.append(("render", mode, vertices))
+
+    def release(self) -> None:
+        self._events.append(("release",))
+
+
+class _RecordingBuffer:
+    size = 96
+
+    def release(self) -> None:
+        return None
+
+
+class _RecordingCtx:
+    """Мини-контекст moderngl: записывает enable/disable/clear."""
+
+    def __init__(self) -> None:
+        self.events: list = []
+        self.blend_func = None
+
+    def enable(self, flag) -> None:
+        self.events.append(("enable", flag))
+
+    def disable(self, flag) -> None:
+        self.events.append(("disable", flag))
+
+    def buffer(self, data) -> _RecordingBuffer:
+        return _RecordingBuffer()
+
+    def vertex_array(self, program, attributes) -> _RecordingVao:
+        return _RecordingVao(self.events)
+
+    def clear(self, *color) -> None:
+        self.events.append(("clear", color))
+
+
+def test_moderngl_draw_sets_2d_state() -> None:
+    """2D-draw выключает CULL_FACE/DEPTH_TEST и включает BLEND."""
+    import moderngl
+
+    from quadrix.render.backend_moderngl import ModernglBackend
+
+    backend = ModernglBackend()
+    backend.ctx = _RecordingCtx()
+    data = np.zeros((3, 8), dtype=np.float32)
+
+    backend.draw(
+        data, object(), None,
+        count=3, cull_face=False, depth_test=False, blend=True,
+    )
+
+    events = backend.ctx.events
+    assert ("disable", moderngl.CULL_FACE) in events
+    assert ("disable", moderngl.DEPTH_TEST) in events
+    assert ("enable", moderngl.BLEND) in events
+    assert any(e[0] == "render" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# Input: события backend → App.handle_event → ScreenStack
+# ---------------------------------------------------------------------------
+
+class _RecordingScreen:
+    """Экран-шпион: фиксирует клики/клавиши/скролл/resize."""
+
+    def __init__(self) -> None:
+        self.width = 320.0
+        self.height = 240.0
+        self.clicks: list = []
+        self.keys: list = []
+        self.scrolls: list = []
+        self.resizes: list = []
+
+    def handle_click(self, mx: float, my: float) -> bool:
+        self.clicks.append((mx, my))
+        return True
+
+    def handle_key(self, key: str, ch=None) -> bool:
+        self.keys.append((key, ch))
+        return True
+
+    def handle_scroll(self, dy: float) -> bool:
+        self.scrolls.append(dy)
+        return True
+
+    def on_resize(self, width: float, height: float) -> None:
+        self.resizes.append((width, height))
+
+    def render(self, batch, font=None) -> None:
+        return None
+
+
+def test_click_dispatches_to_screen_stack() -> None:
+    """App.handle_event('click') → ScreenStack.handle_click (mock-экран)."""
+    app = App.init(FakeBackend(), Settings())
+    screen = _RecordingScreen()
+    app.screen_stack = ScreenStack(screen)
+
+    handled = app.handle_event("click", 12.0, 34.0)
+
+    assert handled is True
+    assert screen.clicks == [(12.0, 34.0)]
+
+
+def test_backend_event_handler_dispatches() -> None:
+    """setup() вешает App.handle_event на backend; событие доходит до экрана."""
+    backend = UiBackend()
+    app = App.init(backend, Settings(), width=320, height=240)
+    screen = _RecordingScreen()
+    app.screen_stack = ScreenStack(screen)
+
+    app.setup()
+    assert backend.event_handler is not None
+
+    backend.event_handler("click", 5.0, 6.0)
+    backend.event_handler("scroll", 1.0)
+
+    assert screen.clicks == [(5.0, 6.0)]
+    assert screen.scrolls == [1.0]
+
+
+def test_handle_event_resize_updates_projection() -> None:
+    """resize пересчитывает проекцию под новый размер кадрового буфера."""
+    backend = UiBackend()
+    app = App.init(backend, Settings(), width=320, height=240)
+
+    app.setup()
+    first = backend.program.uniforms["projection"]
+
+    assert app.handle_event("resize", 640.0, 480.0) is True
+
+    assert app.width == 640
+    assert app.height == 480
+    assert backend.program.uniforms["projection"] != first
