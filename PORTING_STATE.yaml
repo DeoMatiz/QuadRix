@@ -1533,11 +1533,21 @@ files:
     status: pending
     note: "ParticleType enum."
 
-  - rust: horizon-core/src/nbt_path.rs
-    python: quadrix/core/nbt_path.py
-    test: tests/core/test_nbt_path.py
-    status: pending
-    note: "NBT path (data get, execute if data)."
+  - rust: horizon-client-core/src/nbt_path.rs
+    python: quadrix/core/nbt_path.py
+    test: tests/core/test_nbt_path.py
+    status: done
+    lines_python: 970
+    note: "NbtPathArgument: разбор пути (Child/MatchChild/AllElements/Index/
+      MatchElement/MatchRoot), get/count/set/remove/insert/get_or_create,
+      parse/parse_prefix и is_field_path. compare_nbt (частичное сравнение),
+      элементы числовых массивов (Byte/Int/Long -> Tag, запись через
+      int_value/long_value с насыщением как Rust `as`), too_deep(512),
+      CollectionError (path/expected_list/invalid_index). Синтаксис как в
+      Rust: wildcard это `[]`, `*` — обычный символ имени. PathError.args
+      переопределён свойством (конфликт с Exception.args). Tag
+      переиспользован из quadrix/world/nbt.py, SNBT parse/to_snbt — из
+      quadrix/core/snbt.py. 25 tests (реальный movement-properties.nbt)."
 
   - rust: horizon-core/src/nbt_value.rs
     python: quadrix/core/nbt_value.py
