@@ -143,11 +143,28 @@ files:
       Rust jmath.rs/trig.rs vectors bit-exact. FALLBACK: math.pow edge cases
       (0^-n) and math.cbrt for <3.11; math.fma for aarch64 on <3.13.
 
-  - rust: horizon-core/src/random/*.rs
-    python: quadrix/core/random.py
-    test: tests/core/test_random.py
-    status: pending
-    note: "Random (Java-compatible), positional random, worldgen random."
+  - rust: horizon-core/src/random/*.rs
+    python: quadrix/core/random.py
+    test: tests/core/test_random.py
+    status: done
+    lines_python: 718
+    note: >-
+      Java-compatible RNGs and positional factories, no platform RNG.
+      LegacyRandom (48-bit LCG: state * 0x5DEECE66D + 0xB & MASK, next_int,
+      next_int_bound with Java power-of-two branch + signed-overflow rejection
+      sampling, sign-extended next_long, next_float/next_double,
+      MarsagliaPolarGaussian cache), XoroshiroRandom (Xoroshiro128++,
+      zero-state fallback, next_int_bound via 32x32 multiply + threshold),
+      mix_stafford13, MD5 seed_from_hash/_utf16 (RFC 1321, lone surrogate -> '?'),
+      LegacyPositionalRandom / XoroshiroPositionalRandom with at/from_seed/
+      from_hash_of(_utf16), java_string_hash, position_seed (Mth.getSeed),
+      WorldgenRandom bit adapter (wrapped/plain, count, set_decoration_seed,
+      set_feature_seed, set_large_feature_seed, set_large_feature_with_salt,
+      fork -> plain), WorldgenPositional, slime_chunk_random. 31 tests:
+      java.util.Random vectors (seed 0/42, next_long), bound ranges/rejection
+      state preservation, gaussian mean/std, MD5 and String.hashCode vectors,
+      positional determinism/order, Xoroshiro fallback, worldgen formulas.
+      Deps: quadrix.core.jmath.log.
 
   # ==========================================================================
   # PHASE 1 — fluids — 100%
