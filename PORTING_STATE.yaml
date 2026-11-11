@@ -164,9 +164,70 @@ files:
       java.util.Random vectors (seed 0/42, next_long), bound ranges/rejection
       state preservation, gaussian mean/std, MD5 and String.hashCode vectors,
       positional determinism/order, Xoroshiro fallback, worldgen formulas.
-      Deps: quadrix.core.jmath.log.
-
-  # ==========================================================================
+      Deps: quadrix.core.jmath.log.
+
+  - rust: horizon-core/src/noise/mod.rs
+    python: quadrix/core/noise.py
+    test: tests/core/test_noise.py
+    status: done
+    part: 1
+    note: >-
+      GradientTable (offsets + перестановка 0..255 по seed), GRADIENTS (16
+      направлений Perlin), PERLIN_GRADIENTS (f32), dot/wrap/smoothstep/
+      smoothstep_derivative/lerp/lerp2/lerp3, NanRange. Координаты double,
+      интерполяция f32; порядок f32-операций сохранён (каждое действие
+      округляется через _f32). Тесты сверяют с Rust #[cfg(test)].
+
+  - rust: horizon-core/src/noise/perlin.rs
+    python: quadrix/core/noise.py
+    test: tests/core/test_noise.py
+    status: done
+    part: 1
+    note: >-
+      PerlinNoise (Java vanilla ImprovedPerlinNoise: gradient_indices_at,
+      corner_values, sample, noise_with_derivative) и SmearedPerlinNoise
+      (compute_fudge_y, NaN-диапазон). Биты образца seed 0 и производных
+      совпадают с Rust ([3183733582]); 22 теста. FALLBACK: -.
+
+  - rust: horizon-core/src/noise/normal.rs
+    python: quadrix/core/noise.py
+    test: tests/core/test_noise.py
+    status: done
+    part: 1
+    note: >-
+      NormalNoise, NormalNoiseBuilder (Enabled/Disabled/Legacy), OctaveInfo,
+      NoiseBuildError, build_octaves, sum_abs (компенсированное суммирование),
+      normalization_factor_of, parity_factor, power_of_two, create_legacy_fbm.
+      create/create_for_legacy_nether_biome через NoiseStack; __f64_div
+      повторяет IEEE-деление на ноль. Эталоны: norm factor 4607442513526237848,
+      get3 биты 1042650710 / 3199632936.
+
+  - rust: horizon-core/src/noise/simplex.rs
+    python: quadrix/core/noise.py
+    test: tests/core/test_noise.py
+    status: pending
+    part: 2
+    note: "SimplexNoise (перенос в PART 2). Скалярный Noise/NoiseStack уже есть в noise.py."
+
+  - rust: horizon-core/src/noise/stack.rs
+    python: quadrix/core/noise.py
+    test: tests/core/test_noise.py
+    status: pending
+    part: 2
+    note: >-
+      Скалярная часть (Noise Protocol, NoiseLayer, NoiseStack, get2/get3,
+      NoiseStackBuilder, build с Interval.of) портирована в PART 1 — нужна
+      NormalNoise.create. Объёмные пути add_to_volume/add_to_needed — PART 2
+      (зависят от volume.rs / DensityVolume).
+
+  - rust: horizon-core/src/noise/volume.rs
+    python: quadrix/core/noise.py
+    test: tests/core/test_noise.py
+    status: pending
+    part: 2
+    note: "DensityVolume/DensityError и объёмные циклы — PART 2."
+
+  # ==========================================================================
   # PHASE 1 — fluids — 100%
   # ==========================================================================
 
