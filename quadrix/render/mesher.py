@@ -1,0 +1,170 @@
+"""Мешинг чанка QuadRix (CPU, numpy).
+
+Источник геометрии — ``proto_moderngl.py`` (``chunk_vertices``), но чище:
+без запечённой текстуры, UV берутся из атласа, отсечение скрытых граней
+через padding-массив (никаких проверок границ).
+
+Формат вершины (stride 8 float32) — общий с terrain.vert:
+    in_pos(3) | in_normal(3) | in_uv(2)
+
+Один чанк = один draw call. Индексы не нужны: прототип отдаёт triangle
+soup, поэтому ``mesh_chunk`` возвращает ``(vertices, None)``.
+
+# FALLBACK: полноценный атмосферный свет / AO / greedy meshing — Фаза 5.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+import numpy as np
+
+# Размер чанка по каждой оси (ванильный Minecraft).
+CHUNK_SIZE = 16
+
+# ID воздуха. 0 — ванильный air, подтверждено block-registry.nbt
+# (default_state("minecraft:air") == 0).
+AIR_STATE_ID = 0
+
+# Сколько float на вершину: pos(3) + normal(3) + uv(2).
+VERTEX_FLOATS = 8
+# Формат для moderngl.vertex_array.
+VERTEX_FORMAT = "3f 3f 2f"
+ATTRIBUTES = ("in_pos", "in_normal", "in_uv")
+
+# Таблица граней: (нормаль, 4 угла CCW при взгляде снаружи).
+# Координаты углов — смещения от (x, y, z) блока в [0, 1].
+FACE_DEFS: tuple[tuple[tuple[int, int, int], tuple[tuple[int, int, int], ...]], ...] = (
+    ((0, 0, 1), ((0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1))),
+    ((0, 0, -1), ((1, 0, 0), (0, 0, 0), (0, 1, 0), (1, 1, 0))),
+    ((1, 0, 0), ((1, 0, 1), (1, 0, 0), (1, 1, 0), (1, 1, 1))),
+    ((-1, 0, 0), ((0, 0, 0), (0, 0, 1), (0, 1, 1), (0, 1, 0))),
+    ((0, 1, 0), ((0, 1, 1), (1, 1, 1), (1, 1, 0), (0, 1, 0))),
+    ((0, -1, 0), ((0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1))),
+)
+
+# Квад -> два треугольника: (0,1,2) и (0,2,3).
+TRIANGLE_ORDER = (0, 1, 2, 0, 2, 3)
+
+# Локальные UV на одну грань (6 вершин).
+QUAD_UV = np.asarray(
+    ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 0.0), (1.0, 1.0), (0.0, 1.0)),
+    dtype=np.float32,
+)
+
+
+def mesh_chunk(
+    blocks: np.ndarray,
+    texture_atlas: Optional[object] = None,
+    *,
+    cull_hidden: bool = True,
+    center: bool = True,
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    """Построить вершины чанка.
+
+    Параметры
+    ---------
+    blocks:
+        ``(16, 16, 16)`` uint16 — block state ids. Всё, что не
+        ``AIR_STATE_ID``, считается твёрдым.
+    texture_atlas:
+        Объект с ``load_many(ids) -> (m, 4)`` (см. ``TextureAtlas``).
+        ``None`` — UV всего тайла (0..1).
+    cull_hidden:
+        Отсекать грани, закрытые соседним твёрдым блоком.
+    center:
+        Сдвинуть чанк в начало координат (как в прототипе), иначе
+        координаты начинаются с (0, 0, 0).
+
+    Возвращает
+    ----------
+    ``(vertices, None)``: массив ``(N, 8)`` float32; ``None`` вместо
+    индексов — геометрия уже разбита на треугольники (один draw call).
+    """
+    blocks = np.asarray(blocks)
+    if blocks.ndim != 3:
+        raise ValueError(
+            f"[QuadRix] mesh_chunk: ожидается 3D-массив блоков, получено {blocks.shape}"
+        )
+    nx, ny, nz = blocks.shape
+
+    solid = blocks != AIR_STATE_ID
+    if not solid.any():
+        return np.zeros((0, VERTEX_FLOATS), dtype=np.float32), None
+
+    # padding-объём: соседи на границе чанка — воздух, без проверок границ
+    pad = np.zeros((nx + 2, ny + 2, nz + 2), dtype=bool)
+    pad[1:-1, 1:-1, 1:-1] = solid
+
+    parts: list[np.ndarray] = []
+    for normal, corners in FACE_DEFS:
+        dx, dy, dz = normal
+        neighbor = pad[1 + dx : 1 + dx + nx, 1 + dy : 1 + dy + ny, 1 + dz : 1 + dz + nz]
+        mask = solid & ~neighbor if cull_hidden else solid
+        xs, ys, zs = np.nonzero(mask)
+        m = xs.size
+        if m == 0:
+            continue
+
+        base = np.stack((xs, ys, zs), axis=1).astype(np.float32)  # (m, 3)
+        # два треугольника на блок: (m, 6, 3) -> (m*6, 3)
+        tri = np.stack(
+            [base + np.asarray(corners[i], dtype=np.float32) for i in TRIANGLE_ORDER],
+            axis=1,
+        ).reshape(-1, 3)
+
+        verts_per_face = tri.shape[0]
+        normals = np.tile(np.asarray(normal, dtype=np.float32), (verts_per_face, 1))
+
+        if texture_atlas is None:
+            uvs = np.tile(QUAD_UV, (m, 1))
+        else:
+            ids = blocks[xs, ys, zs]
+            rects = np.asarray(texture_atlas.load_many(ids), dtype=np.float32)  # (m, 4)
+            u0 = rects[:, 0:1]
+            v0 = rects[:, 1:2]
+            du = rects[:, 2:3]
+            dv = rects[:, 3:4]
+            # локальные UV -> прямоугольник тайла, на каждую из 6 вершин
+            local = QUAD_UV[None, :, :]  # (1, 6, 2)
+            uvs = np.empty((m, 6, 2), dtype=np.float32)
+            uvs[:, :, 0] = u0 + local[:, :, 0] * du
+            uvs[:, :, 1] = v0 + local[:, :, 1] * dv
+            uvs = uvs.reshape(-1, 2)
+
+        parts.append(np.concatenate((tri, normals, uvs), axis=1))
+
+    if not parts:
+        return np.zeros((0, VERTEX_FLOATS), dtype=np.float32), None
+
+    out = np.concatenate(parts, axis=0).astype(np.float32)
+    if center:
+        # центрируем чанк в начале координат (как прототип)
+        out[:, 0] -= nx / 2.0
+        out[:, 1] -= ny / 2.0
+        out[:, 2] -= nz / 2.0
+    return out, None
+
+
+def face_count(vertices: np.ndarray) -> int:
+    """Сколько квадов в буфере (6 вершин на грань) — удобно в тестах."""
+    return int(np.asarray(vertices).shape[0]) // 6
+
+
+def chunk_from_heightmap(heights: np.ndarray, solid_id: int) -> np.ndarray:
+    """Собрать чанк из карты высот ``(16, 16)``: блоки при ``y < height``.
+
+    Индексация: ``heights[x, z]`` -> ``blocks[x, y, z]``.
+    Вспомогательная функция для тестов и отладки сцены.
+    """
+    heights = np.asarray(heights, dtype=np.int32)
+    if heights.shape != (CHUNK_SIZE, CHUNK_SIZE):
+        raise ValueError(
+            f"[QuadRix] chunk_from_heightmap: карта высот должна быть "
+            f"{CHUNK_SIZE}x{CHUNK_SIZE}, получено {heights.shape}"
+        )
+    blocks = np.zeros((CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE), dtype=np.uint16)
+    ys = np.arange(CHUNK_SIZE, dtype=np.int32)[None, :, None]  # (1, 16, 1)
+    filled = ys < heights[:, None, :]  # (16, 16, 16)
+    blocks[filled] = np.uint16(solid_id)
+    return blocks
