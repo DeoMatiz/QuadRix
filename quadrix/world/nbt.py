@@ -158,9 +158,22 @@ class Limits:
 # ---------------------------------------------------------------------------
 
 @dataclass
-class Error:
+class Error(Exception):
+    """Ошибка чтения/записи NBT. Наследуется от Exception, чтобы её можно было
+    бросать (`raise`). Rust: `struct Error { offset, reason }` реализует
+    `std::error::Error`, то есть является ошибкой.
+    """
+
     offset: int
     reason: str
+
+    def __str__(self) -> str:
+        return f"NBT at byte {self.offset}: {self.reason}"
+
+
+# Алиасы имён, чтобы вызывающий код мог ловить понятное имя исключения.
+NbtError = Error
+NBTError = Error
 
 
 # ---------------------------------------------------------------------------
@@ -318,9 +331,7 @@ class _Reader:
         return chunk
 
     def _byte(self) -> int:
-        val = self.data[self.offset]
-        self.offset += 1
-        return val
+        return self._take(1)[0]
 
     def _number(self, n: int) -> bytes:
         """Read exactly n bytes, advancing offset. Returns the raw bytes."""
@@ -329,29 +340,19 @@ class _Reader:
 
     def _u16_be(self) -> int:
         """Read an unsigned 16-bit big-endian integer. Advance offset by 2."""
-        val, new_offset = _read_u16_be(self.data, self.offset)
-        self.offset = new_offset
-        return val
+        return struct.unpack(">H", self._take(2))[0]
 
     def _i32_be(self) -> int:
-        val, new_offset = _read_i32_be(self.data, self.offset)
-        self.offset = new_offset
-        return val
+        return struct.unpack(">i", self._take(4))[0]
 
     def _u32_be(self) -> int:
-        val, new_offset = _read_u32_be(self.data, self.offset)
-        self.offset = new_offset
-        return val
+        return struct.unpack(">I", self._take(4))[0]
 
     def _i64_be(self) -> int:
-        val, new_offset = _read_i64_be(self.data, self.offset)
-        self.offset = new_offset
-        return val
+        return struct.unpack(">q", self._take(8))[0]
 
     def _u64_be(self) -> int:
-        val, new_offset = _read_u64_be(self.data, self.offset)
-        self.offset = new_offset
-        return val
+        return struct.unpack(">Q", self._take(8))[0]
 
     # -- payload reading (mirrors Rust's payload method) ---
 
@@ -366,12 +367,7 @@ class _Reader:
             return Tag(TagType.Byte, byte_val=b if b < 128 else b - 256)
         if id == 2:
             # i16 big-endian: read 2 bytes, sign-extend
-            lo = self.data[self.offset]
-            hi = self.data[self.offset + 1]
-            self.offset += 2
-            val = (hi << 8) | lo
-            if val >= 0x8000:
-                val -= 0x10000  # sign extend to Python int (treated as i16)
+            val = struct.unpack(">h", self._take(2))[0]
             return Tag(TagType.Short, short_val=val)
         if id == 3:
             val = self._i32_be()
@@ -453,8 +449,8 @@ class _Reader:
                 vals.append(val)
             return Tag(TagType.IntArray, intarray_val=vals)
         if id == 12:
-            # LongArray: 8-byte count + i64 each (BE)
-            length = self._i64_be()
+            # LongArray: 4-байтный i32 count (как Rust count()) + i64 each (BE)
+            length = self._i32_be()
             if length < 0:
                 raise self._error("negative LongArray length")
             vals: List[int] = []
@@ -529,7 +525,7 @@ def write_nbt(compound: Dict[str, Tag], limits: Optional[Limits] = None) -> byte
     from .nbt import _Writer
     writer = _Writer(limits)
     writer.write_compound_empty_name(compound)
-    return writer.bytes
+    return bytes(writer.bytes)
 
 
 def write_unnamed(tag: Tag) -> bytes:
@@ -537,7 +533,7 @@ def write_unnamed(tag: Tag) -> bytes:
     from .nbt import _Writer
     writer = _Writer(Limits())
     writer.write_tag_network(tag)
-    return writer.bytes
+    return bytes(writer.bytes)
 
 
 def write_named(compound: Dict[str, Tag], limits: Optional[Limits] = None) -> bytes:
@@ -551,7 +547,7 @@ def write_named(compound: Dict[str, Tag], limits: Optional[Limits] = None) -> by
     from .nbt import _Writer
     writer = _Writer(limits)
     writer.write_named_root(compound)
-    return writer.bytes
+    return bytes(writer.bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +639,8 @@ class _Writer:
         elif tt == TagType.List:
             values = tag.list_val if tag.list_val is not None else []
             if not values:
-                self._put(struct.pack("B", 9))  # type 9 (List)
+                # Rust: `values.first().map_or(0, Tag::id)` — у пустого списка тип 0.
+                self._put(struct.pack("B", 0))
                 self._count(0)
             else:
                 first_id = values[0].tag_type
@@ -661,8 +658,9 @@ class _Writer:
 
         elif tt == TagType.Compound:
             compound = tag.compound_val if tag.compound_val is not None else {}
-            self._put(struct.pack("B", 10))  # compound type
-            self._count(len(compound))
+            # NBT: нагрузка Compound — это ТОЛЬКО пары (type byte + name + payload),
+            # завершённые байтом 0. Никакого дополнительного type byte/count здесь
+            # нет — иначе read_nbt не прочитает то, что записал write_named.
             # Sort keys for deterministic output (Rust uses BTreeMap = sorted)
             for name, value in sorted(compound.items(), key=lambda item: item[0]):
                 # Write tag type byte for the value

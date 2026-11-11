@@ -315,19 +315,19 @@ files:
   # PHASE 2 — health PART 1 — 100%
   # ==========================================================================
 
-  - rust: health.rs (PART 1: types + PlayerHealth basics)
+  - rust: "health.rs (PART 1: types + PlayerHealth basics)"
     python: quadrix/health.py
     test: tests/test_health.py
     status: done
     note: "HealthEvent, HurtSource, Knock, BlockOutcome, HurtRecord, AttackRecord, HealthResources, PlayerHealth basics."
 
-  - rust: health.rs (PART 2: hurt / die)
+  - rust: "health.rs (PART 2: hurt / die)"
     python: quadrix/health.py
     test: tests/test_health.py
     status: done
     note: "PlayerHealth.hurt, Environment, Blocking. 78/78 passed."
 
-  - rust: health.rs (PART 3: hooks)
+  - rust: "health.rs (PART 3: hooks)"
     python: null
     test: null
     status: skipped
@@ -415,7 +415,7 @@ files:
     status: done
     note: "try_use_totem, TOTEM_EFFECTS. 11 tests."
 
-  - rust: game/combat.rs (полный: attack damage, cooldown)
+  - rust: "game/combat.rs (полный: attack damage, cooldown)"
     python: quadrix/combat.py (расширение)
     test: tests/test_combat_extended.py
     status: pending
