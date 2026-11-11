@@ -1644,11 +1644,30 @@ files:
       (display_name) — повторены локально в component.py. text.font_id
       не валидирует id — добавлена проверка через parse_identifier.
 
-  - rust: horizon-core/src/gamerules.rs
-    python: quadrix/core/gamerules.py
-    test: tests/core/test_gamerules.py
-    status: pending
-    note: "Game rules."
+  - rust: horizon-client-core/src/gamerules.rs
+    python: quadrix/core/gamerules.py
+    test: tests/core/test_gamerules.py
+    status: done
+    lines_python: 419
+    note: "Game rules (26.3 GameRules). Сверено с Rust: имена правил —
+      snake_case (keep_inventory, advance_time, random_tick_speed), НЕ camelCase
+      (keepInventory/doDaylightCycle); значения в NBT — Byte(0/1) для Bool и Int
+      для Int, НЕ строки \"true\"/\"false\". Value(Bool|Int) с Value.Bool/Value.Int,
+      Rule(name,category,default,min,max), const fn b/i. RULES=58 (47 bool + 11 int,
+      порядок регистрации), MAX_MINECART_SPEED + MINECART_IMPROVEMENTS
+      (minecraft:minecart_improvements), available_rules(bool)=58/59, rule() срезает
+      только префикс minecraft:. GameRules: with_features/copy_with_features/
+      available_rules/get/bool/set_string (валидирует bool \"true\"/\"false\" и i32 в
+      границах)/int/set (проверка типа и min..max, возврат к дефолту убирает запись)/
+      by_name (bool как 0/1)/to_nbt/from_nbt (принимает Tag или dict, ключи
+      \"minecraft:<rule>\" или без namespace)/from_nbt_with_features/load/save
+      (data/minecraft/game_rules.dat, gzip). ВАЖНО: to_nbt в Rust возвращает NamedTag
+      (в nbt.py NamedTag нет) → возвращаем корневой Tag-компанунд {data:{...},
+      DataVersion=5023}. FALLBACK: nbt.write_named пишет вложенный Compound с лишним
+      type-byte+count, из-за чего read_nbt не читает свои же bytes — правка nbt.py
+      запрещена, поэтому в gamerules.py добавлен локальный энкодер _encode_nbt_root
+      (чтение — штатным read_nbt, его reader корректен). 16 tests."
+
 
   - rust: horizon-client-core/src/registries.rs
     python: quadrix/core/registries.py
