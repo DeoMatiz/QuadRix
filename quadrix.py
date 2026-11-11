@@ -220,6 +220,10 @@ class Client:
 
         self._registry = None
         self._manual_input: Optional[PlayerInput] = None
+        # Ввод, взведённый control-сервером: Client.tick() сам выполнит
+        # travel + tick + sync_client_to_server, поэтому сервер увидит движение.
+        self.pending_input: Optional[PlayerInput] = None
+        self.pending_input_ticks: int = 0
         self._input_thread: Optional[threading.Thread] = None
         self._auto_clock = 0
 
@@ -582,7 +586,13 @@ class Client:
         if self.motion is None:
             return
         world = self.world
-        inp = self._read_input()
+        if self.pending_input_ticks > 0 and self.pending_input is not None:
+            inp = self.pending_input
+            self.pending_input_ticks -= 1
+            if self.pending_input_ticks == 0:
+                self.pending_input = None
+        else:
+            inp = self._read_input()
         self.motion.travel(inp, world)
         self.motion.tick(TICK_SECONDS, world)
         if self.health is not None:

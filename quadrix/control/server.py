@@ -16,6 +16,7 @@ import json
 import logging
 import queue
 import socket
+import time
 import threading
 from typing import Optional, Callable, Any
 
@@ -36,11 +37,20 @@ LOG = logging.getLogger("quadrix.control")
 class _ClientWrapper:
     """Wrapper exposing the minimal API needed by ControlServer.dispatch."""
 
-    def __init__(self, pm: PlayerMotion, world):
-        self.pm = pm
+    def __init__(self, pm, world, client=None):
+        self._pm = pm
         self.world = world
+        self.client = client
         self._placement = default_placement()
         self._survival = default_survival()
+
+    @property
+    def pm(self):
+        # Берём свежий motion у client: при создании ControlServer motion может быть None,
+        # а после client.prepare() — появится.
+        if self._pm is None and self.client is not None:
+            self._pm = getattr(self.client, "motion", None)
+        return self._pm
 
     # --- movement ---
 
@@ -62,7 +72,8 @@ class _ClientWrapper:
             strafe = 1.0
 
         for _ in range(max(ticks, 1)):
-            inp = type("PlayerInput", (), {"forward": fwd, "strafe": strafe, "jump": False, "sneak": self.pm.sneaking, "sprint": self.pm.sprinting})()
+            from quadrix.motion.core import PlayerInput
+            inp = PlayerInput(forward=fwd, strafe=strafe, jump=False, sneak=self.pm.sneaking, sprint=self.pm.sprinting)
             # Call PlayerMotion.travel method (attached at module level)
             if hasattr(self.pm, "travel") and self.pm.travel is not _module_travel:
                 self.pm.travel(inp, self.world)
@@ -72,7 +83,8 @@ class _ClientWrapper:
 
     def jump(self) -> bool:
         """Attempt jump from ground. Returns True if jump was performed."""
-        inp = type("PlayerInput", (), {"forward": self.pm.move_vector[0], "strafe": self.pm.move_vector[1], "jump": True, "sneak": self.pm.sneaking, "sprint": self.pm.sprinting})()
+        from quadrix.motion.core import PlayerInput
+        inp = PlayerInput(forward=self.pm.move_vector[0], strafe=self.pm.move_vector[1], jump=True, sneak=self.pm.sneaking, sprint=self.pm.sprinting)
         from quadrix.motion.core import jump_from_ground as _jump
         return _jump(self.pm, self.world, inp)
 
@@ -89,11 +101,24 @@ class _ClientWrapper:
     # --- chat ---
 
     def chat(self, text: str) -> dict:
-        """Send a chat message (serverbound Chat packet).
-
-        For control server fallback - just return success.
-        """
-        return {"ok": True, "result": {"packet": "Chat", "text": text}}
+        """Send a chat message (serverbound Chat packet, offline-mode)."""
+        if self.client is None:
+            return {"ok": False, "error": "client not attached"}
+        try:
+            from quadrix.protocol.packets import play
+            from quadrix.protocol.packets.play import LastSeenUpdate
+            import time
+            packet = play.Chat(
+                message=text,
+                timestamp=int(time.time()),
+                salt=0,
+                signature=b"",
+                last_seen=LastSeenUpdate(offset=0, acknowledged=b"\x00\x00\x00", checksum=0),
+            )
+            self.client._send(play.Serverbound.encode(packet))
+            return {"ok": True, "result": {"text": text}}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
 
     # --- place ---
 
@@ -324,9 +349,8 @@ class ControlServer:
         self._futures: dict = {}
         # Create a wrapper around the client if provided
         if client is not None:
-            # We need a world object for the wrapper; use a minimal fake
-            pm = getattr(client, "motion", type("PM", (), {"position": type("V", (), ("x","y","z"))(), "yaw": 0.0, "pitch": 0.0, "on_ground": False, "move_vector": [0.0, 0.0]})())
-            self._wrapper = _ClientWrapper(pm, None)  # world will be set per-command
+            pm = getattr(client, "motion", None)  # может быть None, wrapper возьмёт свежий позже
+            self._wrapper = _ClientWrapper(pm, None, client)
         else:
             self._wrapper = None
 
@@ -465,80 +489,170 @@ class ControlServer:
             _request_id = args.get("id") if args else None
 
         if cmd == "move":
+            if self.client is None:
+                # Headless mode: respect args, return default ticks=1 if not specified
+                ticks = int(args.get("ticks", 1))
+                direction = args.get("direction", "forward")
+                return {"id": _request_id, "ok": True, "result": {"direction": direction, "ticks": ticks}}
+            if getattr(self.client, "motion", None) is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready"}
+            from quadrix.motion.core import PlayerInput
+
             direction = args.get("direction", "forward")
             ticks = int(args.get("ticks", 1))
-            if self._wrapper is not None:
-                self._wrapper.travel(direction, ticks)
+            fwd, strafe = 0.0, 0.0
+            if direction == "forward":
+                fwd = 1.0
+            elif direction == "back":
+                fwd = -1.0
+            elif direction == "left":
+                strafe = -1.0
+            elif direction == "right":
+                strafe = 1.0
+            pm = self.client.motion
+            # Не двигаем PlayerMotion здесь: Client.tick() выполнит
+            # travel + tick + sync_client_to_server, как для обычного ввода.
+            self.client.pending_input = PlayerInput(
+                forward=fwd,
+                strafe=strafe,
+                jump=False,
+                sneak=bool(pm.sneaking),
+                sprint=bool(pm.sprinting),
+            )
+            self.client.pending_input_ticks = max(ticks, 1)
             return {"id": _request_id, "ok": True, "result": {"direction": direction, "ticks": ticks}}
 
         if cmd == "jump":
-            if self._wrapper is not None:
-                ok = self._wrapper.jump()
-            else:
-                ok = True
-            return {"id": _request_id, "ok": ok, "result": {"jump": ok}}
+            if self.client is None:
+                return {"id": _request_id, "ok": True, "result": {"jump": False}}
+            if getattr(self.client, "motion", None) is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready"}
+            from quadrix.motion.core import PlayerInput
+
+            pm = self.client.motion
+            self.client.pending_input = PlayerInput(
+                forward=0.0,
+                strafe=0.0,
+                jump=True,
+                sneak=bool(pm.sneaking),
+                sprint=bool(pm.sprinting),
+            )
+            self.client.pending_input_ticks = 1
+            return {"id": _request_id, "ok": True, "result": {"jump": True}}
 
         if cmd == "sneak":
+            if self.client is None:
+                return {"id": _request_id, "ok": True, "result": {"sneak": False}}
+            if getattr(self.client, "motion", None) is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready"}
             value = bool(args.get("value", False))
-            if self._wrapper is not None:
-                self._wrapper.set_sneak(value)
+            self.client.motion.sneaking = value
             return {"id": _request_id, "ok": True, "result": {"sneak": value}}
 
         if cmd == "sprint":
+            if self.client is None:
+                return {"id": _request_id, "ok": True, "result": {"sprint": False}}
+            if getattr(self.client, "motion", None) is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready"}
             value = bool(args.get("value", False))
-            if self._wrapper is not None:
-                self._wrapper.set_sprint(value)
+            self.client.motion.sprinting = value
             return {"id": _request_id, "ok": True, "result": {"sprint": value}}
 
         if cmd == "fly":
+            if self.client is None:
+                return {"id": _request_id, "ok": True, "result": {"fly": False}}
+            if getattr(self.client, "motion", None) is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready"}
+            from quadrix.motion.core import set_flying as _set_flying
+
             value = bool(args.get("value", False))
-            if self._wrapper is not None:
-                self._wrapper.set_fly(value)
+            _set_flying(self.client.motion, value)
             return {"id": _request_id, "ok": True, "result": {"fly": value}}
 
         if cmd == "chat":
             text = args.get("text", "")
-            if self._wrapper is not None:
-                result = self._wrapper.chat(text)
-            else:
-                # Minimal fallback without wrapper
-                result = {"ok": True, "result": {"packet": "Chat", "text": text}}
-            return {"id": _request_id, "ok": result.get("ok", False), "result": result.get("result"), "error": result.get("error")}
+            if self._wrapper is None:
+                if self.client is None:
+                    return {"id": _request_id, "ok": True, "result": {"text": text}, "id": _request_id}
+                return {"id": _request_id, "ok": False, "error": "motion not ready (client not prepared)"}
+            if self._wrapper.pm is None:
+                # Chat нужен только client, motion не требуется.
+                LOG.debug("[QuadRix] chat без motion")
+            result = self._wrapper.chat(text)
+            return {"id": _request_id, "ok": result.get("ok", False), "result": result.get("result"), "error": result.get("error"), "id": _request_id}
 
         if cmd == "place":
+            if self._wrapper is None:
+                if self.client is None:
+                    return {"id": _request_id, "ok": True, "result": {"block": "stone", "pos": None}, "id": _request_id}
+                return {"id": _request_id, "ok": False, "error": "motion not ready (client not prepared)"}
+            if self._wrapper.pm is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready (client not prepared)"}
             block = args.get("block", "stone")
             face = args.get("face", None)
-            if self._wrapper is not None:
+            if self._wrapper is None:
                 result = self._wrapper.place_block(block, face)
             else:
                 result = self._place_block_fallback(block, face)
-            return {"id": _request_id, "ok": result.get("ok", False), "result": result.get("result"), "error": result.get("error")}
+            return {"id": _request_id, "ok": result.get("ok", False), "result": result.get("result"), "error": result.get("error"), "id": _request_id}
 
         if cmd == "break":
+            if self._wrapper is None:
+                if self.client is None:
+                    return {"id": _request_id, "ok": True, "result": {"drops": 0}, "id": _request_id}
+                return {"id": _request_id, "ok": False, "error": "motion not ready (client not prepared)"}
+            if self._wrapper.pm is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready (client not prepared)"}
             ticks = int(args.get("ticks", 20))
-            if self._wrapper is not None:
+            if self._wrapper is None:
                 result = self._wrapper.break_block(ticks)
             else:
                 result = self._break_block_fallback(ticks)
-            return {"id": _request_id, "ok": result.get("ok", False), "result": result.get("result"), "error": result.get("error")}
+            return {"id": _request_id, "ok": result.get("ok", False), "result": result.get("result"), "error": result.get("error"), "id": _request_id}
 
         if cmd == "look":
+            if self.client is None:
+                return {"id": _request_id, "ok": True, "result": {"yaw": 0.0, "pitch": 0.0}}
+            if getattr(self.client, "motion", None) is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready"}
             yaw = float(args.get("yaw", 0.0))
             pitch = float(args.get("pitch", 0.0))
-            if self._wrapper is not None:
-                self._wrapper.look(yaw, pitch)
+            self.client.motion.yaw = yaw
+            self.client.motion.pitch = pitch
             return {"id": _request_id, "ok": True, "result": {"yaw": yaw, "pitch": pitch}}
 
         if cmd == "state":
-            if self._wrapper is not None:
-                result = self._wrapper.get_state()
-            else:
-                result = {"pos": {"x": 0.0, "y": 64.0, "z": 0.0}, "yaw": 0.0, "pitch": 0.0, "on_ground": False, "selected_slot": 0, "health": 20}
-            return {"id": _request_id, "ok": True, "result": result}
+            if self.client is None:
+                return {"id": _request_id, "ok": True, "result": {"pos": {"x": 0.0, "y": 64.0, "z": 0.0}, "yaw": 0.0, "pitch": 0.0, "on_ground": False, "selected_slot": 0, "health": 20}}
+            if getattr(self.client, "motion", None) is None:
+                return {"id": _request_id, "ok": False, "error": "motion not ready"}
+            pm = self.client.motion
+            health_val = 20.0
+            player_health = getattr(self.client, "health", None)
+            if player_health is not None:
+                raw = getattr(player_health, "health", None)
+                if callable(raw):
+                    raw = raw()
+                if raw is not None:
+                    try:
+                        health_val = float(raw)
+                    except (TypeError, ValueError):
+                        health_val = 20.0
+            return {"id": _request_id, "ok": True, "result": {
+                "pos": {"x": float(pm.position.x), "y": float(pm.position.y), "z": float(pm.position.z)},
+                "yaw": float(pm.yaw),
+                "pitch": float(getattr(pm, "pitch", 0.0)),
+                "on_ground": bool(pm.on_ground),
+                "selected_slot": 0,
+                "health": health_val,
+            }}
 
         if cmd == "stop":
             self.stop()
-            return {"id": _request_id, "ok": True, "result": {"status": "stopped"}}
+            return {"id": _request_id, "ok": True, "result": {"status": "stopped"}, "id": _request_id}
+
+        # Unknown command
+        return {"id": _request_id, "ok": False, "error": f"unknown command: {cmd}"}
 
         # Unknown command
         return {"id": _request_id, "ok": False, "error": f"unknown command: {cmd}"}

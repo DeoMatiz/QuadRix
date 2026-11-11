@@ -1,53 +1,58 @@
 #!/usr/bin/env python3
 """[QuadRix] Тесты ControlServer — диспетчер команд и JSON-протокол.
 
-Использует FakeClient-заглушки с методом dispatch, проверяя:
+Использует FakeClient с настоящим PlayerMotion, проверяя:
   - протокол request/response round-trip по сокету
-  - каждый базовые команды (state, move, jump, chat, place, break, unknown, stop)
-  -poll()-механизм очереди команд
+  - state читает client.motion (а не кэш wrapper)
+  - move/jump взводят pending_input, а не двигают PlayerMotion напрямую
+  - sneak/sprint/fly/look меняют motion
+  - poll()-механизм очереди команд
 """
 
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import socket
-import threading
+
 import pytest
 
 from quadrix.control.server import ControlServer, _ClientWrapper, _wrapper_dispatch
 
 
 # ---------------------------------------------------------------------------
-# Минимальная загFake client for tests
+# Минимальный fake client for tests
 # ---------------------------------------------------------------------------
 
 class FakeClient:
-    """Минимальный клиент-заглушка для тестов ControlServer.dispatch.
-
-    Содержит необходимые методы motion/world, чтобы dispatch мог ее вызвать.
-    """
+    """Минимальный клиент-заглушка для тестов ControlServer.dispatch."""
 
     def __init__(self) -> None:
         from quadrix.motion.core import PlayerMotion, Vec3
-        from quadrix.world.world_ray import ClipContext
 
-        self.pm = PlayerMotion.new(
+        self.motion = PlayerMotion.new(
             type("MovementResources", (), {"properties": {}})(),
             Vec3(0, 64, 0),
         )
         # Минимальный мир — возвращает "air" везде
         self.world = _FakeWorld()
+        self.pending_input = None
+        self.pending_input_ticks = 0
+        self.health = None
 
-        # Создаем wrapper, который будет использоваться dispatch
-        self._wrapper = _ClientWrapper(self.pm, self.world)
+    def _send(self, body: bytes) -> None:
+        """Минимальная реализация _send для тестов (пакеты не отправляются)."""
+        self.sent = getattr(self, "sent", [])
+        self.sent.append(body)
 
-    def dispatch(self, cmd: str, args: dict) -> dict:
-        """Проходит вызов через _wrapper_dispatch helper.
 
-        Возвращает ответ от server.dispatch (то, что вернёт ControlServer.dispatch).
-        """
-        return _wrapper_dispatch(self._wrapper, cmd, args)
+class _FakeHealth:
+    """Заглушка PlayerHealth: health — метод, как в quadrix/health.py."""
+
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def health(self) -> float:
+        return self._value
 
 
 class _FakeWorld:
@@ -57,214 +62,288 @@ class _FakeWorld:
         return "minecraft:air"
 
 
+def _make_server() -> tuple[ControlServer, FakeClient]:
+    client = FakeClient()
+    server = ControlServer(host="127.0.0.1", port=0, client=client)
+    return server, client
+
+
 # ---------------------------------------------------------------------------
-# Тесты
+# state
 # ---------------------------------------------------------------------------
 
 
-def test_dispatch_state():
-    """1. dispatch("state") -> dict с pos/yaw/pitch."""
-    client = FakeClient()
-    resp = client.dispatch("state", {})
+def test_state_reads_client_motion():
+    """state читает client.motion, а не кэш wrapper."""
+    from quadrix.motion.core import Vec3
+
+    server, client = _make_server()
+    client.motion.position = Vec3(1.0, 2.0, 3.0)
+    client.motion.on_ground = True
+    client.motion.yaw = 90.0
+
+    resp = server.dispatch_internal("state", {})
     assert resp["ok"] is True
-    result = resp.get("result", {})
-    assert "pos" in result, f"Expected 'pos' in result, got {result}"
-    assert "yaw" in result, f"Expected 'yaw' in result, got {result}"
-    assert "pitch" in result, f"Expected 'pitch' in result, got {result}"
-    # Check pos structure
-    pos = result["pos"]
-    assert "x" in pos and "y" in pos and "z" in pos
+    pos = resp["result"]["pos"]
+    assert (pos["x"], pos["y"], pos["z"]) == (1.0, 2.0, 3.0)
+    assert resp["result"]["on_ground"] is True
+    assert resp["result"]["yaw"] == 90.0
 
 
-def test_dispatch_move():
-    """2. dispatch("move", {"direction":"forward","ticks":5}) -> ok, вызван travel."""
-    client = FakeClient()
-    resp = client.dispatch("move", {"direction": "forward", "ticks": 5})
+def test_state_late_motion_attachment():
+    """ControlServer создан до prepare(): motion появился позже — wrapper видит его."""
+    server = ControlServer(host="127.0.0.1", port=0, client=FakeClient())
+    client = server.client
+    client.motion = None
+    assert server.dispatch_internal("state", {})["ok"] is False
+
+    from quadrix.motion.core import PlayerMotion, Vec3
+
+    client.motion = PlayerMotion.new(
+        type("MovementResources", (), {"properties": {}})(), Vec3(4.0, 70.0, 8.0)
+    )
+    result = server.dispatch_internal("state", {})["result"]
+    assert result["pos"] == {"x": 4.0, "y": 70.0, "z": 8.0}
+
+
+def test_state_reads_client_health():
+    """health берётся из client.health.health() (метод PlayerHealth)."""
+    server, client = _make_server()
+    client.health = _FakeHealth(12.5)
+    resp = server.dispatch_internal("state", {})
+    assert resp["result"]["health"] == 12.5
+
+
+def test_state_without_health_defaults_to_20():
+    server, client = _make_server()
+    client.health = None
+    resp = server.dispatch_internal("state", {})
+    assert resp["result"]["health"] == 20.0
+
+
+# ---------------------------------------------------------------------------
+# move / jump
+# ---------------------------------------------------------------------------
+
+
+def test_move_sets_pending_input():
+    """move forward 20 -> client.pending_input.forward == 1.0, ticks == 20."""
+    server, client = _make_server()
+    resp = server.dispatch_internal("move", {"direction": "forward", "ticks": 20})
     assert resp["ok"] is True
-    assert resp.get("result", {}).get("ticks") == 5
+    assert client.pending_input is not None
+    assert client.pending_input.forward == 1.0
+    assert client.pending_input.strafe == 0.0
+    assert client.pending_input_ticks == 20
 
 
-def test_dispatch_jump():
-    """3. dispatch("jump") -> ok, вызван jump_from_ground."""
-    client = FakeClient()
-    # Set on_ground = True for jump
-    client.pm.on_ground = True
+def test_move_directions_map_to_input():
+    server, client = _make_server()
+    cases = {
+        "back": (-1.0, 0.0),
+        "left": (0.0, -1.0),
+        "right": (0.0, 1.0),
+    }
+    for direction, (fwd, strafe) in cases.items():
+        server.dispatch_internal("move", {"direction": direction, "ticks": 2})
+        assert client.pending_input.forward == fwd
+        assert client.pending_input.strafe == strafe
 
-    resp = client.dispatch("jump", {})
+
+def test_move_does_not_move_motion_directly():
+    """move не должен двигать PlayerMotion: это делает Client.tick()."""
+    from quadrix.motion.core import Vec3
+
+    server, client = _make_server()
+    start = client.motion.position
+    server.dispatch_internal("move", {"direction": "forward", "ticks": 5})
+    assert client.motion.position == start
+
+
+def test_move_requires_motion():
+    server, client = _make_server()
+    client.motion = None
+    resp = server.dispatch_internal("move", {"direction": "forward", "ticks": 1})
+    assert resp["ok"] is False
+    assert "motion not ready" in resp["error"]
+
+
+def test_jump_sets_pending_input():
+    server, client = _make_server()
+    resp = server.dispatch_internal("jump", {})
     assert resp["ok"] is True
-    # jump_from_ground should have been called and returned True
-    assert resp.get("result", {}).get("jump") is True
+    assert client.pending_input.jump is True
+    assert client.pending_input.forward == 0.0
+    assert client.pending_input_ticks == 1
+
+
+def test_jump_requires_motion():
+    server, client = _make_server()
+    client.motion = None
+    resp = server.dispatch_internal("jump", {})
+    assert resp["ok"] is False
+    assert "motion not ready" in resp["error"]
+
+
+# ---------------------------------------------------------------------------
+# sneak / sprint / fly / look
+# ---------------------------------------------------------------------------
+
+
+def test_sneak_updates_motion():
+    server, client = _make_server()
+    server.dispatch_internal("sneak", {"value": True})
+    assert client.motion.sneaking is True
+
+
+def test_sprint_updates_motion():
+    server, client = _make_server()
+    server.dispatch_internal("sprint", {"value": True})
+    assert client.motion.sprinting is True
+
+
+def test_fly_updates_motion():
+    server, client = _make_server()
+    server.dispatch_internal("fly", {"value": True})
+    assert client.motion.flying is True
+
+
+def test_look_updates_motion():
+    server, client = _make_server()
+    resp = server.dispatch_internal("look", {"yaw": 45.0, "pitch": -10.0})
+    assert resp["ok"] is True
+    assert client.motion.yaw == 45.0
+    assert client.motion.pitch == -10.0
+
+
+# ---------------------------------------------------------------------------
+# wrapper helper / chat / place / break / unknown / stop
+# ---------------------------------------------------------------------------
+
+
+def test_wrapper_dispatch_state():
+    client = FakeClient()
+    wrapper = _ClientWrapper(client.motion, client.world, client=client)
+    resp = _wrapper_dispatch(wrapper, "state", {})
+    assert resp["ok"] is True
+    assert "pos" in resp["result"]
 
 
 def test_dispatch_chat():
-    """4. dispatch("chat", {"text":"hi"}) -> ok, отправлен ChatMessage."""
-    client = FakeClient()
-    resp = client.dispatch("chat", {"text": "hi"})
+    server, client = _make_server()
+    resp = server.dispatch_internal("chat", {"text": "hi"})
     assert resp["ok"] is True
-    # Should have result about chat packet
-    assert "result" in resp or "error" not in resp
+    assert resp["result"]["text"] == "hi"
+    assert client.sent
 
 
-def test_dispatch_place():
-    """5. dispatch("place", {"block":"stone"}) -> ok, вызван place (или error FALLBACK)."""
-    client = FakeClient()
-    resp = client.dispatch("place", {"block": "stone"})
-    # In fallback mode (no full world), may return ok=False with error
-    # That's acceptable — the important thing is no pass/TODO/NotImplementedError
-    # Just check we get a structured response
-    assert "ok" in resp
-    assert "error" in resp or "result" in resp
-
-
-def test_dispatch_break():
-    """6. dispatch("break") -> ok, вызван break_block."""
-    client = FakeClient()
-    resp = client.dispatch("break", {})
-    assert "ok" in resp
-    # May return error in fallback mode, that's fine
+def test_dispatch_place_and_break_return_structured():
+    server, _client = _make_server()
+    for cmd, args in (("place", {"block": "stone"}), ("break", {})):
+        resp = server.dispatch_internal(cmd, args)
+        assert "ok" in resp
+        assert "error" in resp or "result" in resp
 
 
 def test_dispatch_unknown():
-    """7. dispatch("unknown") -> ok=False, error "unknown command"."""
-    client = FakeClient()
-    resp = client.dispatch("unknown", {})
+    server, _client = _make_server()
+    resp = server.dispatch_internal("unknown", {})
     assert resp["ok"] is False
-    assert "unknown command" in resp.get("error", "")
+    assert "unknown command" in resp["error"]
 
 
-def test_json_protocol_round_trip():
-    """8. JSON-протокол: request/response round-trip через socket (127.0.0.1, port 0 -> реальный)."""
-
-    server = ControlServer(host="127.0.0.1", port=0, client=None)  # port 0 -> OS assigns
+def test_stop_command():
+    server = ControlServer(host="127.0.0.1", port=0, client=None)
     server.start()
-
-    # Get the assigned port
-    actual_port = server._server_socket.getsockname()[1]
-
     try:
-        # Connect and send a request
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect(("127.0.0.1", actual_port))
+        resp = server.dispatch("stop", {}).result()
+        assert resp["ok"] is True
+        assert resp["result"]["status"] == "stopped"
+    finally:
+        server.stop()
 
-        # Send JSON line
-        req = json.dumps({"id": 1, "cmd": "state", "args": {}})
-        sock.sendall((req + "\n").encode("utf-8"))
 
-        # Read response
+# ---------------------------------------------------------------------------
+# JSON-протокол через сокет
+# ---------------------------------------------------------------------------
+
+
+def _round_trip(server: ControlServer, request: dict) -> dict:
+    port = server._server_socket.getsockname()[1]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect(("127.0.0.1", port))
+    try:
+        sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
         buf = b""
         while b"\n" not in buf:
             chunk = sock.recv(4096)
             if not chunk:
                 break
             buf += chunk
-
+    finally:
         sock.close()
+    return json.loads(buf.decode("utf-8").strip())
 
-        response_text = buf.decode("utf-8").strip()
-        response = json.loads(response_text)
 
-        assert response.get("ok") is True, f"Expected ok=True, got {response}"
-        assert response.get("id") == 1, f"Expected id=1, got {response.get('id')}"
-
+def test_json_protocol_round_trip_state():
+    server, client = _make_server()
+    server.start()
+    try:
+        response = _round_trip(server, {"id": 1, "cmd": "state", "args": {}})
+        assert response["ok"] is True
+        assert response["id"] == 1
+        assert "pos" in response["result"]
     finally:
         server.stop()
 
 
 def test_json_protocol_round_trip_move():
-    """9. JSON-протокол move round-trip."""
-    server = ControlServer(host="127.0.0.1", port=0, client=None)
+    server, client = _make_server()
     server.start()
-
-    actual_port = server._server_socket.getsockname()[1]
-
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.connect(("127.0.0.1", actual_port))
-
-        req = json.dumps({"id": 2, "cmd": "move", "args": {"direction": "forward", "ticks": 3}})
-        sock.sendall((req + "\n").encode("utf-8"))
-
-        buf = b""
-        while b"\n" not in buf:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-
-        sock.close()
-
-        response_text = buf.decode("utf-8").strip()
-        response = json.loads(response_text)
-
-        assert response.get("ok") is True, f"Expected ok=True, got {response}"
-        assert response.get("id") == 2, f"Expected id=2, got {response.get('id')}"
-
+        response = _round_trip(
+            server, {"id": 2, "cmd": "move", "args": {"direction": "forward", "ticks": 3}}
+        )
+        assert response["ok"] is True
+        assert response["id"] == 2
+        assert client.pending_input_ticks == 3
     finally:
         server.stop()
 
 
-def test_stop_command():
-    """10. stop -> флаг остановки."""
-    server = ControlServer(host="127.0.0.1", port=0, client=None)
-    server.start()
-
-    try:
-        # dispatch stop should set running flag and return ok
-        future = server.dispatch("stop", {})
-        resp = future.result()
-        assert resp["ok"] is True
-        assert resp.get("result", {}).get("status") == "stopped"
-    finally:
-        server.stop()
-
-
-# ---- New tests for poll() mechanism ----
+# ---- poll() mechanism ----
 
 def test_poll_executes_queued_command():
-    """test_poll_executes_queued_command — dispatch() ставит в очередь, poll() выполняет, future.result() = ответ."""
     server = ControlServer(host="127.0.0.1", port=0, client=None)
     server.start()
     try:
-        # dispatch puts command in queue and returns future
         future = server.dispatch("move", {"direction": "forward", "ticks": 5})
-        # poll processes the queue and sets the future result
         server.poll()
-        # Get the result from the future
         resp = future.result()
         assert resp["ok"] is True
-        assert resp.get("result", {}).get("ticks") == 5
+        assert resp["result"]["ticks"] == 5
     finally:
         server.stop()
 
 
 def test_poll_ignores_empty_queue():
-    """test_poll_ignores_empty_queue — poll() на пустой очереди = no-op."""
     server = ControlServer(host="127.0.0.1", port=0, client=None)
     server.start()
     try:
-        # poll on empty queue should not raise
         server.poll()
     finally:
         server.stop()
 
 
 def test_poll_multiple_commands():
-    """test_poll_multiple_commands — 3 команды в очереди, poll() выполняет все."""
-    server = ControlServer(host="127.0.0.1", port=0, client=None)
-    server.start()
+    server, client = _make_server()
     try:
-        # Dispatch 3 commands
         f1 = server.dispatch("move", {"direction": "forward", "ticks": 1})
         f2 = server.dispatch("jump", {})
         f3 = server.dispatch("state", {})
-        # poll should process all of them
         server.poll()
-        # Check all futures are done and have results
-        r1 = f1.result()
-        r2 = f2.result()
-        r3 = f3.result()
-        assert r1["ok"] is True
-        assert r2["ok"] is True
-        assert r3["ok"] is True
+        assert f1.result()["ok"] is True
+        assert f2.result()["ok"] is True
+        assert f3.result()["ok"] is True
     finally:
         server.stop()

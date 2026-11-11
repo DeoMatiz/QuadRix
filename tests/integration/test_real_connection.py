@@ -81,6 +81,38 @@ def test_client_prepare_loads_local_data() -> None:
     assert client.health.health() == 20.0
 
 
+def test_client_tick_applies_pending_input() -> None:
+    """Client.tick() сам исполняет pending_input и синхронизирует с сервером.
+
+    Control-сервер только взводит pending_input; движение должно идти
+    через обычный tick-путь (travel + tick + sync), иначе сервер не видит
+    перемещения.
+    """
+    from quadrix.motion.core import PlayerInput
+
+    client = entry.Client(host=HOST, port=PORT, name="TestPlayer")
+    client.prepare()
+    sent = []
+    client._send = sent.append  # type: ignore[method-assign]
+    client.last_position = client.motion.position.components()
+    client._loaded_sent = True
+
+    before = client.motion.position
+    client.pending_input = PlayerInput(forward=1.0)
+    client.pending_input_ticks = 5
+    for _ in range(5):
+        client.tick()
+
+    # Ввод израсходован, позиция изменилась, пакеты движения ушли.
+    assert client.pending_input is None
+    assert client.pending_input_ticks == 0
+    assert (client.motion.position.x, client.motion.position.z) != (
+        before.x,
+        before.z,
+    )
+    assert sent
+
+
 @pytest.mark.skipif(
     not SERVER_RUNNING,
     reason="нет локального Horizon LAN на 127.0.0.1:25565",
