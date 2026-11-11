@@ -906,11 +906,21 @@ files:
     status: pending
     note: "ActiveEffect, effect registry, effect application."
 
-  - rust: horizon-core/src/potions.rs
-    python: quadrix/items/potions.py
-    test: tests/items/test_potions.py
-    status: pending
-    note: "Potion registry."
+  - rust: horizon-client-core/src/potions.rs
+    python: quadrix/core/potions.py
+    test: tests/core/test_potions.py
+    status: done
+    lines_python: 323
+    note: >-
+      Таблицы MobEffects (EFFECTS, 40) и Potions (POTIONS, 46) + цвет смеси
+      PotionContents. Не PotionContents-компонент и не рецепты варки
+      (PotionBrewing в файле нет). Category(Beneficial/Harmful/Neutral),
+      EffectDef(id/color/category/instant), PotionDef(id/name/effects как
+      (effect_id, duration, amplifier)); effect/potion (снимают minecraft:),
+      description_id/sprite/push_sprite/namespaced, is_mod_effect,
+      register_mod_effects (OnceLock-семантика, один раз за процесс),
+      mod_effects/all_effects, BASE_POTION_COLOR=0x385DC6, potion_color,
+      effects_color (взвешивание по amplifier+1, целочисленное деление).
 
   - rust: horizon-world/src/food.rs
     python: quadrix/world/food.py
@@ -1602,11 +1612,17 @@ files:
     status: pending
     note: "Key display."
 
-  - rust: horizon-core/src/uuid.rs
-    python: quadrix/core/uuid.py
-    test: tests/core/test_uuid.py
-    status: pending
-    note: "UUID (уже частично в crypto.py)."
+  - rust: horizon-client-core/src/uuid.rs
+    python: quadrix/core/uuid.py
+    test: tests/core/test_uuid.py
+    status: done
+    lines_python: 158
+    note: >-
+      uuid_text / uuid_from_text (вандалов вид [i32; 4] big-endian, дефисы
+      игнорируются, ровно 32 hex, многобайтные → None) портированы точно как в
+      Rust. Поверх — класс UUID (обёртка над python uuid.UUID): from_parts/
+      from_bytes/from_int/from_str, to_bytes/to_int/to_str, version/variant,
+      msb/lsb (знаковые long). Согласован с crypto.uuid_string.
 
   - rust: horizon-core/src/bossbar.rs
     python: quadrix/core/bossbar.py
