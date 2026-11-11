@@ -1614,11 +1614,43 @@ files:
     status: pending
     note: "Bossbar."
 
-  - rust: horizon-core/src/scoreboard.rs
-    python: quadrix/core/scoreboard.py
-    test: tests/core/test_scoreboard.py
-    status: pending
-    note: "Scoreboard."
+  - rust: horizon-client-core/src/scoreboard.rs
+    python: quadrix/core/scoreboard.py
+    test: tests/core/test_scoreboard.py
+    status: done
+    lines_python: 1510
+    note: >-
+      Scoreboard целиком (PART 1 модели + PART 2 операции) в одном файле.
+      Модели: Objective, Score (locked по умолчанию true, value 0), ScoreEntry
+      (is_hidden/owner_name/format_value), Team (allow_friendly_fire/
+      see_friendly_invisibles/prefix/suffix/nametag_visibility/
+      death_message_visibility/collision_rule/players), NameView; enum'ы
+      RenderType(Integer/Hearts), Visibility(Always/Never/HideForOtherTeams/
+      HideForOwnTeam), CollisionRule(Always/Never/PushOtherTeams/PushOwnTeam),
+      NumberFormat(blank/fixed/styled, sidebar_default/player_list_default).
+      Scoreboard — dataclass, objectives/scores/teams/display/team_of/by_criteria
+      — dict (порядок вставки). Операции: objective/objective_mut/
+      objectives_streamed/add_objective (False на дубликат)/remove_objective
+      (владелец без счетов остаётся учтённым)/display_objective/
+      set_display_objective/score/score_mut (getOrCreate)/get/set/set_with
+      (display_auto_update копирует display)/add (wrapping i32)/
+      for_all_objectives(_with)/has_objectives_for/reset_all/reset_one (пустой
+      владелец забывается)/list_scores/holder_scores/tracked/team_members/
+      team/team_mut/add_team/teams_streamed/remove_team/players_team/
+      add_to_team (сначала покидает старую)/remove_from_team/allied/
+      entity_removed. Сериализация: pack/unpack (+ алиасы to_nbt/from_nbt),
+      component_tag, entity_uuids, canonical_component/canonical_style,
+      json_to_tag/tag_to_json/string_of/bool_of/int_of, style_from_json.
+      Критерии: criteria_by_name (InvalidIdentifier там, где vanilla бросает)/
+      criteria_exists/read_only/render_type/stat_criteria/team_colors/
+      team_color_rgb/CUSTOM_CRITERIA (11)/CUSTOM_STATS/STAT_TYPES.
+      Display slots: list/sidebar/below_name + sidebar.team.<16 цветов> = 19.
+      Gameplay: teams_allied/teams_allow_damage/pushable_by/invisible_to/
+      team_shows_name/name_shown/death_message_reaches/death_message_args.
+      FALLBACK: uuid.rs не портирован — локальная uuid_from_text для
+      hover show_entity. 31 test. Бинарный NBT-слой (write_nbt/read_nbt) в тесте
+      не используется: reader в nbt.py бросает не-исключение (отдельная задача,
+      править запрещено) — round-trip проверен на уровне Tag.
 
   - rust: horizon-core/src/component.rs
     python: quadrix/core/component.py
