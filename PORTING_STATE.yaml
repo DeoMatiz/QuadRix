@@ -1873,15 +1873,15 @@ files:
     status: pending
     note: "HUD layout."
 
-  - rust: horizon-client-render/src/ui.rs (84 КБ)
-    python: quadrix/render/ui.py
-    test: tests/render/test_ui.py
-    status: done
-    part: 1
-    parts_total: 3
-    lines_python: 713
-    test_status: "15 passed"
-    note: >-
+  - rust: horizon-client-render/src/ui.rs (84 КБ)
+    python: quadrix/render/ui.py
+    test: tests/render/test_ui.py
+    status: done
+    part: 2
+    parts_total: 3
+    lines_python: 713
+    test_status: "15 passed"
+    note: >-
       GUI PART 1 (примитивы): Font (bitmap из font/default.json →
       include/default.json: ascii.png, accented.png, nonlatin_european.png;
       space из include/space.json), glyph/advance/width/width_text/render,
@@ -1893,9 +1893,39 @@ files:
       (текстура×цвет, компилируются в moderngl).
       FALLBACK: unihex/ttf провайдеры (unifont, CJK) pending — PART 2;
       nine-slice спрайты ванильных виджетов (_button/slider) — PART 2
-      (фон кнопки/слайдера пока сплошная заливка через белый пиксель атласа).
-      PART 2 (меню/настройки/язык) и PART 3 (интеграция) — pending.
-
+      (фон кнопки/слайдера пока сплошная заливка через белый пиксель атласа).
+      PART 2 (меню/настройки/язык) — done (quadrix/render/menu.py).
+      PART 3 (интеграция) — pending.
+
+  - rust: >-
+      horizon-client/src/title.rs (MainMenu),
+      horizon-client-render/src/options_ui.rs (Page::Main, Page::Language),
+      horizon-client-render/src/settings.rs
+    python: quadrix/render/menu.py
+    test: tests/render/test_menu.py
+    status: done
+    part: 2
+    parts_total: 3
+    lines_python: 1060
+    test_status: "21 passed"
+    note: >-
+      GUI PART 2 (меню/настройки/язык) поверх примитивов PART 1.
+      Screen (render/handle_click/handle_key/handle_scroll/on_resize) +
+      ScreenStack (push/pop, навигация). MainMenu — 4 кнопки по геометрии
+      title.rs::Title::buttons (cx=floor(w/2), y=floor(h/4)+48, ширина 200,
+      шаг 24, Options/Quit по 98). OptionsScreen — FOV-слайдер и сетка
+      категорий options_ui.rs::Page::Main (2 столбца, шаг 158x24, ширина
+      150): skinCustomisation/sounds/video/controls/language/chat/
+      resourcepack/accessibility, подстраницы Graphics/Sound/Controls.
+      LanguageScreen — список 143 языков из .local assets/pack.mcmeta +
+      lang/*.json (строки 220x18, шаг 18), выбор → lang.set, применение
+      меняет перевод. Виджеты: Checkbox, TextInput, ScrollableList, Label.
+      Settings — порт settings.rs (fov 70/30..110, render_distance 12/2..32,
+      simulation_distance 12/5..32, master_volume, language en_us,
+      menu_blur 5); load/save options.txt (vanilla key:value, version:4000)
+      и options.json (тот же словарь). FALLBACK: nine-slice спрайты,
+      логотип, панорама/фон из текстур — PART 3.
+
   - rust: horizon-client-render/src/graphics_ui.rs (143 КБ)
     python: quadrix/render/graphics_ui.py
     test: tests/render/test_graphics_ui.py
