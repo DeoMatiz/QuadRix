@@ -15,7 +15,9 @@ import pytest
 
 from quadrix.core import lang
 from quadrix.render.menu import (
+    EDITION_TEXT,
     OPTION_CATEGORIES,
+    VERSION_TEXT,
     Checkbox,
     GraphicsScreen,
     LanguageScreen,
@@ -31,13 +33,29 @@ from quadrix.render.menu import (
     gui_scaled_size,
     load_language,
 )
-from quadrix.render.ui import Batch, Font
+from quadrix.render.ui import Batch, Font, Rect
 
 
 @functools.lru_cache(maxsize=1)
 def _font() -> Font:
     """Шрифт по умолчанию из ``.local`` (как в test_ui.py)."""
     return Font.load()
+
+
+class _RecordingFont:
+    """Шрифт-шпион: пишет тексты и позиции, квадов не даёт."""
+
+    def __init__(self) -> None:
+        self.texts: list[tuple[str, float, float]] = []
+        # Белый пиксель для сплошных заливок (Button/Slider FALLBACK).
+        self.white = Rect(0.0, 0.0, 1.0, 1.0)
+
+    def width(self, text: str) -> int:
+        return len(text) * 6
+
+    def render(self, text: str, x: float, y: float, color: int = 0xFFFFFFFF) -> list:
+        self.texts.append((text, float(x), float(y)))
+        return []
 
 
 @pytest.fixture(autouse=True)
@@ -462,3 +480,64 @@ def test_language_done_applies_and_pops() -> None:
 
     assert settings.language == screen.list.items[target].code
     assert stack.current is not screen
+
+
+# ---------------------------------------------------------------------------
+# Брендинг: версия в левом нижнем углу и «Python Edition» под логотипом
+# ---------------------------------------------------------------------------
+
+def test_main_menu_version_bottom_left() -> None:
+    """title.rs L2578-2579: версия в (2, h - 10), как ``Horizon {v} (Rust)``."""
+    menu = MainMenu(854.0, 480.0)
+    font = _RecordingFont()
+    menu.render(Batch(), font)
+
+    assert VERSION_TEXT == "QuadRix 26.3 (Python)"
+    hits = [(x, y) for text, x, y in font.texts if text == VERSION_TEXT]
+    assert hits, "строка версии не нарисована"
+    # draw_text кладёт тень в (+1, +1); сама строка — ровно в (2, h - 10).
+    assert (2.0, 480.0 - 10.0) in hits
+
+
+def test_main_menu_python_edition_under_logo() -> None:
+    """Под логотипом — «Python Edition», а не ванильная «Java Edition»."""
+    menu = MainMenu(854.0, 480.0)
+    font = _RecordingFont()
+    menu.render(Batch(), font)
+
+    assert EDITION_TEXT == "Python Edition"
+    assert any(text == "Python Edition" for text, _x, _y in font.texts)
+    assert not any("Java" in text for text, _x, _y in font.texts)
+    # title.rs L105-111: баннер на 30 + 44 - 7; текст 8px центрирован (+3).
+    assert any(
+        text == "Python Edition" and y == 30.0 + 44.0 - 7.0 + 3.0
+        for text, _x, y in font.texts
+    )
+
+
+# ---------------------------------------------------------------------------
+# Слайдер настроек: цепочка press → drag → release (не «прилипает»)
+# ---------------------------------------------------------------------------
+
+def test_options_fov_slider_drag_release_chain() -> None:
+    settings = Settings()
+    opts = OptionsScreen(settings=settings, width=854.0, height=480.0)
+    slider = opts.fov_slider
+    assert slider is not None
+
+    # Нажатие на дорожку берёт ручку.
+    assert opts.handle_click(slider.x + 10.0, slider.y + 10.0) is True
+    assert slider.dragging is True
+
+    # Движение с зажатой кнопкой тянет значение до max.
+    opts.handle_move(slider.x + slider.w - 2.0, slider.y + 10.0)
+    dragged = slider.value
+    assert dragged > 70.0
+
+    # Отпускание снимает ручку и запоминает значение.
+    assert opts.handle_release(slider.x + slider.w - 2.0, slider.y + 10.0) is True
+    assert slider.dragging is False
+
+    # Дальнейшее движение мыши значение не меняет.
+    opts.handle_move(slider.x + 2.0, slider.y + 10.0)
+    assert slider.value == dragged

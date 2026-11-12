@@ -411,7 +411,7 @@ GRAPHICS_PAGE_ABOUT = {
     "General": "How far you see, the window and the HUD.",
     "Quality": "The sky and weather, lighting, textures and the image.",
     "Performance": "Chunk loading, culling and power use.",
-    "Shaders": "Shader packs, Horizon's and shaders/ folder ones, and their options.",
+    "Shaders": "Shader packs, QuadRix's and shaders/ folder ones, and their options.",
     "Advanced": "How frames reach the screen, and the performance overlay.",
     "HDR": "Brighter-than-white output on an HDR display.",
 }
@@ -593,7 +593,7 @@ def _rows() -> list[tuple[str, list[tuple[str, list[GraphicsSetting]]]]]:
             [
                 ("Shader packs", [
                     _h("ShaderPacks", _H,
-                       "Picks a shader pack, Horizon's or a shaders/ folder one, and sets its options."),
+                       "Picks a shader pack, QuadRix's or a shaders/ folder one, and sets its options."),
                     _h("ShadowCache", _S,
                        "Reuses the pack shadow map when sun, view and world match. Off by default."),
                 ]),
@@ -1559,7 +1559,7 @@ def _gpu_culling_reason() -> Optional[str]:
 def item_blocked(s: Any, kind: str, name: str) -> Optional[str]:
     """Порт ``graphics_ui::Item::blocked`` (почему нельзя сейчас)."""
     if kind == "Opt" and name == "ChunkBuilder":
-        return "This feature is not yet available in Horizon."
+        return "This feature is not yet available in QuadRix."
     if kind != "H":
         return None
     hdr_rows = ("Hdr", "HdrCalibrate", "HdrBlackLevel", "HdrPeak", "HdrPaperWhite",

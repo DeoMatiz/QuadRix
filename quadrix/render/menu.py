@@ -148,6 +148,17 @@ MAIN_MENU_ICONS: list[tuple[str, str, str]] = [
 MENU_BACKGROUND_TILE = 32.0
 MENU_BACKGROUND_SPRITE = "gui/menu_background"
 
+# title.rs L2578: версия в левом нижнем углу главного меню —
+# ``format!("Horizon {} (Rust)", VANILLA_VERSION)`` в ``(2, h - 10)``.
+# QuadRix несёт ту же раскладку: ``QuadRix {VERSION} (Python)``.
+# ``horizon-core/src/version.rs::VANILLA_VERSION`` == "26.3".
+VERSION = "26.3"
+VERSION_TEXT = f"QuadRix {VERSION} (Python)"
+# title_edition.rs: ванильный спрайт ``gui/title/edition`` читает
+# «JAVA EDITION»; Horizon пересобирает его в «RUST EDITION». QuadRix
+# показывает «Python Edition» под логотипом (порт той же идеи).
+EDITION_TEXT = "Python Edition"
+
 # Корень ресурсов для загрузки языков (FIXED, см. AGENTS.md).
 PACK_ROOT = Path(".local/horizon-client/26.3")
 
@@ -850,6 +861,14 @@ class Screen:
         """Курсор переместился (подсветка наведения). ``True``, если принято."""
         return False
 
+    def handle_release(self, mx: float, my: float) -> bool:
+        """ЛКМ отпущена: завершить перетаскивание. ``True``, если принято.
+
+        Порт ``options_ui.rs::release``: без него ``dragging`` остаётся
+        взведённым навсегда и ручка слайдера прикована к мыши.
+        """
+        return False
+
 
 class ScreenStack:
     """Стек экранов (порт навигации Horizon: ``push``/``pop``)."""
@@ -894,6 +913,10 @@ class ScreenStack:
 
     def handle_move(self, mx: float, my: float) -> bool:
         return self.current.handle_move(mx, my)
+
+    def handle_release(self, mx: float, my: float) -> bool:
+        """Передать отпускание ЛКМ активному экрану (порт ``Gui.release``)."""
+        return self.current.handle_release(mx, my)
 
 
 # ---------------------------------------------------------------------------
@@ -1027,33 +1050,70 @@ class MainMenu(Screen):
         """Текст-фолбэк логотипа (без атласа спрайтов)."""
         return lang.get_or("menu.title", "Minecraft")
 
+    def version_text(self) -> str:
+        """Строка версии для левого нижнего угла (title.rs L2578)."""
+        return VERSION_TEXT
+
+    def edition_text(self) -> str:
+        """Подпись под логотипом (title_edition.rs: QuadRix Edition)."""
+        return EDITION_TEXT
+
     # -- рендер / ввод ---------------------------------------------------
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
         self._render_logo(batch, font)
+        self._render_version(batch, font)
         for button in self.buttons:
             button.render(batch, font)
 
     def _render_logo(self, batch: Batch, font: Optional[Font]) -> None:
-        """Логотип: ``title.rs::draw_logo`` (спрайт-регионы 256x44 + 128x14)."""
+        """Логотип: ``title.rs::draw_logo`` (спрайт-регион 256x44) + подпись.
+
+        Ванильный ``gui/title/edition`` читает «JAVA EDITION»; Horizon
+        пересобирает его в «RUST EDITION» (``title_edition.rs``). QuadRix
+        не несёт арта Mojang, поэтому вместо спрайта рисует текст
+        ``EDITION_TEXT`` — «Python Edition» — под логотипом.
+        """
         atlas = getattr(batch, "atlas", None)
         cx = math.floor(math.ceil(self.width) / 2.0)
+        # title.rs L98-111: логотип (cx-128, 30, 256x44), баннер ниже.
+        edition_y = 30.0 + 44.0 - 7.0
         if atlas is not None:
             drew = atlas.region(
                 batch, "gui/title/minecraft", cx - 128.0, 30.0, 256.0, 44.0,
                 256.0, 64.0,
             )
-            drew = atlas.region(
-                batch, "gui/title/edition", cx - 64.0, 30.0 + 44.0 - 7.0, 128.0, 14.0,
-                128.0, 16.0,
-            ) and drew
             if drew:
+                self._render_edition(batch, font, cx, edition_y)
                 return
         # FALLBACK: нет атласа — рисуем название текстом (логотип-спрайт недоступен).
         if font is not None:
             text = self.title()
             tx = (self.width - font.width(text)) / 2.0
             draw_text(batch, font, text, tx, 40.0, TITLE_COLOR)
+        self._render_edition(batch, font, cx, edition_y)
+
+    def _render_edition(
+        self, batch: Batch, font: Optional[Font], cx: float, y: float
+    ) -> None:
+        """Подпись издания под логотипом (ваниль: «Java Edition»)."""
+        if font is None:
+            return
+        text = self.edition_text()
+        tw = font.width(text)
+        # Баннер 14px; текст 8px — центрируем внутри полосы.
+        draw_text(batch, font, text, cx - tw / 2.0, y + 3.0, TITLE_COLOR)
+
+    def _render_version(self, batch: Batch, font: Optional[Font]) -> None:
+        """Версия в левом нижнем углу (title.rs L2578-2579).
+
+        Rust: ``batch.text(atlas, &version, 2.0, h - 10.0, u32::MAX, true)``.
+        """
+        if font is None:
+            return
+        draw_text(
+            batch, font, self.version_text(), 2.0, self.height - 10.0, TITLE_COLOR
+        )
 
     def handle_click(self, mx: float, my: float) -> bool:
         for button in self.buttons:
@@ -1199,11 +1259,7 @@ class OptionsScreen(Screen):
             self.done_button.render(batch, font)
 
     def handle_click(self, mx: float, my: float) -> bool:
-        if self.fov_slider is not None and _in_rect(
-            self.fov_slider.x, self.fov_slider.y, self.fov_slider.w,
-            self.fov_slider.h, mx, my,
-        ):
-            self.fov_slider.click(mx)
+        if self.fov_slider is not None and self.fov_slider.handle_click(mx, my):
             return True
         if self.online_button is not None and self.online_button.handle_click(mx, my):
             return True
@@ -1215,6 +1271,9 @@ class OptionsScreen(Screen):
         return False
 
     def handle_move(self, mx: float, my: float) -> bool:
+        # Пока кнопка зажата, движение тянет ручку (Rust: drag-ветка click).
+        if self.fov_slider is not None and self.fov_slider.dragging:
+            self.fov_slider.handle_drag(mx)
         handled = False
         widgets = list(self.buttons)
         if self.online_button is not None:
@@ -1231,6 +1290,12 @@ class OptionsScreen(Screen):
                 self.fov_slider.h, mx, my,
             )
         return handled
+
+    def handle_release(self, mx: float, my: float) -> bool:
+        """ЛКМ отпущена: снять ручку FOV-слайдера (порт ``options_ui::release``)."""
+        if self.fov_slider is None:
+            return False
+        return self.fov_slider.handle_release()
 
 
 class OptionsSubScreen(Screen):
@@ -1306,10 +1371,19 @@ class SoundScreen(OptionsSubScreen):
         self.slider.render(batch, font)
 
     def handle_click(self, mx, my):
-        if _in_rect(self.slider.x, self.slider.y, self.slider.w, self.slider.h, mx, my):
-            self.slider.click(mx)
+        if self.slider.handle_click(mx, my):
             return True
         return self.back_button.handle_click(mx, my)
+
+    def handle_move(self, mx, my):
+        if self.slider.dragging:
+            self.slider.handle_drag(mx)
+        self.slider.hovered = self.slider.contains(mx, my)
+        self.back_button.hovered = self.back_button.contains(mx, my)
+        return self.slider.hovered or self.back_button.hovered
+
+    def handle_release(self, mx, my):
+        return self.slider.handle_release()
 
 
 class ControlsScreen(OptionsSubScreen):
@@ -1359,13 +1433,21 @@ class ControlsScreen(OptionsSubScreen):
             c.render(batch, font)
 
     def handle_click(self, mx, my):
-        if _in_rect(self.slider.x, self.slider.y, self.slider.w, self.slider.h, mx, my):
-            self.slider.click(mx)
+        if self.slider.handle_click(mx, my):
             return True
         for c in self.checkboxes:
             if c.handle_click(mx, my):
                 return True
         return self.back_button.handle_click(mx, my)
+
+    def handle_move(self, mx, my):
+        if self.slider.dragging:
+            self.slider.handle_drag(mx)
+        self.slider.hovered = self.slider.contains(mx, my)
+        return self.slider.hovered
+
+    def handle_release(self, mx, my):
+        return self.slider.handle_release()
 
 
 # ---------------------------------------------------------------------------

@@ -553,6 +553,10 @@ class App:
             # Курсор переместился — обновляем подсветку наведения (hover).
             mx, my = self._screen_pos(float(args[0]), float(args[1]))
             return bool(self.screen_stack.handle_move(mx, my))
+        if kind == "release":
+            # ЛКМ отпущена — завершаем перетаскивание (слайдер больше не липнет).
+            mx, my = self._screen_pos(float(args[0]), float(args[1]))
+            return bool(self.screen_stack.handle_release(mx, my))
         if kind == "resize":
             self.width = int(args[0]) or self.width
             self.height = int(args[1]) or self.height

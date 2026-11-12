@@ -401,13 +401,21 @@ class ModernglBackend:
     def _on_mouse_button(
         self, window: Any, button: int, action: int, mods: int
     ) -> None:
-        """glfw: нажатие ЛКМ → ``("click", x, y)``."""
+        """glfw: нажатие/отпускание ЛКМ → ``("click", x, y)`` / ``("release", x, y)``.
+
+        Отпускание обязательно: без него слайдер остаётся в ``dragging`` и
+        ручка «прилипает» к курсору (порт ``MouseInput`` в options_ui.rs).
+        """
         glfw = self._glfw
         if glfw is None:
             return
-        if button == glfw.MOUSE_BUTTON_LEFT and action == glfw.PRESS:
-            x, y = self._to_framebuffer(self._mouse_x, self._mouse_y)
+        if button != glfw.MOUSE_BUTTON_LEFT:
+            return
+        x, y = self._to_framebuffer(self._mouse_x, self._mouse_y)
+        if action == glfw.PRESS:
             self._emit("click", x, y)
+        elif action == glfw.RELEASE:
+            self._emit("release", x, y)
 
     def _on_scroll(self, window: Any, xoffset: float, yoffset: float) -> None:
         """glfw: колесо мыши → ``("scroll", dy)``."""

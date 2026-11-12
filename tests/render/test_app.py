@@ -501,9 +501,14 @@ class _RecordingScreen:
         self.keys: list = []
         self.scrolls: list = []
         self.resizes: list = []
+        self.releases: list = []
 
     def handle_click(self, mx: float, my: float) -> bool:
         self.clicks.append((mx, my))
+        return True
+
+    def handle_release(self, mx: float, my: float) -> bool:
+        self.releases.append((mx, my))
         return True
 
     def handle_key(self, key: str, ch=None) -> bool:
@@ -630,3 +635,85 @@ def test_app_language_row_click_applies_without_leaving_screen() -> None:
     assert lang.code() == info.code
     # Выбор виден сразу, экран остаётся открытым до Done/back.
     assert app.screen_stack.current is language
+
+
+# ---------------------------------------------------------------------------
+# Input: отпускание ЛКМ (баг «слайдер прилипает к курсору»)
+# ---------------------------------------------------------------------------
+
+def test_release_dispatches_to_screen_stack() -> None:
+    """App.handle_event('release') → ScreenStack.handle_release (mock-экран)."""
+    app = App.init(FakeBackend(), Settings())
+    screen = _RecordingScreen()
+    app.screen_stack = ScreenStack(screen)
+
+    assert app.handle_event("release", 12.0, 34.0) is True
+    # 854x480 при auto-масштабе (2) → логическое поле 427x240.
+    assert screen.releases == [(6.0, 17.0)]
+
+
+class _FakeGlfw:
+    """Мини-константы glfw для проверки mouse-button callback без дисплея."""
+
+    MOUSE_BUTTON_LEFT = 0
+    PRESS = 1
+    RELEASE = 0
+
+
+def test_backend_mouse_button_emits_click_and_release() -> None:
+    """glfw PRESS → 'click', RELEASE → 'release' (порт MouseInput)."""
+    from quadrix.render.backend_moderngl import ModernglBackend
+
+    backend = ModernglBackend()
+    backend._glfw = _FakeGlfw()
+    events: list = []
+    backend.set_event_handler(lambda kind, *args: events.append((kind, args)))
+    backend._mouse_x, backend._mouse_y = 3.0, 4.0
+
+    backend._on_mouse_button(None, _FakeGlfw.MOUSE_BUTTON_LEFT, _FakeGlfw.PRESS, 0)
+    backend._on_mouse_button(None, _FakeGlfw.MOUSE_BUTTON_LEFT, _FakeGlfw.RELEASE, 0)
+    # Кнопка не ЛКМ — событие не уходит.
+    backend._on_mouse_button(None, 1, _FakeGlfw.PRESS, 0)
+
+    assert [kind for kind, _ in events] == ["click", "release"]
+    assert events[0][1] == (3.0, 4.0)
+    assert events[1][1] == (3.0, 4.0)
+
+
+# ---------------------------------------------------------------------------
+# Брендинг: нигде «Horizon» в текстах/окне/логах (кроме ссылок на Rust)
+# ---------------------------------------------------------------------------
+
+def test_no_horizon_in_branding() -> None:
+    import re
+
+    from quadrix.render import app as app_mod
+    from quadrix.render import menu as menu_mod
+
+    # Заголовок окна, строка версии, подпись издания — QuadRix.
+    assert "Horizon" not in app_mod.WINDOW_TITLE
+    assert "Horizon" not in menu_mod.VERSION_TEXT
+    assert "Horizon" not in menu_mod.EDITION_TEXT
+
+    # Исходники: «Horizon» допустим только в комментариях-ссылках на Rust.
+    files = [
+        ROOT / "quadrix.py",
+        ROOT / "quadrix/render/menu.py",
+        ROOT / "quadrix/render/app.py",
+        ROOT / "quadrix/render/ui.py",
+        ROOT / "quadrix/render/graphics_ui.py",
+        ROOT / "quadrix/render/graphics.py",
+        ROOT / "quadrix/render/backend_moderngl.py",
+    ]
+    # Строка/скобка-литерал «Horizon» или лог «[Horizon]» — недопустимы.
+    pattern = re.compile(r"[\"'\[]Horizon\b")
+    offenders: list[str] = []
+    for path in files:
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8").splitlines(), 1
+        ):
+            if line.lstrip().startswith("#"):
+                continue  # комментарий-ссылка на Rust (порт)
+            if pattern.search(line):
+                offenders.append(f"{path.name}:{lineno}: {line.strip()}")
+    assert offenders == [], offenders

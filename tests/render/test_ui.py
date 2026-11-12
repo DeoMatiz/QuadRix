@@ -231,6 +231,47 @@ def test_slider_click_and_render() -> None:
     assert len(batch.quads) >= 2  # дорожка + ручка
 
 
+def test_slider_release_stops_dragging() -> None:
+    """Нажатие берёт ручку, отпускание — снимает (порт options_ui::release)."""
+    slider = Slider(0.0, 0.0, 100.0, 20.0, value=0.0, min=0.0, max=1.0)
+    assert slider.dragging is False
+
+    # options_ui.rs L4251-4257: press → dragging = Some(opt), value from mouse.
+    assert slider.handle_click(50.0, 10.0) is True
+    assert slider.dragging is True
+    assert slider.focused is True
+    assert slider.value == pytest.approx((50.0 - 4.0) / 92.0)
+
+    # options_ui.rs::release: self.dragging.take().
+    assert slider.handle_release() is True
+    assert slider.dragging is False
+    # повторное отпускание — уже не в drag
+    assert slider.handle_release() is False
+    # клик вне дорожки ручку не берёт
+    assert slider.handle_click(500.0, 10.0) is False
+    assert slider.dragging is False
+
+
+def test_slider_drag_then_release() -> None:
+    """После release движение мыши больше не меняет значение (без «прилипания»)."""
+    slider = Slider(0.0, 0.0, 100.0, 20.0, value=0.0, min=0.0, max=1.0)
+    slider.handle_click(10.0, 10.0)
+    assert slider.dragging is True
+    before = slider.value
+
+    # drag тянет ручку, пока кнопка зажата (drag-ветка options_ui.rs L4093-4120).
+    assert slider.handle_drag(90.0) is True
+    assert slider.value == pytest.approx((90.0 - 4.0) / 92.0)
+    assert slider.value != before
+
+    # отпускание замораживает значение
+    assert slider.handle_release() is True
+    assert slider.dragging is False
+    frozen = slider.value
+    assert slider.handle_drag(5.0) is False
+    assert slider.value == frozen
+
+
 # ---------------------------------------------------------------------------
 # шейдеры
 # ---------------------------------------------------------------------------

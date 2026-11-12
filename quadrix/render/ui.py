@@ -749,6 +749,49 @@ class Slider:
         self.set_value(self.value_from_mouse(mx))
         return self.value != before
 
+    def contains(self, mx: float, my: float) -> bool:
+        """Курсор внутри виджета (порт ``ui.rs::hovered``)."""
+        return self.x <= mx < self.x + self.w and self.y <= my < self.y + self.h
+
+    def handle_click(self, mx: float, my: float) -> bool:
+        """Нажатие ЛКМ: взять ручку и тянуть (порт ``options_ui.rs`` L4251-4257).
+
+        Rust при нажатии ставит ``dragging = Some(opt)`` и сразу считает
+        значение по позиции курсора. Без явного ``release`` ручка оставалась
+        бы прикованной к мыши — см. :meth:`handle_release`.
+        """
+        if not self.active or not self.contains(mx, my):
+            return False
+        self.dragging = True
+        self.focused = True
+        self.can_change_value = True
+        self.set_value(self.value_from_mouse(mx))
+        return True
+
+    def handle_drag(self, mx: float) -> bool:
+        """Движение мыши при зажатой кнопке: тянем ручку (порт ``drag_slider``).
+
+        Rust обновляет значение только пока ``dragging == Some(opt)``; после
+        отпускания мыши ``handle_release`` снимает флаг, и движение больше
+        значение не меняет.
+        """
+        if not self.active or not self.dragging:
+            return False
+        before = self.value
+        self.set_value(self.value_from_mouse(mx))
+        return self.value != before
+
+    def handle_release(self) -> bool:
+        """Отпускание ЛКМ: снять ручку (порт ``options_ui.rs::release``).
+
+        Rust: ``self.dragging.take()`` — ручка отпускается всегда, даже если
+        значение не менялось. Возвращает ``True``, если слайдер был в drag.
+        """
+        was = self.dragging
+        self.dragging = False
+        self.can_change_value = False
+        return was
+
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
         """Дорожка + ручка + подпись (порт ``ui::slider_ext``).
 

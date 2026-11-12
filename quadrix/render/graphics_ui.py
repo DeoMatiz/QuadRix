@@ -523,7 +523,8 @@ def backdrop(batch: Batch, font: Optional[Font], w: float, h: float,
 def draw_mark(batch: Batch, font: Optional[Font], cols: Columns, title: str) -> None:
     x, y = cols.side_x, cols.side_y
     fill(batch, font, (x, y + 2.0, 6.0, 6.0), ACCENT)
-    text(batch, font, "Horizon", x + 10.0, y, WHITE)
+    # Бренд клиента: QuadRix (не Horizon).
+    text(batch, font, "QuadRix", x + 10.0, y, WHITE)
     text(batch, font, title, x, y + 10.0, MUTED)
 
 
@@ -866,8 +867,8 @@ class GraphicsScreen:
         self.cursor = (mx, my)
         cols, _lines, _content = self.layout(self.settings)
         if self.dragging is not None and self.held is None:
-            # Слайдер тянется, пока кнопка зажата (App не шлёт release, поэтому
-            # перетаскивание идёт по move внутри трека).
+            # Слайдер тянется, пока кнопка зажата; App шлёт "release" на
+            # отпускание, и handle_release снимает dragging.
             if mx >= cols.track()[0]:
                 gfx.item_set_slider(
                     self.settings, self.dragging.kind, self.dragging.name,
@@ -883,6 +884,18 @@ class GraphicsScreen:
                 or any(_hovered((mx, my), cols.page(i)) for i in range(6))
                 or _hovered((mx, my), cols.button(0))
                 or _hovered((mx, my), cols.button(1)))
+
+    def handle_release(self, mx: float, my: float) -> bool:
+        """ЛКМ отпущена: завершить drag слайдера/полосы (порт ``release``).
+
+        Rust ``OptionsUi::release`` берёт ``self.dragging.take()`` и
+        ``scrollbar_drag_y = None`` — без этого виджет остаётся зажатым.
+        """
+        was = self.dragging is not None or self.held is not None
+        self.dragging = None
+        self.held = None
+        self.can_change_value = False
+        return was
 
     def _drag_scroll(self, my: float, cols: Columns, content: float) -> None:
         height = cols.bottom - cols.top
