@@ -32,7 +32,20 @@ from typing import Any, Optional
 import numpy as np
 
 from quadrix.core import lang
+from quadrix.core.geometry import Vec3
 from quadrix.core.lang import Language
+from quadrix.input.input_state import InputState
+from quadrix.input.keybinds import KeyBinds
+from quadrix.input.mouse import LookOptions, MouseLook, Rotation as MouseRotation
+from quadrix.motion.core import (
+    MovementResources,
+    PlayerMotion,
+    jump_from_ground,
+    tick as motion_tick,
+    travel as motion_travel,
+)
+from quadrix.render.camera import Camera
+from quadrix.render.game_world import FlatWorld, TerrainRenderer, checker_texture
 from quadrix.render.gui_atlas import GUI_TEXTURE, load_gui_atlas
 from quadrix.render.menu import (
     FOV_DEFAULT,
@@ -98,12 +111,16 @@ class RenderSettings:
 
 
 class GameScreen(Screen):
-    """Заглушка игрового экрана (порт ``Screen::Playing``).
+    """Игровой экран (порт ``Screen::Playing``) — Gameplay PART 1.
 
-    ``# FALLBACK: полный gameplay (WASD, подключение, бинды) pending —``
-    следующая фаза.  Здесь только каркас: экран рисует фон и заголовок,
-    Escape/Back возвращают в меню, а рендер-настройки (FOV и т.п.)
-    применяются к ``render_settings``.
+    Держит состояние игрока (:class:`PlayerMotion`), мир, ввод и камеру.
+    Каждый тик (20 Гц) собирает :class:`PlayerInput` из :class:`InputState`
+    и прогоняет движение: ``jump_from_ground`` → ``travel`` → ``tick``
+    (порт ``motion.rs::local_tick`` / ``controlled_simulation_tick``).
+    Мышь вращает камеру через :class:`MouseLook` (порт ``mouse.rs``).
+
+    Мир пока плоский (``# FALLBACK:`` см. ``quadrix/render/game_world.py``):
+    настоящие чанки — следующий PART.
     """
 
     def __init__(
@@ -114,6 +131,11 @@ class GameScreen(Screen):
         width: float = DEFAULT_WIDTH,
         height: float = DEFAULT_HEIGHT,
         render_settings: Optional[RenderSettings] = None,
+        world: Optional[FlatWorld] = None,
+        player_motion: Optional[PlayerMotion] = None,
+        input_state: Optional[InputState] = None,
+        keybinds: Optional[KeyBinds] = None,
+        on_close: Optional[Any] = None,
     ) -> None:
         super().__init__(width, height)
         self.kind = kind
@@ -122,6 +144,42 @@ class GameScreen(Screen):
         self.render_settings = (
             render_settings if render_settings is not None else RenderSettings()
         )
+        self.on_close = on_close
+
+        # -- ввод ---------------------------------------------------------
+        self.input_state = input_state if input_state is not None else InputState()
+        self.keybinds = keybinds if keybinds is not None else KeyBinds()
+        self.mouse_look = MouseLook(
+            look=LookOptions(sensitivity=float(self.settings.sensitivity))
+        )
+        #: Поворот игрока (yaw/pitch) — :class:`quadrix.input.mouse.Rotation`.
+        self.rotation = MouseRotation()
+        self._time = 0.0
+
+        # -- мир и игрок --------------------------------------------------
+        self.world = world if world is not None else FlatWorld()
+        ground_top = getattr(self.world, "ground_top", 4)
+        if player_motion is not None:
+            self.player_motion = player_motion
+        else:
+            # MovementResources не нужен для PlayerMotion.new (см. motion.rs);
+            # travel() сам читает .nbt. Пустые ресурсы экономят загрузку.
+            self.player_motion = PlayerMotion.new(
+                MovementResources(properties={}),
+                Vec3(0.5, float(ground_top), 0.5),
+            )
+        self.camera = Camera(
+            position=(
+                self.player_motion.position.x,
+                self.player_motion.position.y + self.player_motion.eye_height(),
+                self.player_motion.position.z,
+            ),
+            yaw=float(self.player_motion.yaw),
+            pitch=0.0,
+            fov=float(self.render_settings.fov),
+        )
+        self.terrain = TerrainRenderer(self.world)
+
         self.back_button = Button(
             (float(width) / 2.0) - 100.0,
             float(height) - 27.0,
@@ -131,7 +189,11 @@ class GameScreen(Screen):
             on_click=self._back,
         )
 
+    # -- навигация -------------------------------------------------------
+
     def _back(self) -> None:
+        if self.on_close is not None:
+            self.on_close()
         if self.stack is not None:
             self.stack.pop()
 
@@ -142,22 +204,83 @@ class GameScreen(Screen):
     def title(self) -> str:
         return lang.get_or(self.title_key(), self.kind.title())
 
-    def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        solid(batch, font, 0.0, 0.0, self.width, self.height, 0x000000FF)
-        if font is not None:
-            text = self.title()
-            tw = font.width(text)
-            draw_text(batch, font, text, (self.width - tw) / 2.0, self.height / 2.0)
-        self.back_button.render(batch, font)
+    # -- тик: ввод → PlayerInput → PlayerMotion ---------------------------
 
-    def handle_click(self, mx: float, my: float) -> bool:
-        return self.back_button.handle_click(mx, my)
+    def update(self, dt: float) -> None:
+        """Один тик игры: ввод → движение (порт ``controlled_simulation_tick``)."""
+        self._time += dt
+        player_input = self.input_state.to_player_input(self.keybinds)
+        motion = self.player_motion
+        if player_input.jump and motion.on_ground:
+            jump_from_ground(motion, self.world, player_input)
+        motion_travel(motion, player_input, self.world)
+        motion_tick(motion, dt, self.world)
+        self._sync_camera()
+
+    def _sync_camera(self) -> None:
+        """Позиция/углы камеры из PlayerMotion (порт ``Camera.alignWithEntity``)."""
+        motion = self.player_motion
+        self.camera.position = (
+            motion.position.x,
+            motion.position.y + motion.eye_height(),
+            motion.position.z,
+        )
+        self.camera.yaw = float(motion.yaw)
+        self.camera.pitch = float(self.rotation.x_rot)
+        self.camera.fov = float(self.render_settings.fov)
+
+    # -- ввод -------------------------------------------------------------
 
     def handle_key(self, key: str, ch: Optional[str] = None) -> bool:
+        """Короткое имя клавиши (меню): Escape закрывает экран."""
         if key == "escape":
             self._back()
             return True
         return False
+
+    def handle_key_down(self, key: str) -> bool:
+        """Нажатие ванильной клавиши (``key.keyboard.w``) → InputState."""
+        return self.input_state.press(key)
+
+    def handle_key_up(self, key: str) -> bool:
+        """Отпускание ванильной клавиши."""
+        return self.input_state.release(key)
+
+    def handle_mouse_move(self, dx: float, dy: float) -> bool:
+        """Относительное движение мыши → yaw/pitch (порт ``MouseHandler``)."""
+        self.input_state.add_mouse(dx, dy)
+        self.mouse_look.add_motion(dx, dy)
+        turn = self.mouse_look.handle_accumulated_movement(
+            self._time, True, True
+        )
+        if turn is not None:
+            self.rotation.turn(*turn)
+            self.player_motion.yaw = self.rotation.y_rot
+        self._sync_camera()
+        return True
+
+    def handle_mouse_click(self, button: int = 0) -> bool:
+        """Клик в мире (attack/use) — Gameplay PART 2."""
+        return True
+
+    # -- рендер -----------------------------------------------------------
+
+    def render(self, batch: Batch, font: Optional[Font] = None) -> None:
+        """HUD над terrain: прицел в центре (terrain рисует ``App``)."""
+        cx = self.width / 2.0
+        cy = self.height / 2.0
+        color = 0xFFFFFFFF
+        solid(batch, font, cx - 5.0, cy - 0.5, 10.0, 1.0, color)
+        solid(batch, font, cx - 0.5, cy - 5.0, 1.0, 10.0, color)
+
+    def render_terrain(self, backend: Any, program: Any, texture: Any) -> None:
+        """Нарисовать меш мира с MVP камеры (вызывает ``App.render``)."""
+        self.terrain.draw(
+            backend, program, texture, self.camera, self.width, self.height
+        )
+
+    def handle_click(self, mx: float, my: float) -> bool:
+        return self.back_button.handle_click(mx, my)
 
 
 class App:
@@ -199,6 +322,9 @@ class App:
         self.batch = Batch()
         self.program: Any = None
         self.texture: Any = None
+        #: Пайплайн terrain (создаётся лениво при входе в игру) + текстура.
+        self.terrain_program: Any = None
+        self.terrain_texture: Any = None
         #: Спрайтовый атлас GUI + GPU-текстура (кнопки/логотип/фон/иконки).
         self.atlas: Any = None
         self.gui_texture: Any = None
@@ -344,14 +470,15 @@ class App:
         return screen
 
     def open_singleplayer(self) -> GameScreen:
-        """MainMenu → Singleplayer → GameScreen (заглушка)."""
+        """MainMenu → Singleplayer → GameScreen (локальный плоский мир)."""
         return self._open_game("singleplayer")
 
     def open_multiplayer(self) -> GameScreen:
-        """MainMenu → Multiplayer → GameScreen (заглушка)."""
+        """MainMenu → Multiplayer → GameScreen (подключение — PART 3)."""
         return self._open_game("multiplayer")
 
     def _open_game(self, kind: str) -> GameScreen:
+        self._ensure_terrain_resources()
         screen = GameScreen(
             kind=kind,
             settings=self.settings,
@@ -359,11 +486,45 @@ class App:
             width=self.screen_stack.current.width,
             height=self.screen_stack.current.height,
             render_settings=self.render_settings,
+            on_close=self._close_game,
         )
         self.screen_stack.push(screen)
         self.game = screen
+        # Игра забирает курсор (порт ``MouseHandler.grabMouse``).
+        self._set_mouse_grabbed(True)
         _log(f"экран: GameScreen ({kind})")
         return screen
+
+    def _close_game(self) -> None:
+        """GameScreen закрыт (Escape/Back): отпустить курсор."""
+        self.game = None
+        self._set_mouse_grabbed(False)
+
+    def _set_mouse_grabbed(self, grabbed: bool) -> None:
+        backend = self.backend
+        setter = getattr(backend, "set_mouse_grabbed", None)
+        if callable(setter):
+            setter(grabbed)
+
+    def _ensure_terrain_resources(self) -> None:
+        """Создать terrain-пайплайн и текстуру (лениво, при входе в игру).
+
+        В ``setup`` их нет намеренно: menus тестов считают вызовы
+        ``create_pipeline``/``create_texture`` (PART 3).
+        """
+        if self.backend is None:
+            return
+        create_pipeline = getattr(self.backend, "create_pipeline", None)
+        create_texture = getattr(self.backend, "create_texture", None)
+        if self.terrain_program is None and callable(create_pipeline):
+            from quadrix.render.backend_moderngl import load_shader
+
+            self.terrain_program = create_pipeline(
+                load_shader("terrain.vert"), load_shader("terrain.frag")
+            )
+        if self.terrain_texture is None and callable(create_texture):
+            self.terrain_texture = create_texture(checker_texture())
+
 
     # ------------------------------------------------------------------
     # настройки → рендер
@@ -553,6 +714,14 @@ class App:
             # Курсор переместился — обновляем подсветку наведения (hover).
             mx, my = self._screen_pos(float(args[0]), float(args[1]))
             return bool(self.screen_stack.handle_move(mx, my))
+        if kind == "mouse_move":
+            # Относительное движение мыши (игра, захваченный курсор).
+            return self._handle_mouse_move(float(args[0]), float(args[1]))
+        if kind == "keydown":
+            # Нажатие ванильной клавиши (InputState / GameScreen).
+            return self._handle_key_state(args[0], pressed=True)
+        if kind == "keyup":
+            return self._handle_key_state(args[0], pressed=False)
         if kind == "release":
             # ЛКМ отпущена — завершаем перетаскивание (слайдер больше не липнет).
             mx, my = self._screen_pos(float(args[0]), float(args[1]))
@@ -569,11 +738,28 @@ class App:
             return True
         return False
 
+    def _handle_key_state(self, key: str, *, pressed: bool) -> bool:
+        """keydown/keyup → InputState экрана игры (порт ``HeldKeys``)."""
+        screen = self.screen_stack.current
+        if not isinstance(screen, GameScreen):
+            return False
+        if pressed:
+            return bool(screen.handle_key_down(key))
+        return bool(screen.handle_key_up(key))
+
+    def _handle_mouse_move(self, dx: float, dy: float) -> bool:
+        """Относительное движение мыши → обзор камеры."""
+        screen = self.screen_stack.current
+        if not isinstance(screen, GameScreen):
+            return False
+        return bool(screen.handle_mouse_move(dx, dy))
+
     def tick(self) -> None:
-        """Один игровой такт (20 Гц): счётчик + настройки игры."""
+        """Один игровой такт (20 Гц): счётчик + движение игрока."""
         self.ticks += 1
         if self.game is not None:
             self.game.render_settings = self.render_settings
+            self.game.update(TICK_SECONDS)
 
     def render(self) -> int:
         """Кадр: очистка + панорама + экран → батч → ``backend.draw``.
@@ -603,6 +789,16 @@ class App:
                 time.monotonic(), self._panorama_speed()
             )
             self.panorama.draw(backend, self.width, self.height, yaw)
+
+        # Terrain — фон игрового экрана (рисуется до HUD-батча).
+        current = self.screen_stack.current
+        if (
+            isinstance(current, GameScreen)
+            and self.terrain_program is not None
+        ):
+            current.render_terrain(
+                backend, self.terrain_program, self.terrain_texture
+            )
 
         # Спрайтовый атлас нужен виджетам для nine-slice/логотипа.
         self.batch.atlas = self.atlas

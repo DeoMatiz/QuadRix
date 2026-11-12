@@ -44,8 +44,14 @@ class ModernglBackend:
         #: Последняя позиция курсора в оконных координатах (обновляет glfw).
         self._mouse_x: float = 0.0
         self._mouse_y: float = 0.0
+        #: Пропустить первый сдвиг после захвата/смены режима курсора.
+        self._ignore_next_cursor: bool = True
+        #: Курсор захвачен (игра): glfw держит его невидимым и по центру.
+        self._mouse_grabbed: bool = False
         #: glfw key-code -> строковое имя, понятное ``ScreenStack.handle_key``.
         self._key_names: dict[int, str] = {}
+        #: glfw key-code -> ванильное имя (``key.keyboard.w``) для InputState.
+        self._key_vanilla: dict[int, str] = {}
 
     # ------------------------------------------------------------------
     # контекст / окно
@@ -116,6 +122,7 @@ class ModernglBackend:
             glfw.set_key_callback(window, self._on_key)
             glfw.set_char_callback(window, self._on_char)
             glfw.set_framebuffer_size_callback(window, self._on_framebuffer_size)
+            self._key_vanilla = _build_vanilla_keys(glfw)
         except Exception:
             # не оставляем висящее окно/инициализированный glfw
             if self.window is not None:
@@ -392,11 +399,37 @@ class ModernglBackend:
         return float(x), float(y)
 
     def _on_cursor(self, window: Any, x: float, y: float) -> None:
-        """glfw: курсор переместился — запоминаем позицию и шлём ``move``."""
+        """glfw: курсор переместился — дельта для игры + ``("move", x, y)``."""
+        dx = float(x) - self._mouse_x
+        dy = float(y) - self._mouse_y
         self._mouse_x = float(x)
         self._mouse_y = float(y)
+        if self._ignore_next_cursor:
+            # Первый сдвиг после захвата курсора: только запоминаем позицию.
+            self._ignore_next_cursor = False
+        else:
+            self._emit("mouse_move", dx, dy)
         fx, fy = self._to_framebuffer(x, y)
         self._emit("move", fx, fy)
+
+    def set_mouse_grabbed(self, grabbed: bool) -> None:
+        """Захватить/отпустить курсор (порт ``MouseHandler.grabMouse``)."""
+        grabbed = bool(grabbed)
+        if grabbed == self._mouse_grabbed:
+            return
+        self._mouse_grabbed = grabbed
+        # Первый сдвиг после смены режима — служебный (курсор прыгает).
+        self._ignore_next_cursor = True
+        glfw = self._glfw
+        if glfw is None or self.window is None:
+            return
+        try:
+            if grabbed:
+                glfw.set_input_mode(self.window, glfw.CURSOR, glfw.CURSOR_DISABLED)
+            else:
+                glfw.set_input_mode(self.window, glfw.CURSOR, glfw.CURSOR_NORMAL)
+        except Exception:  # pragma: no cover - некоторые платформы не умеют
+            pass
 
     def _on_mouse_button(
         self, window: Any, button: int, action: int, mods: int
@@ -424,13 +457,26 @@ class ModernglBackend:
     def _on_key(
         self, window: Any, key: int, scancode: int, action: int, mods: int
     ) -> None:
-        """glfw: спецклавиши → ``("key", name, None)``."""
+        """glfw: клавиша → ``("key", short)`` и ``("keydown"/"keyup", vanilla)``.
+
+        ``key`` — короткое имя для меню (``escape``); ``keydown``/``keyup`` —
+        ванильное имя (``key.keyboard.w``) для ``InputState``/GameScreen.
+        """
         glfw = self._glfw
-        if glfw is None or action == glfw.RELEASE:
+        if glfw is None:
             return
+        vanilla = self._key_vanilla.get(key)
         name = self._key_names.get(key)
-        if name is not None:
+        if action == glfw.RELEASE:
+            if vanilla is not None:
+                self._emit("keyup", vanilla)
+            return
+        # PRESS и REPEAT: короткое имя только на PRESS (меню), ванильное —
+        # на оба, чтобы удержание клавиши не теряло состояние.
+        if action == glfw.PRESS and name is not None:
             self._emit("key", name, None)
+        if vanilla is not None:
+            self._emit("keydown", vanilla)
 
     def _on_char(self, window: Any, codepoint: int) -> None:
         """glfw: печатный символ → ``("key", "", ch)``."""
@@ -476,6 +522,49 @@ class ModernglBackend:
 # ---------------------------------------------------------------------------
 # Загрузка шейдеров из quadrix/render/shaders
 # ---------------------------------------------------------------------------
+
+def _build_vanilla_keys(glfw: Any) -> dict[int, str]:
+    """glfw key-code → ванильное имя клавиши (``key.keyboard.w``).
+
+    Покрывает буквы, цифры, пробел, Shift/Ctrl/Alt и стрелки — то, что
+    читает ``InputState``/``KeyBinds`` (порт ``keybinds::key_name``).
+    """
+    names: dict[int, str] = {}
+    for code in range(ord("A"), ord("Z") + 1):
+        names[glfw.__dict__.get(f"KEY_{chr(code)}", -1)] = f"key.keyboard.{chr(code).lower()}"
+    for i in range(10):
+        names[glfw.__dict__.get(f"KEY_{i}", -1)] = f"key.keyboard.{i}"
+    specials = {
+        "KEY_SPACE": "key.keyboard.space",
+        "KEY_ESCAPE": "key.keyboard.escape",
+        "KEY_ENTER": "key.keyboard.enter",
+        "KEY_TAB": "key.keyboard.tab",
+        "KEY_BACKSPACE": "key.keyboard.backspace",
+        "KEY_LEFT_SHIFT": "key.keyboard.left.shift",
+        "KEY_RIGHT_SHIFT": "key.keyboard.right.shift",
+        "KEY_LEFT_CONTROL": "key.keyboard.left.control",
+        "KEY_RIGHT_CONTROL": "key.keyboard.right.control",
+        "KEY_LEFT_ALT": "key.keyboard.left.alt",
+        "KEY_RIGHT_ALT": "key.keyboard.right.alt",
+        "KEY_UP": "key.keyboard.up",
+        "KEY_DOWN": "key.keyboard.down",
+        "KEY_LEFT": "key.keyboard.left",
+        "KEY_RIGHT": "key.keyboard.right",
+        "KEY_F1": "key.keyboard.f1",
+        "KEY_F2": "key.keyboard.f2",
+        "KEY_F3": "key.keyboard.f3",
+        "KEY_F4": "key.keyboard.f4",
+        "KEY_F5": "key.keyboard.f5",
+        "KEY_F11": "key.keyboard.f11",
+    }
+    for const, vanilla in specials.items():
+        code = glfw.__dict__.get(const)
+        if code is not None:
+            names[code] = vanilla
+    # Убрать служебную запись -1 (если код не нашёлся).
+    names.pop(-1, None)
+    return names
+
 
 def load_shader(name: str) -> str:
     """Прочитать GLSL-файл из ``quadrix/render/shaders`` по имени."""
