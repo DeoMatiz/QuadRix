@@ -13,6 +13,7 @@ FALLBACK — плоский мир).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
@@ -34,6 +35,10 @@ GROUND_TOP = 4
 MESH_HALF = 24
 #: Идентификатор твёрдого блока в меше (0 — воздух в mesher).
 SOLID_STATE_ID = 1
+#: Радиус меша вокруг игрока в чанках (PART 3: ограничить память/время).
+#: Сервер шлёт ~329 чанков (view_distance 8); полный меш — ~22 млн вершин
+#: (~700 МБ). Меш радиусом 4 — 81 чанк (~5 млн вершин).
+RADIUS_CHUNKS = 4
 
 
 class FlatWorld:
@@ -198,17 +203,46 @@ class ChunkTerrainRenderer:
     Порт подмножества ``horizon-client-render/src/chunk.rs``/``mesher.rs``:
     на колонну — один ``mesh_chunk`` (координаты в мире: ``+cx*16``,
     ``+chunk.min_y``, ``+cz*16``). Меши пересобираются, когда меняется набор
-    пришедших чанков (``world.chunks``), — этого достаточно для PART 3
-    (полный стриминг/освещение — отдельные PART'ы).
+    видимых чанков (``world.chunks``) — этого достаточно для PART 3
+    (полный стриминг/освещение — отдельные PART'ы). Мешится только область
+    ``RADIUS_CHUNKS`` вокруг игрока (``refresh(center=...)``), иначе полный
+    меш всех ~329 чанков занял бы сотни мегабайт.
     """
 
-    def __init__(self, world: Any) -> None:
+    def __init__(self, world: Any, radius: int = RADIUS_CHUNKS) -> None:
         self.world = world
+        #: Радиус в чанках вокруг игрока (``None`` — все пришедшие чанки).
+        self.radius = int(radius) if radius else None
         self.vertices: Optional[np.ndarray] = None
         self._keys: Optional[tuple] = None
 
-    def refresh(self) -> bool:
-        """Пересобрать меши, если набор чанков изменился. ``True`` — обновили."""
+    def _filter(self, items: list, center: Any) -> list:
+        """Оставить чанки в радиусе ``self.radius`` вокруг ``center``.
+
+        ``center`` — мировая позиция ``(x, y, z)`` игрока; центральный чанк —
+        ``floor(x/16)``, ``floor(z/16)`` (как в ``chunk.rs``). Без ``center``
+        (или при ``radius is None``) ограничение не применяется.
+        """
+        if self.radius is None or center is None:
+            return items
+        ccx = int(math.floor(float(center[0]) / 16.0))
+        ccz = int(math.floor(float(center[2]) / 16.0))
+        r = self.radius
+        return [
+            (key, chunk)
+            for key, chunk in items
+            if abs(int(key[0]) - ccx) <= r and abs(int(key[1]) - ccz) <= r
+        ]
+
+    def refresh(self, center: Any = None) -> bool:
+        """Пересобрать меши, если набор видимых чанков изменился.
+
+        ``True`` — обновили. Снимок ``list(chunks.items())`` обязателен:
+        поток-читатель добавляет чанки в ``world.chunks`` параллельно с этим
+        вызовом, и итерация по живому словарю дала бы
+        ``RuntimeError: dictionary changed size``. ``center`` ограничивает
+        меш радиусом ``self.radius`` вокруг игрока.
+        """
         chunks = getattr(self.world, "chunks", None)
         if not chunks:
             if self._keys is None:
@@ -216,17 +250,18 @@ class ChunkTerrainRenderer:
             self.vertices = None
             self._keys = None
             return True
-        keys = tuple(sorted(chunks.keys()))
+        items = self._filter(list(chunks.items()), center)
+        keys = tuple(sorted(key for key, _ in items))
         if keys == self._keys:
             return False
         self._keys = keys
-        self._rebuild(chunks)
+        self._rebuild(items)
         return True
 
-    def _rebuild(self, chunks: dict) -> None:
+    def _rebuild(self, items: list) -> None:
         """Собрать меши всех пришедших колонн в один буфер вершин."""
         parts: list[np.ndarray] = []
-        for (cx, cz), chunk in chunks.items():
+        for (cx, cz), chunk in items:
             blocks = chunk_blocks(chunk)
             if blocks.shape[1] == 0:
                 continue

@@ -289,6 +289,32 @@ def test_client_world_to_game() -> None:
     assert blocks[0, 0, 0] == solid_id
 
 
+def test_chunk_mesh_bounded_by_radius() -> None:
+    """Меш ограничен ``RADIUS_CHUNKS`` вокруг игрока (память/время, PART 3)."""
+    from quadrix.render.game_world import RADIUS_CHUNKS
+
+    world = FakeWorld()
+    for cx, cz in ((0, 0), (1, 0), (100, 100)):
+        world.chunks[(cx, cz)] = Chunk.empty(cx, cz)
+
+    renderer = ChunkTerrainRenderer(world, radius=2)
+    assert ChunkTerrainRenderer(world).radius == RADIUS_CHUNKS
+    assert renderer.refresh(center=(0.0, 0.0, 0.0)) is True
+    assert renderer._keys == ((0, 0), (1, 0))
+
+    # Переход к далёким чанкам пересобирает меш: в радиусе только они.
+    assert renderer.refresh(center=(100 * 16.0, 0.0, 100 * 16.0)) is True
+    assert renderer._keys == ((100, 100),)
+
+    # Тот же центр (тот же набор) — пересборки нет.
+    assert renderer.refresh(center=(100 * 16.0, 0.0, 100 * 16.0)) is False
+
+    # radius=None — без ограничения (все пришедшие чанки).
+    all_renderer = ChunkTerrainRenderer(world, radius=None)
+    all_renderer.refresh(center=(0.0, 0.0, 0.0))
+    assert all_renderer._keys == ((0, 0), (1, 0), (100, 100))
+
+
 # ---------------------------------------------------------------------------
 # WASD через Client.tick
 # ---------------------------------------------------------------------------

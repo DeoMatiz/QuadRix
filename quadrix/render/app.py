@@ -317,7 +317,7 @@ class GameScreen(Screen):
         if client is not None:
             # Меш реальных чанков сервера (пересобирается по мере прихода).
             self.terrain = ChunkTerrainRenderer(self.world)
-            self.terrain.refresh()
+            self.terrain.refresh(center=self._player_center())
         else:
             self.terrain = TerrainRenderer(self.world)
 
@@ -562,6 +562,15 @@ class GameScreen(Screen):
         self.tick_mining()
         self._sync_camera()
 
+    def _player_center(self) -> tuple:
+        """Мировая позиция игрока для ограничения меша (``RADIUS_CHUNKS``).
+
+        Передаётся в :meth:`ChunkTerrainRenderer.refresh`, чтобы мешились
+        только чанки вокруг игрока (PART 3: экономия памяти/времени).
+        """
+        pos = self.player_motion.position
+        return (float(pos.x), float(pos.y), float(pos.z))
+
     def _sync_camera(self) -> None:
         """Позиция/углы камеры из PlayerMotion (порт ``Camera.alignWithEntity``)."""
         motion = self.player_motion
@@ -596,8 +605,12 @@ class GameScreen(Screen):
         if motion is not None and self.player_motion is not motion:
             # Подключение завершилось в потоке — берём серверную мотивацию.
             self.player_motion = motion
-        # Поворот из мыши (yaw/pitch), как в локальном пути.
-        if motion is not None:
+        # Тикаем только когда соединение реально установлено (порт
+        # ``join_server``: ``connected`` выставляется в конце handshake/login/
+        # configuration/play). Иначе окно успело бы послать пакет до ``conn``.
+        ready = remote is None or remote.connected
+        if motion is not None and ready:
+            # Поворот из мыши (yaw/pitch), как в локальном пути.
             motion.yaw = float(self.rotation.y_rot)
             try:
                 motion.pitch = float(self.rotation.x_rot)
@@ -617,7 +630,7 @@ class GameScreen(Screen):
         terrain = self.terrain
         refresh = getattr(terrain, "refresh", None)
         if callable(refresh):
-            refresh()
+            refresh(center=self._player_center())
         self._sync_camera()
 
     def _next_sequence(self) -> int:
