@@ -89,6 +89,14 @@ SPRITES: dict[str, tuple[str, Optional[tuple[int, int, int, int]]]] = {
     "gui/sprites/icon/language": ("gui/sprites/icon/language.png", None),
     "gui/sprites/icon/accessibility": ("gui/sprites/icon/accessibility.png", None),
     "gui/sprites/friends/friends": ("gui/sprites/friends/friends.png", None),
+    # -- Gameplay PART 2: hotbar и инвентарь -----------------------------
+    "gui/sprites/hud/hotbar": ("gui/sprites/hud/hotbar.png", None),
+    "gui/sprites/hud/hotbar_selection": (
+        "gui/sprites/hud/hotbar_selection.png",
+        None,
+    ),
+    "gui/sprites/container/slot": ("gui/sprites/container/slot.png", None),
+    "gui/container/inventory": ("gui/container/inventory.png", None),
 }
 
 #: Логический размер в GUI-пикселях там, где он не равен размеру PNG

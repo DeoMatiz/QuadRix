@@ -104,6 +104,7 @@ class ModernglBackend:
             # клики/клавиши не доходят до ``App.handle_event``.
             self._key_names = {
                 glfw.KEY_ESCAPE: "escape",
+                glfw.KEY_E: "e",
                 glfw.KEY_ENTER: "enter",
                 glfw.KEY_KP_ENTER: "enter",
                 glfw.KEY_BACKSPACE: "backspace",
@@ -116,6 +117,11 @@ class ModernglBackend:
                 glfw.KEY_END: "end",
                 glfw.KEY_TAB: "tab",
             }
+            # Цифры 1..9 выбирают слот hotbar (``Inventory.setSelected``).
+            for _digit in range(1, 10):
+                _code = glfw.__dict__.get(f"KEY_{_digit}")
+                if _code is not None:
+                    self._key_names[_code] = str(_digit)
             glfw.set_cursor_pos_callback(window, self._on_cursor)
             glfw.set_mouse_button_callback(window, self._on_mouse_button)
             glfw.set_scroll_callback(window, self._on_scroll)
@@ -434,21 +440,27 @@ class ModernglBackend:
     def _on_mouse_button(
         self, window: Any, button: int, action: int, mods: int
     ) -> None:
-        """glfw: нажатие/отпускание ЛКМ → ``("click", x, y)`` / ``("release", x, y)``.
+        """glfw: ЛКМ/ПКМ → ``("click", x, y, button)`` / ``("release", x, y, button)``.
 
-        Отпускание обязательно: без него слайдер остаётся в ``dragging`` и
-        ручка «прилипает» к курсору (порт ``MouseInput`` в options_ui.rs).
+        ``button`` — 0 (левый) / 1 (правый): ``GameScreen`` по нему различает
+        разрушение и установку. Отпускание обязательно: без него слайдер
+        остаётся в ``dragging`` и ручка «прилипает» к курсору
+        (порт ``MouseInput`` в options_ui.rs).
         """
         glfw = self._glfw
         if glfw is None:
             return
-        if button != glfw.MOUSE_BUTTON_LEFT:
+        if button == glfw.MOUSE_BUTTON_LEFT:
+            index = 0
+        elif button == getattr(glfw, "MOUSE_BUTTON_RIGHT", -1):
+            index = 1
+        else:
             return
         x, y = self._to_framebuffer(self._mouse_x, self._mouse_y)
         if action == glfw.PRESS:
-            self._emit("click", x, y)
+            self._emit("click", x, y, index)
         elif action == glfw.RELEASE:
-            self._emit("release", x, y)
+            self._emit("release", x, y, index)
 
     def _on_scroll(self, window: Any, xoffset: float, yoffset: float) -> None:
         """glfw: колесо мыши → ``("scroll", dy)``."""

@@ -36,7 +36,7 @@ def _atlas() -> GuiAtlas:
 def test_load_real_atlas_has_every_sprite() -> None:
     atlas = _atlas()
     assert set(atlas.sprites) == set(SPRITES)
-    assert len(atlas.sprites) == 20
+    assert len(atlas.sprites) == len(SPRITES)
     assert atlas.width > 0 and atlas.height > 0
     assert atlas.image.shape[2] == 4
 

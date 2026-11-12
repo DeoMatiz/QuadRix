@@ -14,7 +14,7 @@ FALLBACK — плоский мир).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
 
@@ -35,19 +35,78 @@ class FlatWorld:
 
     ``block(x, y, z)`` отдаёт имя блока: трава на верхнем слое, земля
     ниже, камень под ними — как у плоского мира Minecraft.
+
+    Поверх базы держится словарь ``_overrides``: он и есть мир для
+    Gameplay PART 2 — ``set_block`` (разрушение/установка) пишет туда, а
+    ``get_block``/``block`` читают. Rust-мир (``Level``/чанки) — следующий
+    PART; интерфейс ``get_block``/``set_block`` уже тот, что ждут
+    ``block_survival.break_block`` и ``block_placement`` (позиция-кортеж,
+    состояние, флаги).
     """
 
     def __init__(self, ground_top: int = GROUND_TOP) -> None:
         self.ground_top = int(ground_top)
+        #: (x, y, z) -> имя блока (всё, что не задано здесь, — база).
+        self._overrides: dict[tuple[int, int, int], str] = {}
 
-    def block(self, x: int, y: int, z: int) -> str:
-        """Имя блока в ``(x, y, z)`` (интерфейс ``world.block`` из motion)."""
+    def _base_block(self, y: int) -> str:
+        """Блок плоской базы по высоте (x/z не важны)."""
         if y < 0:
             return "minecraft:stone"
         if y < self.ground_top - 1:
             return "minecraft:dirt"
         if y == self.ground_top - 1:
             return "minecraft:grass_block"
+        return "minecraft:air"
+
+    def block(self, x: int, y: int, z: int) -> str:
+        """Имя блока в ``(x, y, z)`` (интерфейс ``world.block`` из motion)."""
+        key = (int(x), int(y), int(z))
+        name = self._overrides.get(key)
+        if name is not None:
+            return name
+        return self._base_block(int(y))
+
+    # -- интерфейс мира для block_survival / block_placement --------------
+
+    def get_block(self, position: Sequence[int]) -> str:
+        """Состояние блока в ``position`` (кортеж) — имя блока.
+
+        Так же, как ``Level.getBlockState`` в Rust, только плоское имя:
+        ``block_placement``/``block_survival`` резолвят его в id реестром.
+        """
+        return self.block(int(position[0]), int(position[1]), int(position[2]))
+
+    def set_block(
+        self, position: Sequence[int], state: Any, flags: int = 3
+    ) -> bool:
+        """Записать блок (``Level.setBlock``): имя или ``BlockStateId``.
+
+        ``state`` — имя блока, ``BlockState`` или ``BlockStateId`` из
+        реестра ``.local``. Неизвестный id трактуется как воздух. Флаги
+        (11 — место, 3 — разрушение) на плоском мире не влияют; сохранены
+        для совместимости с сигнатурой Rust.
+        """
+        name = self._state_name(state)
+        self._overrides[(int(position[0]), int(position[1]), int(position[2]))] = name
+        return True
+
+    @staticmethod
+    def _state_name(state: Any) -> str:
+        """Привести состояние к имени блока (для словаря ``_overrides``)."""
+        if isinstance(state, str):
+            return state
+        name = getattr(state, "name", None)
+        if isinstance(name, str):
+            return name
+        state_id = getattr(state, "id", None)
+        if isinstance(state_id, int):
+            from quadrix.world.block_placement import default_registry
+            from quadrix.world.registry import BlockStateId
+
+            found = default_registry().state(BlockStateId(state_id))
+            if found is not None:
+                return found.name
         return "minecraft:air"
 
 

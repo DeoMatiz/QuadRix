@@ -676,8 +676,8 @@ def test_backend_mouse_button_emits_click_and_release() -> None:
     backend._on_mouse_button(None, 1, _FakeGlfw.PRESS, 0)
 
     assert [kind for kind, _ in events] == ["click", "release"]
-    assert events[0][1] == (3.0, 4.0)
-    assert events[1][1] == (3.0, 4.0)
+    assert events[0][1] == (3.0, 4.0, 0)
+    assert events[1][1] == (3.0, 4.0, 0)
 
 
 # ---------------------------------------------------------------------------

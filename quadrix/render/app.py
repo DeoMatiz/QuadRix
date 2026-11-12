@@ -24,6 +24,8 @@ PART 3 — интеграция готовых частей: берёт экра
 
 from __future__ import annotations
 
+import json
+import random as _random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,11 +34,12 @@ from typing import Any, Optional
 import numpy as np
 
 from quadrix.core import lang
-from quadrix.core.geometry import Vec3
+from quadrix.core.geometry import BlockPos, Vec3
 from quadrix.core.lang import Language
 from quadrix.input.input_state import InputState
 from quadrix.input.keybinds import KeyBinds
 from quadrix.input.mouse import LookOptions, MouseLook, Rotation as MouseRotation
+from quadrix.items.items import ItemStack
 from quadrix.motion.core import (
     MovementResources,
     PlayerMotion,
@@ -47,6 +50,9 @@ from quadrix.motion.core import (
 from quadrix.render.camera import Camera
 from quadrix.render.game_world import FlatWorld, TerrainRenderer, checker_texture
 from quadrix.render.gui_atlas import GUI_TEXTURE, load_gui_atlas
+from quadrix.render.hotbar import Hotbar
+from quadrix.render.interaction import BlockHitResult, pick_block, reach_for
+from quadrix.render.inventory_screen import InventoryScreen
 from quadrix.render.menu import (
     FOV_DEFAULT,
     MASTER_VOLUME_DEFAULT,
@@ -67,12 +73,21 @@ from quadrix.render.menu import (
 )
 from quadrix.render.panorama import Panorama, Rotation, load_panorama
 from quadrix.render.ui import Batch, Button, Font
+from quadrix.world.block_placement import (
+    PlacementContext,
+    default_placement,
+    get_placement_state,
+    relative as relative_pos,
+)
+from quadrix.world.block_survival import break_block
+from quadrix.world.player_inventory import PlayerInventory
 
 __all__ = [
     "App",
     "DEFAULT_HEIGHT",
     "DEFAULT_WIDTH",
     "GameScreen",
+    "Mining",
     "RenderSettings",
     "TICK_RATE",
     "TICK_SECONDS",
@@ -110,6 +125,47 @@ class RenderSettings:
     master_volume: float = MASTER_VOLUME_DEFAULT
 
 
+#: Путь к ``gameplay-facts.json`` (hardness блоков; как в ``block_survival``).
+_FACTS_PATH = (
+    Path(".local") / "horizon-client" / "26.3" / "gameplay-facts.json"
+)
+#: Кэш списка фактов состояний (индексируется ``BlockStateId.id``).
+_FACTS_STATES: Optional[list] = None
+
+
+def block_hardness(name: str) -> float:
+    """Твёрдость блока по имени из ``gameplay-facts.json`` (порт ``facts``).
+
+    ``game.rs::destroy_progress`` берёт ``hardness`` состояния из фактов.
+    Таблица состояний в ``.local`` (порядок = ``block-registry.nbt``), поэтому
+    id состояния — индекс фактов. Неизвестный блок — 1.0 (безопасный дефолт).
+    """
+    global _FACTS_STATES
+    if _FACTS_STATES is None:
+        try:
+            _FACTS_STATES = json.loads(_FACTS_PATH.read_text(encoding="utf-8"))["states"]
+        except (OSError, ValueError, KeyError):
+            _FACTS_STATES = []
+    from quadrix.world.block_placement import default_registry
+
+    sid = default_registry().default_state(name)
+    if sid is None or sid.id < 0 or sid.id >= len(_FACTS_STATES):
+        return 1.0
+    return float(_FACTS_STATES[sid.id].get("hardness", 1.0))
+
+
+@dataclass
+class Mining:
+    """Текущая цель добычи (порт ``game.rs::Mining``).
+
+    ``progress`` накапливается за тики; ``>= 1.0`` — блок разрушен.
+    """
+
+    pos: tuple[int, int, int]
+    progress: float = 0.0
+    ticks: int = 0
+
+
 class GameScreen(Screen):
     """Игровой экран (порт ``Screen::Playing``) — Gameplay PART 1.
 
@@ -122,6 +178,28 @@ class GameScreen(Screen):
     Мир пока плоский (``# FALLBACK:`` см. ``quadrix/render/game_world.py``):
     настоящие чанки — следующий PART.
     """
+
+    #: Стартовый набор Gameplay PART 2 (локальный демо-мир без сервера).
+    #: В Rust creative-инвентарь открывается клавишей Creative; здесь хотбар
+    #: предзаполнен блоками, чтобы клик сразу что-то ставил/ломал.
+    DEFAULT_HOTBAR: tuple[str, ...] = (
+        "minecraft:grass_block",
+        "minecraft:dirt",
+        "minecraft:stone",
+        "minecraft:oak_planks",
+        "minecraft:cobblestone",
+        "minecraft:sand",
+        "minecraft:glass",
+        "minecraft:oak_log",
+        "minecraft:torch",
+    )
+    #: ``destroy_delay`` (game.rs): тики между мгновенными разрушениями.
+    DESTROY_DELAY: int = 5
+    #: Дельта прогресса добычи за тик: ``1 / (hardness * N)``.
+    #: FALLBACK: полная формула ``destroy_progress`` (скорость инструмента,
+    #: enchant, on-ground) не портирована — здесь упрощённая зависимость от
+    #: твёрдости блока, как в ванильном «руками».
+    MINING_TICKS_PER_HARDNESS: float = 20.0
 
     def __init__(
         self,
@@ -136,6 +214,9 @@ class GameScreen(Screen):
         input_state: Optional[InputState] = None,
         keybinds: Optional[KeyBinds] = None,
         on_close: Optional[Any] = None,
+        creative: bool = False,
+        on_pointer: Optional[Any] = None,
+        inventory: Optional[PlayerInventory] = None,
     ) -> None:
         super().__init__(width, height)
         self.kind = kind
@@ -145,6 +226,19 @@ class GameScreen(Screen):
             render_settings if render_settings is not None else RenderSettings()
         )
         self.on_close = on_close
+        #: ``true`` — режим creative (мгновенное разрушение, дальность 5.0).
+        self.creative = bool(creative)
+        #: Коллбэк захвата/отпускания курсора (``App._set_mouse_grabbed``).
+        self.on_pointer = on_pointer
+
+        # -- инвентарь / hotbar (Gameplay PART 2) -------------------------
+        self.inventory = inventory if inventory is not None else PlayerInventory()
+        self.hotbar = Hotbar(self.inventory)
+        self.inventory_screen: Optional[InventoryScreen] = None
+        self.mining: Optional[Mining] = None
+        self.destroy_delay: int = 0
+        self._rng = _random.Random()
+        self._populate_default_hotbar()
 
         # -- ввод ---------------------------------------------------------
         self.input_state = input_state if input_state is not None else InputState()
@@ -197,6 +291,193 @@ class GameScreen(Screen):
         if self.stack is not None:
             self.stack.pop()
 
+    # -- горячий старт (Gameplay PART 2) --------------------------------
+
+    def _populate_default_hotbar(self) -> None:
+        """Заполнить hotbar стартовыми блоками (демо-мир без сервера)."""
+        for i, name in enumerate(self.DEFAULT_HOTBAR):
+            self.inventory.items[i] = ItemStack(name, 64)
+
+    # -- raytrace клика (game.rs::aim / pick / reach) ---------------------
+
+    def eye_position(self) -> Vec3:
+        """Позиция глаз (``Camera`` уже включает ``eye_height``)."""
+        x, y, z = self.camera.position
+        return Vec3(float(x), float(y), float(z))
+
+    def look_vector(self) -> Vec3:
+        """Направление взгляда (``pick_view_vector``)."""
+        f = self.camera.forward()
+        return Vec3(float(f[0]), float(f[1]), float(f[2]))
+
+    def reach(self) -> float:
+        """Дальность клика по блоку (creative 5.0 / survival 4.5)."""
+        return reach_for(self.creative)
+
+    def pick(self) -> Optional[BlockHitResult]:
+        """Первое попадание по блоку вдоль взгляда (``Game::pick``)."""
+        return pick_block(
+            self.world, self.eye_position(), self.look_vector(), self.reach()
+        )
+
+    # -- клик: разрушение / установка (game.rs::play_mouse/tick_mining) ---
+
+    def handle_mouse_click(self, button: int = 0) -> bool:
+        """Клик в мире: 0 — атака (добыча), 1 — использование (установка)."""
+        if self.inventory_screen is not None:
+            return True
+        if button == 0:
+            self._start_attack()
+        elif button == 1:
+            self._use()
+        return True
+
+    def _start_attack(self) -> Optional[BlockHitResult]:
+        """ЛКМ: creative — мгновенно, survival — начать добычу (tick_mining)."""
+        hit = self.pick()
+        if hit is None:
+            self.mining = None
+            return None
+        pos = (hit.block.x, hit.block.y, hit.block.z)
+        if self.creative:
+            if self.destroy_delay > 0:
+                # Между мгновенными разрушениями (game.rs: destroy_delay).
+                return hit
+            self._destroy(pos)
+            self.destroy_delay = self.DESTROY_DELAY
+            return hit
+        self.mining = Mining(pos=pos)
+        return hit
+
+    def tick_mining(self) -> None:
+        """Один тик добычи (``Game::tick_mining``)."""
+        if self.destroy_delay > 0:
+            self.destroy_delay -= 1
+        mining = self.mining
+        if mining is None:
+            return
+        hit = self.pick()
+        if hit is None or (hit.block.x, hit.block.y, hit.block.z) != mining.pos:
+            self.mining = None
+            return
+        hardness = block_hardness(self.world.get_block(mining.pos))
+        step = 1.0 / max(1.0, hardness * self.MINING_TICKS_PER_HARDNESS)
+        mining.progress += step
+        mining.ticks += 1
+        if mining.progress >= 1.0:
+            self.mining = None
+            self._destroy(mining.pos)
+            self.destroy_delay = self.DESTROY_DELAY
+
+    def _destroy(self, pos: tuple[int, int, int]) -> list[ItemStack]:
+        """Разрушить блок: дроп в инвентарь (``Game::break_block``)."""
+        stack = self.inventory.selected_item()
+        drops = break_block(self.world, pos, stack, self._rng)
+        for drop in drops:
+            self.inventory.add_stack(drop)
+        self.inventory.changed()
+        return drops
+
+    def _use(self) -> bool:
+        """ПКМ: поставить блок предметом из выбранного слота.
+
+        Порт ``use_hand``/``use_item_on``: позиция — сам кликнутый блок, если
+        его можно заменить, иначе сосед по грани (``BlockPlaceContext``).
+        """
+        hit = self.pick()
+        if hit is None:
+            return False
+        stack = self.inventory.selected_item()
+        if stack is None or stack.is_empty():
+            return False
+        placement = default_placement()
+        player_input = self.input_state.to_player_input(self.keybinds)
+        yaw = float(self.camera.yaw)
+        pitch = float(self.camera.pitch)
+        clicked = hit.block
+        cpos = (clicked.x, clicked.y, clicked.z)
+        base_ctx = PlacementContext(
+            pos=clicked,
+            hit_pos=clicked,
+            face=hit.direction,
+            hit=hit.location,
+            inside=hit.inside,
+            yaw=yaw,
+            pitch=pitch,
+            sneaking=bool(player_input.sneak),
+            item=stack.item,
+        )
+        target_state = self.world.get_block(cpos)
+        if placement.can_be_replaced(target_state, base_ctx):
+            pos = cpos
+            replace_clicked = True
+        else:
+            pos = relative_pos(cpos, hit.direction)
+            replace_clicked = False
+        ctx = PlacementContext(
+            pos=BlockPos(pos[0], pos[1], pos[2]),
+            hit_pos=clicked,
+            face=hit.direction,
+            hit=hit.location,
+            inside=hit.inside,
+            yaw=yaw,
+            pitch=pitch,
+            sneaking=bool(player_input.sneak),
+            item=stack.item,
+            replace_clicked=replace_clicked,
+        )
+        state = get_placement_state(stack, ctx, placement=placement)
+        if state is None:
+            return False
+        if not placement.can_place(self.world, state, pos, ctx):
+            return False
+        if not placement.place(self.world, pos, state, 11):
+            return False
+        self._consume_selected(stack)
+        return True
+
+    def _consume_selected(self, stack: ItemStack) -> None:
+        """Уменьшить выбранный стак на 1 (очистить слот, если опустел)."""
+        stack.count -= 1
+        if stack.count <= 0:
+            self.inventory.set_selected_item(None)
+        self.inventory.changed()
+
+    # -- инвентарь (E) ----------------------------------------------------
+
+    def open_inventory(self) -> Optional[InventoryScreen]:
+        """Открыть экран инвентаря (``Minecraft.setScreen``, отпустить курсор)."""
+        if self.inventory_screen is not None:
+            return self.inventory_screen
+        screen = InventoryScreen(
+            self.inventory,
+            self.width,
+            self.height,
+            on_close=self._close_inventory,
+        )
+        self.inventory_screen = screen
+        if self.stack is not None:
+            self.stack.push(screen)
+        if self.on_pointer is not None:
+            self.on_pointer(False)
+        return screen
+
+    def _close_inventory(self) -> None:
+        """Закрыть инвентарь (снять со стека, вернуть курсор в игру)."""
+        screen = self.inventory_screen
+        if screen is None:
+            return
+        self.inventory_screen = None
+        stack = self.stack
+        if stack is not None:
+            inner = getattr(stack, "_stack", None)
+            if inner and inner[-1] is screen:
+                stack.pop()
+        if self.on_pointer is not None:
+            self.on_pointer(True)
+
+    # -- навигация -------------------------------------------------------
+
     def title_key(self) -> str:
         """Ключ перевода заголовка (``menu.singleplayer`` / ``menu.multiplayer``)."""
         return "menu." + self.kind
@@ -215,6 +496,7 @@ class GameScreen(Screen):
             jump_from_ground(motion, self.world, player_input)
         motion_travel(motion, player_input, self.world)
         motion_tick(motion, dt, self.world)
+        self.tick_mining()
         self._sync_camera()
 
     def _sync_camera(self) -> None:
@@ -232,11 +514,31 @@ class GameScreen(Screen):
     # -- ввод -------------------------------------------------------------
 
     def handle_key(self, key: str, ch: Optional[str] = None) -> bool:
-        """Короткое имя клавиши (меню): Escape закрывает экран."""
+        """Клавиши игры: инвентарь (E), выбор hotbar (1..9), Escape.
+
+        Пока открыт инвентарь, клавиши идут ему (``E``/``Escape`` закрывают).
+        """
+        if self.inventory_screen is not None:
+            return bool(self.inventory_screen.handle_key(key, ch))
         if key == "escape":
             self._back()
             return True
+        if self.hotbar.select_key(key):
+            return True
+        if key == "e":
+            self.open_inventory()
+            return True
         return False
+
+    def handle_scroll(self, dy: float) -> bool:
+        """Колесо мыши — выбор слота hotbar (``Inventory.swapPaint``).
+
+        Ваниль: прокрутка вверх (``dy > 0``) — предыдущий слот.
+        """
+        if self.inventory_screen is not None:
+            return False
+        self.hotbar.scroll(-1 if dy > 0 else 1)
+        return True
 
     def handle_key_down(self, key: str) -> bool:
         """Нажатие ванильной клавиши (``key.keyboard.w``) → InputState."""
@@ -259,19 +561,16 @@ class GameScreen(Screen):
         self._sync_camera()
         return True
 
-    def handle_mouse_click(self, button: int = 0) -> bool:
-        """Клик в мире (attack/use) — Gameplay PART 2."""
-        return True
-
     # -- рендер -----------------------------------------------------------
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        """HUD над terrain: прицел в центре (terrain рисует ``App``)."""
+        """HUD над terrain: прицел в центре + hotbar (``hud_layout::hotbar``)."""
         cx = self.width / 2.0
         cy = self.height / 2.0
         color = 0xFFFFFFFF
         solid(batch, font, cx - 5.0, cy - 0.5, 10.0, 1.0, color)
         solid(batch, font, cx - 0.5, cy - 5.0, 1.0, 10.0, color)
+        self.hotbar.render(batch, font, self.width, self.height)
 
     def render_terrain(self, backend: Any, program: Any, texture: Any) -> None:
         """Нарисовать меш мира с MVP камеры (вызывает ``App.render``)."""
@@ -336,6 +635,8 @@ class App:
         self.ticks = 0
         self.frames = 0
         self.running = False
+        #: Курсор захвачен игрой (порт ``MouseHandler.grabMouse``).
+        self._mouse_grabbed = False
         #: Текущий ``GameScreen`` (порт ``Game.screen == Screen::Playing``).
         self.game: Optional[GameScreen] = None
         #: Снимок настроек, которые получает рендер (см. ``RenderSettings``).
@@ -487,6 +788,7 @@ class App:
             height=self.screen_stack.current.height,
             render_settings=self.render_settings,
             on_close=self._close_game,
+            on_pointer=self._set_mouse_grabbed,
         )
         self.screen_stack.push(screen)
         self.game = screen
@@ -501,6 +803,7 @@ class App:
         self._set_mouse_grabbed(False)
 
     def _set_mouse_grabbed(self, grabbed: bool) -> None:
+        self._mouse_grabbed = bool(grabbed)
         backend = self.backend
         setter = getattr(backend, "set_mouse_grabbed", None)
         if callable(setter):
@@ -703,6 +1006,11 @@ class App:
         """
         if kind == "click":
             mx, my = self._screen_pos(float(args[0]), float(args[1]))
+            button = int(args[2]) if len(args) > 2 else 0
+            current = self.screen_stack.current
+            # В захваченном курсоре клик — это действие в мире (атака/использование).
+            if isinstance(current, GameScreen) and self._mouse_grabbed:
+                return bool(current.handle_mouse_click(button))
             return bool(self.screen_stack.handle_click(mx, my))
         if kind == "key":
             key = args[0]
