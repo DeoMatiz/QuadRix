@@ -197,7 +197,11 @@ def test_app_singleplayer_and_multiplayer_push_game_screen() -> None:
 
     app.screen_stack.pop()
     multi = app.open_multiplayer()
-    assert isinstance(multi, GameScreen) and multi.kind == "multiplayer"
+    # PART 3: Multiplayer ведёт на список серверов, а не сразу в игру.
+    from quadrix.render.multiplayer_screen import MultiplayerScreen
+
+    assert isinstance(multi, MultiplayerScreen)
+    assert app.screen_stack.current is multi
 
 
 # ---------------------------------------------------------------------------

@@ -48,7 +48,12 @@ from quadrix.motion.core import (
     travel as motion_travel,
 )
 from quadrix.render.camera import Camera
-from quadrix.render.game_world import FlatWorld, TerrainRenderer, checker_texture
+from quadrix.render.game_world import (
+    ChunkTerrainRenderer,
+    FlatWorld,
+    TerrainRenderer,
+    checker_texture,
+)
 from quadrix.render.gui_atlas import GUI_TEXTURE, load_gui_atlas
 from quadrix.render.hotbar import Hotbar
 from quadrix.render.interaction import BlockHitResult, pick_block, reach_for
@@ -72,6 +77,12 @@ from quadrix.render.menu import (
     solid,
 )
 from quadrix.render.panorama import Panorama, Rotation, load_panorama
+from quadrix.render.remote import RemoteConnection
+from quadrix.render.multiplayer_screen import (
+    MultiplayerScreen,
+    ServersStore,
+    parse_address,
+)
 from quadrix.render.ui import Batch, Button, Font
 from quadrix.world.block_placement import (
     PlacementContext,
@@ -217,6 +228,10 @@ class GameScreen(Screen):
         creative: bool = False,
         on_pointer: Optional[Any] = None,
         inventory: Optional[PlayerInventory] = None,
+        address: Optional[str] = None,
+        client: Optional[Any] = None,
+        remote: Optional[Any] = None,
+        on_disconnect: Optional[Any] = None,
     ) -> None:
         super().__init__(width, height)
         self.kind = kind
@@ -230,6 +245,19 @@ class GameScreen(Screen):
         self.creative = bool(creative)
         #: Коллбэк захвата/отпускания курсора (``App._set_mouse_grabbed``).
         self.on_pointer = on_pointer
+
+        # -- мультиплеер (Gameplay PART 3) --------------------------------
+        #: Адрес сервера (``None`` — локальный singleplayer).
+        self.address = address
+        #: Подключённый :class:`Client` (или ``None``).
+        self.client = client
+        #: :class:`RemoteConnection` фонового чтения пакетов (или ``None``).
+        self.remote = remote
+        #: Коллбэк «отключились от сервера» (``App._remote_disconnected``).
+        self.on_disconnect = on_disconnect
+        self._disconnected = False
+        #: Счётчик sequence для play-пакетов действий (Rust next_sequence).
+        self._sequence = 0
 
         # -- инвентарь / hotbar (Gameplay PART 2) -------------------------
         self.inventory = inventory if inventory is not None else PlayerInventory()
@@ -251,17 +279,31 @@ class GameScreen(Screen):
         self._time = 0.0
 
         # -- мир и игрок --------------------------------------------------
-        self.world = world if world is not None else FlatWorld()
-        ground_top = getattr(self.world, "ground_top", 4)
-        if player_motion is not None:
-            self.player_motion = player_motion
+        if client is not None:
+            # Реальный мир сервера: блоки из ClientWorld, движение — Client.motion.
+            self.world = client.world
+            client_motion = getattr(client, "motion", None)
+            if client_motion is not None:
+                self.player_motion = client_motion
+                ground_top = None
+            else:
+                # Сервер ещё не прислал позицию — временная мотивация до неё.
+                self.player_motion = PlayerMotion.new(
+                    MovementResources(properties={}), Vec3(0.0, 64.0, 0.0)
+                )
+                ground_top = None
         else:
-            # MovementResources не нужен для PlayerMotion.new (см. motion.rs);
-            # travel() сам читает .nbt. Пустые ресурсы экономят загрузку.
-            self.player_motion = PlayerMotion.new(
-                MovementResources(properties={}),
-                Vec3(0.5, float(ground_top), 0.5),
-            )
+            self.world = world if world is not None else FlatWorld()
+            ground_top = getattr(self.world, "ground_top", 4)
+            if player_motion is not None:
+                self.player_motion = player_motion
+            else:
+                # MovementResources не нужен для PlayerMotion.new (см. motion.rs);
+                # travel() сам читает .nbt. Пустые ресурсы экономят загрузку.
+                self.player_motion = PlayerMotion.new(
+                    MovementResources(properties={}),
+                    Vec3(0.5, float(ground_top), 0.5),
+                )
         self.camera = Camera(
             position=(
                 self.player_motion.position.x,
@@ -272,7 +314,12 @@ class GameScreen(Screen):
             pitch=0.0,
             fov=float(self.render_settings.fov),
         )
-        self.terrain = TerrainRenderer(self.world)
+        if client is not None:
+            # Меш реальных чанков сервера (пересобирается по мере прихода).
+            self.terrain = ChunkTerrainRenderer(self.world)
+            self.terrain.refresh()
+        else:
+            self.terrain = TerrainRenderer(self.world)
 
         self.back_button = Button(
             (float(width) / 2.0) - 100.0,
@@ -286,6 +333,10 @@ class GameScreen(Screen):
     # -- навигация -------------------------------------------------------
 
     def _back(self) -> None:
+        # Мультиплеер: Escape закрывает соединение и возвращает в список серверов.
+        if self.remote is not None or self.client is not None:
+            self.disconnect()
+            return
         if self.on_close is not None:
             self.on_close()
         if self.stack is not None:
@@ -333,7 +384,13 @@ class GameScreen(Screen):
         return True
 
     def _start_attack(self) -> Optional[BlockHitResult]:
-        """ЛКМ: creative — мгновенно, survival — начать добычу (tick_mining)."""
+        """ЛКМ: creative — мгновенно, survival — начать добычу (tick_mining).
+
+        Мультиплеер: вместо локального мира — play-пакет (START/STOP
+        destroy block), см. :meth:`_remote_attack`.
+        """
+        if self.client is not None:
+            return self._remote_attack()
         hit = self.pick()
         if hit is None:
             self.mining = None
@@ -383,7 +440,10 @@ class GameScreen(Screen):
 
         Порт ``use_hand``/``use_item_on``: позиция — сам кликнутый блок, если
         его можно заменить, иначе сосед по грани (``BlockPlaceContext``).
+        Мультиплеер: play-пакет ``UseItemOn`` (см. :meth:`_remote_use`).
         """
+        if self.client is not None:
+            return self._remote_use()
         hit = self.pick()
         if hit is None:
             return False
@@ -490,6 +550,9 @@ class GameScreen(Screen):
     def update(self, dt: float) -> None:
         """Один тик игры: ввод → движение (порт ``controlled_simulation_tick``)."""
         self._time += dt
+        if self.remote is not None or self.client is not None:
+            self._update_remote(dt)
+            return
         player_input = self.input_state.to_player_input(self.keybinds)
         motion = self.player_motion
         if player_input.jump and motion.on_ground:
@@ -510,6 +573,143 @@ class GameScreen(Screen):
         self.camera.yaw = float(motion.yaw)
         self.camera.pitch = float(self.rotation.x_rot)
         self.camera.fov = float(self.render_settings.fov)
+
+    # -- мультиплеер: тик через Client.tick (Gameplay PART 3) --------------
+
+    def _update_remote(self, dt: float) -> None:
+        """Тик реального соединения: ввод → ``Client.tick`` → камера/меши.
+
+        Движение выполняется **только** через ``Client.tick()``
+        (AGENTS.md: иначе рассинхрон с сервером): GUI кладёт ввод в
+        ``pending_input``, а ``Client.tick`` сам делает ``travel`` +
+        ``tick`` + ``sync_client_to_server``.
+        """
+        client = self.client
+        if client is None:
+            return
+        remote = self.remote
+        # Фоновый поток упал (подключение/разрыв) — уходим со экрана.
+        if remote is not None and remote.error is not None:
+            self._remote_failed(remote.error)
+            return
+        motion = getattr(client, "motion", None)
+        if motion is not None and self.player_motion is not motion:
+            # Подключение завершилось в потоке — берём серверную мотивацию.
+            self.player_motion = motion
+        # Поворот из мыши (yaw/pitch), как в локальном пути.
+        if motion is not None:
+            motion.yaw = float(self.rotation.y_rot)
+            try:
+                motion.pitch = float(self.rotation.x_rot)
+            except AttributeError:
+                pass
+            player_input = self.input_state.to_player_input(self.keybinds)
+            client.pending_input = player_input
+            client.pending_input_ticks = 1
+            if player_input.jump and motion.on_ground:
+                jump_from_ground(motion, self.world, player_input)
+            try:
+                client.tick()
+            except BaseException as exc:  # noqa: BLE001 — разрыв соединения
+                self._remote_failed(exc)
+                return
+        # Новые чанки пришли из потока — пересобрать меши.
+        terrain = self.terrain
+        refresh = getattr(terrain, "refresh", None)
+        if callable(refresh):
+            refresh()
+        self._sync_camera()
+
+    def _next_sequence(self) -> int:
+        """Следующий sequence player-action (Rust ``next_sequence``)."""
+        value = self._sequence
+        self._sequence += 1
+        return value
+
+    def _send_packet(self, packet: Any) -> bool:
+        """Отправить serverbound play-пакет через ``Client._send``."""
+        client = self.client
+        if client is None:
+            return False
+        try:
+            from quadrix.protocol.packets import play
+
+            body = play.Serverbound.encode(packet)
+            client._send(body)
+            return True
+        except Exception as exc:  # noqa: BLE001 — отправка не критична
+            _log(f"пакет не отправлен: {exc}")
+            return False
+
+    def _remote_attack(self) -> Optional[BlockHitResult]:
+        """ЛКМ по серверу: START_DESTROY_BLOCK (0) + STOP (2) (creative)."""
+        hit = self.pick()
+        if hit is None:
+            return None
+        pos = (hit.block.x, hit.block.y, hit.block.z)
+        direction = int(hit.direction.value)
+        from quadrix.protocol.packets import play
+
+        self._send_packet(
+            play.PlayerAction(action=0, pos=pos, direction=direction,
+                              sequence=self._next_sequence())
+        )
+        self._send_packet(
+            play.PlayerAction(action=2, pos=pos, direction=direction,
+                              sequence=self._next_sequence())
+        )
+        return hit
+
+    def _remote_use(self) -> bool:
+        """ПКМ по серверу: UseItemOn (face/cursor из попадания)."""
+        hit = self.pick()
+        if hit is None:
+            return False
+        cursor = (
+            float(hit.location.x) - float(hit.block.x),
+            float(hit.location.y) - float(hit.block.y),
+            float(hit.location.z) - float(hit.block.z),
+        )
+        from quadrix.protocol.packets import play
+
+        packet = play.UseItemOn(
+            hand=0,
+            pos=(hit.block.x, hit.block.y, hit.block.z),
+            face=int(hit.direction.value),
+            cursor=cursor,
+            inside=bool(hit.inside),
+            world_border=False,
+            sequence=self._next_sequence(),
+        )
+        return self._send_packet(packet)
+
+    def _remote_failed(self, exc: BaseException) -> None:
+        """Соединение разорвано: закрыть и вернуться в список серверов."""
+        _log(f"соединение с сервером потеряно: {exc}")
+        self.disconnect()
+
+    def disconnect(self) -> None:
+        """Отключиться от сервера и вернуться в список (идемпотентно)."""
+        if self._disconnected:
+            return
+        self._disconnected = True
+        remote = self.remote
+        if remote is not None:
+            try:
+                remote.stop()
+            except Exception as exc:  # noqa: BLE001 — закрытие не критично
+                _log(f"ошибка закрытия соединения: {exc}")
+            self.remote = None
+        elif self.client is not None:
+            try:
+                self.client.close()
+            except Exception as exc:  # noqa: BLE001 — закрытие не критично
+                _log(f"ошибка закрытия клиента: {exc}")
+        self.client = None
+        if self.on_disconnect is not None:
+            self.on_disconnect()
+        if self.stack is not None:
+            self.stack.pop()
 
     # -- ввод -------------------------------------------------------------
 
@@ -639,6 +839,11 @@ class App:
         self._mouse_grabbed = False
         #: Текущий ``GameScreen`` (порт ``Game.screen == Screen::Playing``).
         self.game: Optional[GameScreen] = None
+        #: Фабрика :class:`Client` для GUI (ставит ``quadrix.py::run_gui``).
+        #: Сигнатура: ``factory(host, port) -> Client``. ``None`` — офлайн-демо.
+        self.client_factory: Optional[Any] = None
+        #: Список сохранённых серверов (multiplayer_screen.ServersStore).
+        self.servers_store = ServersStore()
         #: Снимок настроек, которые получает рендер (см. ``RenderSettings``).
         self.render_settings = self._snapshot_settings()
         self.screen_stack = ScreenStack(self._build_main_menu())
@@ -774,9 +979,88 @@ class App:
         """MainMenu → Singleplayer → GameScreen (локальный плоский мир)."""
         return self._open_game("singleplayer")
 
-    def open_multiplayer(self) -> GameScreen:
-        """MainMenu → Multiplayer → GameScreen (подключение — PART 3)."""
-        return self._open_game("multiplayer")
+    def open_multiplayer(self) -> MultiplayerScreen:
+        """MainMenu → Multiplayer → список серверов (PART 3).
+
+        Раньше кнопка сразу открывала ``GameScreen``; теперь она ведёт на
+        ``MultiplayerScreen`` (Rust: ``Title`` → ``MultiplayerScreen``), а
+        игра открывается после подключения (``connect_server``).
+        """
+        screen = MultiplayerScreen(
+            width=self.screen_stack.current.width,
+            height=self.screen_stack.current.height,
+            store=self.servers_store,
+            stack=self.screen_stack,
+            on_back=self._multiplayer_back,
+            on_connect=self.connect_server,
+        )
+        self.screen_stack.push(screen)
+        _log("экран: MultiplayerScreen")
+        return screen
+
+    def _multiplayer_back(self) -> None:
+        """Back из списка серверов → предыдущий экран."""
+        self.screen_stack.pop()
+
+    def _pop_connect_screens(self) -> None:
+        """Закрыть Direct/Add поверх списка серверов перед входом в игру."""
+        while (
+            self.screen_stack.depth() > 1
+            and not isinstance(self.screen_stack.current, MultiplayerScreen)
+        ):
+            self.screen_stack.pop()
+
+    def connect_server(self, address: str) -> Optional[GameScreen]:
+        """Подключиться к серверу и открыть реальный ``GameScreen`` (PART 3).
+
+        Порт ``title.rs::Action::Connect`` → ``game.rs::connect_server``:
+        создаётся :class:`Client`, соединение поднимается в фоне
+        (:class:`RemoteConnection`), а окно сразу показывает игру.
+        """
+        parsed = parse_address(address)
+        if parsed is None:
+            _log(f"адрес не разобран: {address!r}")
+            return None
+        host, port = parsed
+        self._ensure_terrain_resources()
+        client: Optional[Any] = None
+        factory = self.client_factory
+        if factory is not None:
+            try:
+                client = factory(host, port)
+            except Exception as exc:  # noqa: BLE001 — сервер недоступен
+                _log(f"клиент не создан для {host}:{port}: {exc}")
+                client = None
+        remote: Optional[RemoteConnection] = None
+        if client is not None:
+            remote = RemoteConnection(client)
+            remote.start()
+        self._pop_connect_screens()
+        screen = GameScreen(
+            kind="multiplayer",
+            settings=self.settings,
+            stack=self.screen_stack,
+            width=self.screen_stack.current.width,
+            height=self.screen_stack.current.height,
+            render_settings=self.render_settings,
+            on_close=self._close_game,
+            on_pointer=self._set_mouse_grabbed,
+            address=address,
+            client=client,
+            remote=remote,
+            on_disconnect=self._remote_disconnected,
+        )
+        self.screen_stack.push(screen)
+        self.game = screen
+        self._set_mouse_grabbed(True)
+        _log(f"экран: GameScreen (connect {host}:{port})")
+        return screen
+
+    def _remote_disconnected(self) -> None:
+        """GameScreen закрыл соединение (Escape/разрыв): отпустить курсор."""
+        self.game = None
+        self._set_mouse_grabbed(False)
+        _log("отключено от сервера")
 
     def _open_game(self, kind: str) -> GameScreen:
         self._ensure_terrain_resources()

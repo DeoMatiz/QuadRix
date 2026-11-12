@@ -20,7 +20,13 @@ import numpy as np
 
 from quadrix.render.mesher import CHUNK_SIZE, mesh_chunk
 
-__all__ = ["FlatWorld", "TerrainRenderer", "checker_texture"]
+__all__ = [
+    "FlatWorld",
+    "TerrainRenderer",
+    "ChunkTerrainRenderer",
+    "chunk_blocks",
+    "checker_texture",
+]
 
 #: Сколько слоёв твёрдых блоков у плоского мира (верхний — трава).
 GROUND_TOP = 4
@@ -149,6 +155,103 @@ class TerrainRenderer:
         height: float,
     ) -> None:
         """Один draw call terrain с ``mvp`` из камеры."""
+        if self.vertices is None or self.vertices.size == 0:
+            return
+        mvp = camera.view_projection(width, height)
+        backend.draw(
+            self.vertices,
+            program,
+            texture,
+            vertex_format="3f 3f 2f",
+            attributes=("in_pos", "in_normal", "in_uv"),
+            mvp=mvp,
+            depth_test=True,
+            cull_face=True,
+            blend=False,
+        )
+
+
+def chunk_blocks(chunk: Any) -> np.ndarray:
+    """Собрать блоки одной колонны в ``(16, height, 16)[x, y, z]`` uint16.
+
+    ``ChunkSection.unpack()`` отдаёт плоский список с индексом
+    ``(y << 8) | (z << 4) | x``; ``mesh_chunk`` ждёт ``blocks[x, y, z]``.
+    Поэтому ``(16,16,16)[y,z,x]`` → ``transpose(2, 0, 1)`` → ``[x,y,z]``.
+    """
+    sections = getattr(chunk, "sections", None) or []
+    parts: list[np.ndarray] = []
+    for section in sections:
+        flat = section.states.unpack()
+        arr = np.asarray(flat, dtype=np.uint16).reshape(
+            16, 16, 16
+        )  # [y, z, x]
+        arr = np.ascontiguousarray(arr.transpose(2, 0, 1))  # [x, y, z]
+        parts.append(arr)
+    if not parts:
+        return np.zeros((16, 0, 16), dtype=np.uint16)
+    return np.concatenate(parts, axis=1)
+
+
+class ChunkTerrainRenderer:
+    """Меш реальных чанков сервера (:class:`ClientWorld`) (Gameplay PART 3).
+
+    Порт подмножества ``horizon-client-render/src/chunk.rs``/``mesher.rs``:
+    на колонну — один ``mesh_chunk`` (координаты в мире: ``+cx*16``,
+    ``+chunk.min_y``, ``+cz*16``). Меши пересобираются, когда меняется набор
+    пришедших чанков (``world.chunks``), — этого достаточно для PART 3
+    (полный стриминг/освещение — отдельные PART'ы).
+    """
+
+    def __init__(self, world: Any) -> None:
+        self.world = world
+        self.vertices: Optional[np.ndarray] = None
+        self._keys: Optional[tuple] = None
+
+    def refresh(self) -> bool:
+        """Пересобрать меши, если набор чанков изменился. ``True`` — обновили."""
+        chunks = getattr(self.world, "chunks", None)
+        if not chunks:
+            if self._keys is None:
+                return False
+            self.vertices = None
+            self._keys = None
+            return True
+        keys = tuple(sorted(chunks.keys()))
+        if keys == self._keys:
+            return False
+        self._keys = keys
+        self._rebuild(chunks)
+        return True
+
+    def _rebuild(self, chunks: dict) -> None:
+        """Собрать меши всех пришедших колонн в один буфер вершин."""
+        parts: list[np.ndarray] = []
+        for (cx, cz), chunk in chunks.items():
+            blocks = chunk_blocks(chunk)
+            if blocks.shape[1] == 0:
+                continue
+            verts, _ = mesh_chunk(
+                blocks, None, cull_hidden=True, center=False
+            )
+            verts = np.asarray(verts, dtype=np.float32)
+            if verts.size == 0:
+                continue
+            verts[:, 0] += float(cx) * 16.0
+            verts[:, 1] += float(getattr(chunk, "min_y", 0))
+            verts[:, 2] += float(cz) * 16.0
+            parts.append(verts)
+        self.vertices = np.concatenate(parts, axis=0) if parts else None
+
+    def draw(
+        self,
+        backend: Any,
+        program: Any,
+        texture: Any,
+        camera: Any,
+        width: float,
+        height: float,
+    ) -> None:
+        """Один draw call всех чанков с MVP камеры."""
         if self.vertices is None or self.vertices.size == 0:
             return
         mvp = camera.view_projection(width, height)

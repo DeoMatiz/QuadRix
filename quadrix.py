@@ -244,6 +244,9 @@ class Client:
         self.pending_input_ticks: int = 0
         self._input_thread: Optional[threading.Thread] = None
         self._auto_clock = 0
+        # Замок отправки: сокет делят игровой поток (движение/клики) и
+        # поток-читатель (KeepAlive/AcceptTeleportation в read_one).
+        self._send_lock = threading.Lock()
 
     # -- ресурсы и мир -------------------------------------------------
 
@@ -716,9 +719,13 @@ class Client:
     # -- отправка / логирование ---------------------------------------
 
     def _send(self, body: bytes) -> None:
-        """Отправить тело с VarInt-id (Rust: Connection::send)."""
+        """Отправить тело с VarInt-id (Rust: Connection::send).
+
+        Замок не даёт кадрам двух потоков (игровой + читатель) переплестись.
+        """
         conn = self._require_conn()
-        conn.send(body)
+        with self._send_lock:
+            conn.send(body)
 
     def _log_packet(self, state: str, name: str, size: int) -> None:
         """Напечатать факт пакета: всегда при --verbose, иначе важные."""
@@ -889,6 +896,23 @@ def run_gui(args: argparse.Namespace) -> int:
         )
     except RuntimeError as exc:
         raise GuiUnavailable(str(exc)) from exc
+
+    # GUI-подключение: список серверов и фабрика Client (addr, port) -> Client.
+    app.servers_store.path = Path(args.data_dir).parent / "servers.json"
+    app.servers_store.load()
+
+    def _make_client(host: str, port: int) -> "Client":
+        return Client(
+            host=host,
+            port=port,
+            name=args.name,
+            online_mode=args.online_mode,
+            data_dir=args.data_dir,
+            verbose=args.verbose,
+            connect_timeout=args.connect_timeout,
+        )
+
+    app.client_factory = _make_client
 
     try:
         app.setup()
