@@ -97,7 +97,10 @@ def mesh_chunk(
     pad[1:-1, 1:-1, 1:-1] = solid
 
     parts: list[np.ndarray] = []
-    for normal, corners in FACE_DEFS:
+    # Атлас с per-face UV (BlockAtlas) отдаёт прямоугольник для каждой грани;
+    # старый интерфейс load_many даёт один прямоугольник на все грани.
+    use_faces = hasattr(texture_atlas, "face_rects")
+    for fi, (normal, corners) in enumerate(FACE_DEFS):
         dx, dy, dz = normal
         neighbor = pad[1 + dx : 1 + dx + nx, 1 + dy : 1 + dy + ny, 1 + dz : 1 + dz + nz]
         mask = solid & ~neighbor if cull_hidden else solid
@@ -120,7 +123,12 @@ def mesh_chunk(
             uvs = np.tile(QUAD_UV, (m, 1))
         else:
             ids = blocks[xs, ys, zs]
-            rects = np.asarray(texture_atlas.load_many(ids), dtype=np.float32)  # (m, 4)
+            if use_faces:
+                rects = np.asarray(
+                    texture_atlas.face_rects(ids)[:, fi, :], dtype=np.float32
+                )
+            else:
+                rects = np.asarray(texture_atlas.load_many(ids), dtype=np.float32)
             u0 = rects[:, 0:1]
             v0 = rects[:, 1:2]
             du = rects[:, 2:3]

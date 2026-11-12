@@ -8,7 +8,8 @@
 FALLBACK — плоский мир).
 
 Мешинг — ``quadrix.render.mesher`` (уже портирован). Один массив вершин,
-один draw call; текстура — шахматка, чтобы движение было видно.
+один draw call; текстура — блочный атлас (``quadrix.render.texture_atlas``)
+с per-face UV, поэтому каждый блок виден своей текстурой.
 """
 
 from __future__ import annotations
@@ -138,11 +139,14 @@ class TerrainRenderer:
 
     world: FlatWorld
     vertices: Optional[np.ndarray] = None
+    atlas: Optional[Any] = None
 
     def __post_init__(self) -> None:
         if self.vertices is None:
             blocks = _build_region(self.world)
-            verts, _ = mesh_chunk(blocks, None, cull_hidden=True, center=False)
+            verts, _ = mesh_chunk(
+                blocks, self.atlas, cull_hidden=True, center=False
+            )
             # Сдвигаем чанк так, чтобы центр региона был в начале координат.
             verts = np.asarray(verts, dtype=np.float32).copy()
             if verts.size:
@@ -209,10 +213,14 @@ class ChunkTerrainRenderer:
     меш всех ~329 чанков занял бы сотни мегабайт.
     """
 
-    def __init__(self, world: Any, radius: int = RADIUS_CHUNKS) -> None:
+    def __init__(
+        self, world: Any, radius: int = RADIUS_CHUNKS, atlas: Any = None
+    ) -> None:
         self.world = world
         #: Радиус в чанках вокруг игрока (``None`` — все пришедшие чанки).
         self.radius = int(radius) if radius else None
+        #: Блочный атлас (``BlockAtlas``) для per-face UV или ``None``.
+        self.atlas = atlas
         self.vertices: Optional[np.ndarray] = None
         self._keys: Optional[tuple] = None
 
@@ -266,7 +274,7 @@ class ChunkTerrainRenderer:
             if blocks.shape[1] == 0:
                 continue
             verts, _ = mesh_chunk(
-                blocks, None, cull_hidden=True, center=False
+                blocks, self.atlas, cull_hidden=True, center=False
             )
             verts = np.asarray(verts, dtype=np.float32)
             if verts.size == 0:

@@ -54,6 +54,7 @@ from quadrix.render.game_world import (
     TerrainRenderer,
     checker_texture,
 )
+from quadrix.render.texture_atlas import load_block_atlas
 from quadrix.render.chat_screen import (
     CHAT_BACKGROUND,
     CHAT_LINE_HEIGHT,
@@ -241,6 +242,7 @@ class GameScreen(Screen):
         client: Optional[Any] = None,
         remote: Optional[Any] = None,
         on_disconnect: Optional[Any] = None,
+        terrain_atlas: Optional[Any] = None,
     ) -> None:
         super().__init__(width, height)
         self.kind = kind
@@ -265,6 +267,8 @@ class GameScreen(Screen):
         #: Коллбэк «отключились от сервера» (``App._remote_disconnected``).
         self.on_disconnect = on_disconnect
         self._disconnected = False
+        #: Блочный атлас (``BlockAtlas``) для мешинга terrain (per-face UV).
+        self.terrain_atlas = terrain_atlas
         #: Счётчик sequence для play-пакетов действий (Rust next_sequence).
         self._sequence = 0
 
@@ -275,7 +279,11 @@ class GameScreen(Screen):
         self.mining: Optional[Mining] = None
         self.destroy_delay: int = 0
         self._rng = _random.Random()
-        self._populate_default_hotbar()
+        # Стартовый набор — только для локального демо-мира. В мультиплеере
+        # инвентарь приходит от сервера; иначе в hotbar рисовались бы
+        # фантомные предметы в пустых слотах (баг PART 5).
+        if client is None and remote is None:
+            self._populate_default_hotbar()
 
         # -- HUD и чат (Gameplay PART 4) ----------------------------------
         #: Тик в кадре (``Hud.tickCount``) — затухание и мерцание сердец.
@@ -335,10 +343,12 @@ class GameScreen(Screen):
         )
         if client is not None:
             # Меш реальных чанков сервера (пересобирается по мере прихода).
-            self.terrain = ChunkTerrainRenderer(self.world)
+            self.terrain = ChunkTerrainRenderer(
+                self.world, atlas=self.terrain_atlas
+            )
             self.terrain.refresh(center=self._player_center())
         else:
-            self.terrain = TerrainRenderer(self.world)
+            self.terrain = TerrainRenderer(self.world, atlas=self.terrain_atlas)
 
         self.back_button = Button(
             (float(width) / 2.0) - 100.0,
@@ -1038,6 +1048,8 @@ class App:
         #: Пайплайн terrain (создаётся лениво при входе в игру) + текстура.
         self.terrain_program: Any = None
         self.terrain_texture: Any = None
+        #: Блочный атлас (``BlockAtlas``) — UV мешера берутся из него.
+        self.terrain_atlas: Any = None
         #: Спрайтовый атлас GUI + GPU-текстура (кнопки/логотип/фон/иконки).
         self.atlas: Any = None
         self.gui_texture: Any = None
@@ -1263,6 +1275,7 @@ class App:
             client=client,
             remote=remote,
             on_disconnect=self._remote_disconnected,
+            terrain_atlas=self.terrain_atlas,
         )
         self.screen_stack.push(screen)
         self.game = screen
@@ -1287,6 +1300,7 @@ class App:
             render_settings=self.render_settings,
             on_close=self._close_game,
             on_pointer=self._set_mouse_grabbed,
+            terrain_atlas=self.terrain_atlas,
         )
         self.screen_stack.push(screen)
         self.game = screen
@@ -1323,8 +1337,30 @@ class App:
             self.terrain_program = create_pipeline(
                 load_shader("terrain.vert"), load_shader("terrain.frag")
             )
+            # Тонирование/свет: без этих uniform light = normalize(0) = NaN,
+            # и весь terrain выходил чёрным (баг «всё чёрное»).
+            self._set_uniform(self.terrain_program, "light_dir", (0.2, 1.0, -0.3))
+            self._set_uniform(self.terrain_program, "ambient", 0.35)
         if self.terrain_texture is None and callable(create_texture):
-            self.terrain_texture = create_texture(checker_texture())
+            atlas = load_block_atlas()
+            if atlas is not None:
+                self.terrain_atlas = atlas
+                self.terrain_texture = create_texture(atlas.image)
+            else:
+                self.terrain_texture = create_texture(checker_texture())
+
+    @staticmethod
+    def _set_uniform(program: Any, name: str, value: Any) -> None:
+        """Записать uniform, если программа его знает.
+
+        Прямое присваивание: moderngl кидает ``KeyError`` на неизвестный
+        uniform, фейковые программы в тестах — ``TypeError``. Оба случая
+        безопасны (лучше пропустить, чем уронить кадр).
+        """
+        try:
+            program[name] = value
+        except (TypeError, KeyError, AttributeError):
+            pass
 
 
     # ------------------------------------------------------------------
