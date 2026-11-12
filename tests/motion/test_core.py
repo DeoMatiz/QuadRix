@@ -148,13 +148,16 @@ def test_player_motion_gravity_constant():
 # ── PART 2: tick & move_entity tests ───────────────────────────────
 
 def test_player_motion_tick_gravity():
-    """Gravity accelerates player downward; velocity.y ≈ -GRAVITY * dt after one tick."""
+    """Gravity accelerates player downward; velocity.y -= GRAVITY each tick.
+
+    motion.rs is per-tick (no dt scaling): effective_gravity = 0.08 blocks/tick.
+    """
     world = FakeWorld()  # all air
     pm = PlayerMotion.new(MovementResources.load(".local/horizon-client-motion"), Vec3(0, 100, 0))
     pm.tick(dt=0.05, world=world)
-    # velocity.y should be approximately -0.08 * 0.05 = -0.004
-    expected = -0.08 * 0.05
-    assert pm.velocity.y == pytest.approx(expected, abs=1e-4)
+    # velocity.y should be approximately -0.08 (one tick of gravity)
+    expected = -0.08
+    assert pm.velocity.y == pytest.approx(expected, abs=1e-6)
 
 
 def test_player_motion_tick_terminal_velocity():
@@ -757,3 +760,118 @@ def test_move_entity_falls_onto_slab_top():
     assert pm.position.y > 0.0
     assert pm.velocity.y == 0.0
     assert pm.on_ground is True
+
+
+# ── PART 10: прыжок и on_ground из столкновения ──────────────────────
+# Раньше tick() безусловно обнулял velocity.y через pre-move probe
+# (_check_ground): прыжок (velocity.y ≈ 0.42) гасился в тот же такт, и игрок
+# оставался на земле. Теперь on_ground и гашение velocity.y берутся из
+# collision-sweep (move_entity), поэтому прыжок поднимает игрока.
+
+_GROUND_TOP = 4
+
+
+def _ground_world(top: int = _GROUND_TOP) -> FakeWorld:
+    """FakeWorld с площадкой твёрдых блоков на верхнем слое (y = top - 1)."""
+    return FakeWorld(
+        {
+            (x, top - 1, z): "minecraft:grass_block"
+            for x in range(-6, 7)
+            for z in range(-6, 7)
+        }
+    )
+
+
+def _grounded_motion(world: FakeWorld) -> PlayerMotion:
+    """Игрок на площадке (ноги y = 4.0); on_ground подтверждён одним тактом."""
+    pm = PlayerMotion.new(
+        MovementResources.load(".local/horizon-client-motion"),
+        Vec3(0.5, float(_GROUND_TOP), 0.5),
+    )
+    pm.tick(dt=0.05, world=world)  # один такт — on_ground из collision
+    return pm
+
+
+def test_jump_lifts_player():
+    """Прыжок поднимает игрока: jump_from_ground → 6 тактов → y > 4.0.
+
+    velocity.y = 0.42 не обнуляется, пока игрок движется вверх.
+    """
+    world = _ground_world()
+    pm = _grounded_motion(world)
+    assert pm.on_ground is True
+    assert pm.jump_from_ground(world, PlayerInput(jump=True)) is True
+    for _ in range(6):
+        pm.tick(dt=0.05, world=world)
+    assert pm.position.y > 4.0, f"прыжок не поднял игрока: y={pm.position.y}"
+
+
+def test_jump_lands():
+    """После прыжка игрок возвращается на землю: y == 4.0, on_ground=True."""
+    world = _ground_world()
+    pm = _grounded_motion(world)
+    pm.jump_from_ground(world, PlayerInput(jump=True))
+    for _ in range(60):
+        pm.tick(dt=0.05, world=world)
+    assert pm.position.y == pytest.approx(4.0, abs=1e-6), f"y={pm.position.y}"
+    assert pm.on_ground is True
+
+
+def test_on_ground_false_in_air():
+    """В воздухе после прыжка on_ground == False (задаётся столкновением)."""
+    world = _ground_world()
+    pm = _grounded_motion(world)
+    pm.jump_from_ground(world, PlayerInput(jump=True))
+    for _ in range(3):
+        pm.tick(dt=0.05, world=world)
+    assert pm.position.y > 4.0
+    assert pm.on_ground is False
+
+
+def test_gravity():
+    """В воздухе velocity.y уменьшается на 0.08 за такт (motion.rs)."""
+    world = FakeWorld()  # всё воздух
+    pm = PlayerMotion.new(
+        MovementResources.load(".local/horizon-client-motion"),
+        Vec3(0.5, 100.0, 0.5),
+    )
+    pm.velocity = pm.velocity.with_component(Axis.Y, 1.0)
+    pm.tick(dt=0.05, world=world)
+    assert pm.velocity.y == pytest.approx(1.0 - 0.08, abs=1e-9)
+
+
+def test_terminal_velocity():
+    """Терминальная скорость: velocity.y не меньше -3.92 при долгом падении."""
+    world = FakeWorld()  # всё воздух
+    pm = PlayerMotion.new(
+        MovementResources.load(".local/horizon-client-motion"),
+        Vec3(0.5, 300.0, 0.5),
+    )
+    for _ in range(100):
+        pm.tick(dt=0.05, world=world)
+    assert pm.velocity.y >= -3.92 - 1e-9
+    assert pm.velocity.y == pytest.approx(-3.92, abs=1e-9)
+
+
+def test_walk_does_not_lift():
+    """Без прыжка (W) игрок не поднимается: y остаётся 4.0."""
+    world = _ground_world()
+    pm = _grounded_motion(world)
+    for _ in range(10):
+        pm.travel(PlayerInput(forward=1.0), world)
+        pm.tick(dt=0.05, world=world)
+        assert pm.position.y == pytest.approx(4.0, abs=1e-6), (
+            f"ходьба подняла игрока: y={pm.position.y}"
+        )
+
+
+def test_fall_from_high():
+    """Игрок на y=10 в воздухе падает: y уменьшается за такт."""
+    world = FakeWorld()  # всё воздух
+    pm = PlayerMotion.new(
+        MovementResources.load(".local/horizon-client-motion"),
+        Vec3(0.5, 10.0, 0.5),
+    )
+    y0 = pm.position.y
+    pm.tick(dt=0.05, world=world)
+    assert pm.position.y < y0

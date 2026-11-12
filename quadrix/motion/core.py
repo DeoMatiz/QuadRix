@@ -515,20 +515,76 @@ def _move_axis(
     return movement - total_moved if total_moved > 0 else movement
 
 
-def _check_ground(pm: "PlayerMotion", world: object) -> None:
-    """Check if the player is standing on solid ground.
+def _world_has_block_registry(world: object) -> bool:
+    """Есть ли у мира настоящий ``BlockRegistry`` (для sweep по VoxelShape).
 
-    Looks at the block directly below the player's feet.
-    In Minecraft: on_ground = True if the block below is solid (not air).
-    The player's feet are at position.y (bottom of the 1.8-high bounding box).
+    ``FlatWorld`` и простые fake-миры отдают только имя блока, поэтому для них
+    используется fallback по полным кубам (см. :func:`_resolve_full_cube_movement`).
     """
-    x = int(pm.position.x)
-    # Player's feet y-position; check block below feet
-    y = int(pm.position.y) - 1  
-    z = int(pm.position.z)
-    block_name = world.block(x, y, z) if hasattr(world, "block") else "minecraft:air"
-    # on_ground = True when block below IS solid
-    pm.on_ground = _is_solid_block(block_name)
+    from quadrix.world.registry import BlockRegistry
+
+    for attribute in ("registry", "block_registry"):
+        if isinstance(getattr(world, attribute, None), BlockRegistry):
+            return True
+    return False
+
+
+def _expand_bounds_towards(bounds: Aabb, amount: Vec3) -> Aabb:
+    """``Aabb::expand_towards``: расширить AABB по направлению движения."""
+    minimum = list(bounds.min.components())
+    maximum = list(bounds.max.components())
+    for i, value in enumerate(amount.components()):
+        if value < 0.0:
+            minimum[i] += value
+        elif value > 0.0:
+            maximum[i] += value
+    return Aabb.new(
+        Vec3(minimum[0], minimum[1], minimum[2]),
+        Vec3(maximum[0], maximum[1], maximum[2]),
+    )
+
+
+def _solid_full_cube_boxes(world: object, query: Aabb) -> list:
+    """Aabb целых кубов всех твёрдых блоков, пересекающих *query*."""
+    min_x = math.floor(query.min.x)
+    max_x = math.floor(query.max.x)
+    min_y = math.floor(query.min.y)
+    max_y = math.floor(query.max.y)
+    min_z = math.floor(query.min.z)
+    max_z = math.floor(query.max.z)
+    boxes = []
+    for x in range(min_x, max_x + 1):
+        for y in range(min_y, max_y + 1):
+            for z in range(min_z, max_z + 1):
+                if not _is_solid_block(world.block(x, y, z)):
+                    continue
+                box = Aabb.new(
+                    Vec3(float(x), float(y), float(z)),
+                    Vec3(x + 1.0, y + 1.0, z + 1.0),
+                )
+                if box.intersects(query):
+                    boxes.append(box)
+    return boxes
+
+
+def _resolve_full_cube_movement(
+    world: object, bounds: Aabb, movement: Vec3
+) -> Vec3:
+    """Разрешить движение по полным кубам — fallback без VoxelShape.
+
+    Мир без ``BlockRegistry`` (``FlatWorld``) даёт только имя блока, формы
+    считаются целыми кубами. Разрешение делает та же функция, что и sweep по
+    VoxelShape — :func:`resolve_shape_movement` — только боксы строятся из
+    клеток. Без столкновения возвращается ровно *movement*, поэтому
+    ``resolved == movement`` точно и ``on_ground`` не выставляется ложно.
+    """
+    from quadrix.world.collision.entity_collision import resolve_shape_movement
+
+    query = _expand_bounds_towards(bounds, movement)
+    boxes = _solid_full_cube_boxes(world, query)
+    if not boxes:
+        return movement
+    return resolve_shape_movement(movement, bounds, boxes)
 
 
 def get_friction(self, world: object) -> float:
@@ -975,47 +1031,40 @@ def climb(pm: "PlayerMotion", input: PlayerInput, world: object) -> None:
 def tick(self, dt: float, world: object) -> None:
     """One tick of PlayerMotion movement.
 
-    Applies gravity, terminal velocity, collision checks, and updates position.
-    Accumulates fall_distance when player is falling.
+    Порт ``motion.rs::travel_in_air`` + ``Entity.move``: сначала гравитация,
+    затем перемещение с разрешением столкновений. ``dt`` сохраняется в подписи
+    (совместимость с 20 Гц вызовом), но движение в ``motion.rs`` потактовое:
+    позиция сдвигается ровно на velocity (блоки/такт), без масштабирования.
 
-    Gravity is skipped when self.flying is True.
+    ``on_ground`` и обнуление ``velocity.y`` берутся из collision-sweep
+    (:meth:`move_entity`), а не из pre-move проверки блока под ногами, поэтому
+    прыжок (``velocity.y > 0``) поднимает игрока и не гасится в воздухе.
+
+    Гравитация не применяется при ``self.flying`` (motion.rs).
 
     Args:
         dt: time step in seconds (e.g. 0.05 for 20 ticks/sec).
         world: FakeWorld or real world object with ``block(x, y, z) -> str``.
     """
-    # Skip gravity when flying
+    # 1. Гравитация: velocity.y -= effective_gravity (0.08), кроме полёта.
     if not self.flying:
         self.velocity = self.velocity.with_component(
-            Axis.Y, self.velocity.y - 0.08 * dt
+            Axis.Y, self.velocity.y - 0.08
         )
+        # 2. Терминальная скорость (падение не быстрее 3.92 блока/такт).
+        if self.velocity.y < -3.92:
+            self.velocity = self.velocity.with_component(Axis.Y, -3.92)
 
-    # 2. Apply terminal velocity clamp
-    if not self.flying and self.velocity.y < -3.92:
-        self.velocity = self.velocity.with_component(Axis.Y, -3.92)
+    # 3. Перемещение с разрешением столкновений. on_ground и гашение
+    #    velocity.y приходят из Entity.move (move_entity), а не из probe.
+    self.move_entity(world, self.velocity)
 
-    # 3. Check on_ground via collision (block below)
-    _check_ground(self, world)
+    # 4. fall_distance копится, пока игрок в воздухе и падает
+    #    (Entity.checkFallDistanceAccumulation).
+    if not self.on_ground and self.velocity.y < 0:
+        self.fall_distance += -self.velocity.y
 
-    # 4. Track and zero vertical velocity when on ground
-    # Accumulate fall_distance when falling (velocity.y < 0) and on ground.
-    # motion.rs: fall_distance increases each tick when on_ground and velocity.y < 0.
-    was_on_ground = self.on_ground
-    if self.on_ground and self.velocity.y < 0:
-        self.fall_distance += abs(0.08 * dt)  # accumulate fall distance
-    if self.on_ground:
-        self.velocity = self.velocity.with_component(Axis.Y, 0.0)
-        # Reset fall distance if we just landed from a significant fall
-        # (handled by apply_landing separately)
-
-    # 5. Position += velocity * dt
-    # Integrate velocity over dt to update position
-    new_x = self.position.x + self.velocity.x * dt
-    new_y = self.position.y + self.velocity.y * dt
-    new_z = self.position.z + self.velocity.z * dt
-    self.position = Vec3(new_x, new_y, new_z)
-
-    # Update swimming flag based on whether player is in water
+    # 5. Флаг плавания по текущей воде.
     self.swimming = self.is_in_water()
 
 
@@ -1041,7 +1090,13 @@ def move_entity(self, world: object, movement: Vec3) -> None:
         # Нулевое движение, как в Rust: ни форм, ни флагов.
         return
 
-    resolved = sweep(world, self.bounds(), movement)
+    bounds = self.bounds()
+    if _world_has_block_registry(world):
+        resolved = sweep(world, bounds, movement)
+    else:
+        # FALLBACK: у мира нет BlockRegistry (FlatWorld/простые fake-миры),
+        # формы считаются целыми кубами (VoxelShape недоступна).
+        resolved = _resolve_full_cube_movement(world, bounds, movement)
 
     # Сдвигаем позицию ровно на разрешённое смещение.
     self.position = self.position.add_vector(resolved)
@@ -1053,13 +1108,15 @@ def move_entity(self, world: object, movement: Vec3) -> None:
     if resolved.z != movement.z:
         velocity = velocity.with_component(Axis.Z, 0.0)
     if resolved.y != movement.y:
+        # Вертикальное столкновение (земля вниз или потолок вверх) гасит
+        # velocity.y. Прыжок в воздухе (resolved.y == movement.y) не гасится.
         velocity = velocity.with_component(Axis.Y, 0.0)
 
-    # Движение вниз остановлено формой → стоим на ней (Entity.setOnGround).
-    if movement.y < 0.0 and resolved.y != movement.y:
-        self.on_ground = True
-
     self.velocity = velocity
+
+    # on_ground — ТОЛЬКО из этого столкновения: движение вниз остановлено
+    # формой (Entity.setOnGround после Entity.move), а не pre-move probe.
+    self.on_ground = movement.y < 0.0 and resolved.y != movement.y
 
 
 # Attach methods to PlayerMotion class
