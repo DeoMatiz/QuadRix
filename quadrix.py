@@ -247,6 +247,10 @@ class Client:
         # Замок отправки: сокет делят игровой поток (движение/клики) и
         # поток-читатель (KeepAlive/AcceptTeleportation в read_one).
         self._send_lock = threading.Lock()
+        # Чат (Gameplay PART 4): пришедшие сообщения читает GUI-поток,
+        # пишет поток-читатель — общий список под замком.
+        self.chat_messages: List[str] = []
+        self._chat_lock = threading.Lock()
 
     # -- ресурсы и мир -------------------------------------------------
 
@@ -579,12 +583,57 @@ class Client:
         elif isinstance(packet, play.SetTime):
             self.game_time = packet.game_time
             _log(f"play: SetTime game_time={packet.game_time}")
-        elif isinstance(packet, play.SystemChat):
-            _log(f"chat: {packet.content}")
+        elif isinstance(packet, (play.SystemChat, play.DisguisedChat, play.PlayerChat)):
+            text = self._chat_text(packet)
+            if text:
+                with self._chat_lock:
+                    self.chat_messages.append(text)
+            _log(f"chat: {text}")
         elif isinstance(packet, play.Disconnect):
             raise ClientError(f"сервер разорвал play: {packet.reason}")
         elif self.verbose:
             _log(f"play: {name} пропущен")
+
+    # -- чат (Gameplay PART 4) -----------------------------------------
+
+    def _chat_text(self, packet) -> str:
+        """Плоский текст chat-пакета (NBT-компонент → строка).
+
+        ``SystemChat.content``/``DisguisedChat.message``/``PlayerChat.
+        unsigned_content`` — NBT ``Tag``; ``PlayerChat.content`` — готовый
+        ``str``. Порт ``component::comp_text`` (``tag_to_json`` → ``Text.plain``).
+        """
+        from quadrix.core.component import comp_text, tag_to_json
+        from quadrix.protocol.packets import play
+
+        if isinstance(packet, play.PlayerChat):
+            if packet.unsigned_content is not None:
+                return comp_text(tag_to_json(packet.unsigned_content)).plain()
+            return str(packet.content)
+        if isinstance(packet, play.SystemChat):
+            return comp_text(tag_to_json(packet.content)).plain()
+        if isinstance(packet, play.DisguisedChat):
+            return comp_text(tag_to_json(packet.message)).plain()
+        return ""
+
+    def send_chat(self, message: str) -> None:
+        """Отправить сообщение чата серверу (``ServerboundChat``).
+
+        FALLBACK: подпись сообщения (online-mode, ``signature``) не
+        портирована — это offline-чат (``signature=None``). См. правило 7.
+        """
+        from quadrix.protocol.packets import play
+
+        packet = play.Chat(
+            message=message,
+            timestamp=int(time.time() * 1000),
+            salt=0,
+            signature=None,
+            last_seen=play.LastSeenUpdate(
+                offset=0, acknowledged=b"\x00\x00\x00", checksum=0
+            ),
+        )
+        self._send(play.Serverbound.encode(packet))
 
     # -- тики ----------------------------------------------------------
 

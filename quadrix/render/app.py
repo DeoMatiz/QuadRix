@@ -54,8 +54,17 @@ from quadrix.render.game_world import (
     TerrainRenderer,
     checker_texture,
 )
+from quadrix.render.chat_screen import (
+    CHAT_BACKGROUND,
+    CHAT_LINE_HEIGHT,
+    ChatLog,
+    ChatScreen,
+    chat_lines_per_page,
+    normalize_chat_message,
+)
 from quadrix.render.gui_atlas import GUI_TEXTURE, load_gui_atlas
 from quadrix.render.hotbar import Hotbar
+from quadrix.render.hud import HUD, HealthInputs
 from quadrix.render.interaction import BlockHitResult, pick_block, reach_for
 from quadrix.render.inventory_screen import InventoryScreen
 from quadrix.render.menu import (
@@ -267,6 +276,16 @@ class GameScreen(Screen):
         self.destroy_delay: int = 0
         self._rng = _random.Random()
         self._populate_default_hotbar()
+
+        # -- HUD и чат (Gameplay PART 4) ----------------------------------
+        #: Тик в кадре (``Hud.tickCount``) — затухание и мерцание сердец.
+        self.ticks: int = 0
+        #: Игровой HUD: сердца/еда/опыт/прицел (``hud_layout::Hud``).
+        self.hud = HUD()
+        #: Список сообщений чата (``chat.rs::Chat``).
+        self.chat = ChatLog()
+        #: Открытый экран ввода чата (``None`` — чат закрыт).
+        self.chat_screen: Optional[ChatScreen] = None
 
         # -- ввод ---------------------------------------------------------
         self.input_state = input_state if input_state is not None else InputState()
@@ -536,6 +555,111 @@ class GameScreen(Screen):
         if self.on_pointer is not None:
             self.on_pointer(True)
 
+    # -- чат: открыть / отправить / закрыть (Gameplay PART 4) --------------
+
+    def open_chat(self, initial: str = "") -> Optional[ChatScreen]:
+        """Открыть чат (``ChatComponent.createScreen`` → ``ChatScreen``).
+
+        Экран кладётся на стек (как инвентарь), курсор отпускается — ввод
+        идёт в поле чата.
+        """
+        if self.chat_screen is not None:
+            return self.chat_screen
+        screen = ChatScreen(
+            initial=initial,
+            chat=self.chat,
+            width=self.width,
+            height=self.height,
+            on_submit=self.submit_chat,
+            on_close=self._close_chat,
+        )
+        self.chat_screen = screen
+        if self.stack is not None:
+            self.stack.push(screen)
+        if self.on_pointer is not None:
+            self.on_pointer(False)
+        return screen
+
+    def _close_chat(self) -> None:
+        """Закрыть чат (``close_chat``): снять со стека, вернуть курсор."""
+        screen = self.chat_screen
+        if screen is None:
+            return
+        self.chat_screen = None
+        stack = self.stack
+        if stack is not None:
+            inner = getattr(stack, "_stack", None)
+            if inner and inner[-1] is screen:
+                stack.pop()
+        if self.on_pointer is not None:
+            self.on_pointer(True)
+
+    def submit_chat(self, message: str) -> None:
+        """``handle_chat_input``: нормализовать, запомнить, отправить/эхо."""
+        message = normalize_chat_message(message)
+        if not message:
+            return
+        self.chat.add_recent(message)
+        if self.client is not None:
+            self.send_chat(message)
+            return
+        # Офлайн-демо: сервера нет, поэтому эхо локально (Rust: на сервере
+        # сообщение возвращается через SystemChat/PlayerChat).
+        name = getattr(self, "player_name", "Player")
+        line = lang.get_or("chat.type.text", "<%s> %s")
+        if "%s" in line:
+            text = line % (name, message)
+        else:
+            text = f"<{name}> {message}"
+        self.chat.add(text, self.ticks)
+
+    def send_chat(self, message: str) -> bool:
+        """Отправить сообщение серверу (``play.Chat`` / ``Client.send_chat``).
+
+        FALLBACK: online-mode (подпись сообщения) не портирован — это
+        offline-чат; ``signature=None`` (правило 7 AGENTS.md).
+        """
+        client = self.client
+        sender = getattr(client, "send_chat", None)
+        if callable(sender):
+            try:
+                sender(message)
+                return True
+            except Exception as exc:  # noqa: BLE001 — отправка не критична
+                _log(f"чат не отправлен: {exc}")
+                return False
+        from quadrix.protocol.packets import play
+
+        packet = play.Chat(
+            message=message,
+            timestamp=int(time.time() * 1000),
+            salt=0,
+            signature=None,
+            last_seen=play.LastSeenUpdate(
+                offset=0, acknowledged=b"\x00\x00\x00", checksum=0
+            ),
+        )
+        return self._send_packet(packet)
+
+    def _poll_chat(self) -> None:
+        """Забрать пришедшие сообщения из ``Client.chat_messages``."""
+        client = self.client
+        if client is None:
+            return
+        messages = getattr(client, "chat_messages", None)
+        if not messages:
+            return
+        lock = getattr(client, "_chat_lock", None)
+        if lock is not None:
+            with lock:
+                pending = list(messages)
+                messages.clear()
+        else:
+            pending = list(messages)
+            messages.clear()
+        for text in pending:
+            self.chat.add(text, self.ticks)
+
     # -- навигация -------------------------------------------------------
 
     def title_key(self) -> str:
@@ -550,6 +674,8 @@ class GameScreen(Screen):
     def update(self, dt: float) -> None:
         """Один тик игры: ввод → движение (порт ``controlled_simulation_tick``)."""
         self._time += dt
+        self.ticks += 1
+        self._poll_chat()
         if self.remote is not None or self.client is not None:
             self._update_remote(dt)
             return
@@ -727,14 +853,23 @@ class GameScreen(Screen):
     # -- ввод -------------------------------------------------------------
 
     def handle_key(self, key: str, ch: Optional[str] = None) -> bool:
-        """Клавиши игры: инвентарь (E), выбор hotbar (1..9), Escape.
+        """Клавиши игры: чат (T//), инвентарь (E), hotbar (1..9), Escape.
 
-        Пока открыт инвентарь, клавиши идут ему (``E``/``Escape`` закрывают).
+        Пока открыт чат, клавиши идут ему (``Escape``/``Enter`` закрывают);
+        иначе инвентарь (``E``/``Escape``).
         """
+        if self.chat_screen is not None:
+            return bool(self.chat_screen.handle_key(key, ch))
         if self.inventory_screen is not None:
             return bool(self.inventory_screen.handle_key(key, ch))
         if key == "escape":
             self._back()
+            return True
+        if key == "t":
+            self.open_chat("")
+            return True
+        if key in ("/", "slash"):
+            self.open_chat("/")
             return True
         if self.hotbar.select_key(key):
             return True
@@ -777,13 +912,79 @@ class GameScreen(Screen):
     # -- рендер -----------------------------------------------------------
 
     def render(self, batch: Batch, font: Optional[Font] = None) -> None:
-        """HUD над terrain: прицел в центре + hotbar (``hud_layout::hotbar``)."""
-        cx = self.width / 2.0
-        cy = self.height / 2.0
-        color = 0xFFFFFFFF
-        solid(batch, font, cx - 5.0, cy - 0.5, 10.0, 1.0, color)
-        solid(batch, font, cx - 0.5, cy - 5.0, 1.0, 10.0, color)
+        """HUD над terrain: прицел/сердца/еда/опыт + чат + hotbar.
+
+        Порт ``Hud.render`` (``hud_layout.rs``): прицел, опыт, здоровье/еда
+        — затем список чата (``chat.rs::Chat::layout``) и hotbar.
+        """
+        self.hud.render(
+            batch,
+            font,
+            self.width,
+            self.height,
+            inputs=self._hud_inputs(),
+            xp_progress=0.0,
+            xp_level=0,
+            crosshair=True,
+        )
+        self._render_chat(batch, font)
         self.hotbar.render(batch, font, self.width, self.height)
+
+    def _hud_inputs(self) -> HealthInputs:
+        """Текущие значения :class:`HUD`: здоровье/голод клиента (если есть).
+
+        FALLBACK: уровень опыта из протокола ещё не читается (``xp_level=0``,
+        см. ``render``); лицо/эффекты/броня/воздух — дефолты :class:`HealthInputs`.
+        """
+        inputs = HealthInputs(tick=self.ticks, millis=int(self._time * 1000.0))
+        client = self.client
+        health = getattr(client, "health", None) if client is not None else None
+        if health is None:
+            return inputs
+        getter = getattr(health, "health", None)
+        if callable(getter):
+            inputs.health = float(getter())
+        absorb = getattr(health, "absorption", None)
+        if callable(absorb):
+            inputs.absorption = float(absorb())
+        food = getattr(health, "food", None) or {}
+        if "food" in food:
+            inputs.food = int(food["food"])
+        if "saturation" in food:
+            inputs.saturation = float(food["saturation"])
+        return inputs
+
+    def _render_chat(self, batch: Batch, font: Optional[Font]) -> None:
+        """Список сообщений чата над hotbar (``Chat::layout``, упрощённо).
+
+        Одно сообщение — одна строка (FALLBACK: перенос по ширине не
+        портирован). Вне фокуса alpha — :func:`time_alpha` (200-тиковое
+        затухание); в фокусе — 1.0 и полупрозрачный фон.
+        """
+        if font is None or not self.chat.lines:
+            return
+        focused = self.chat_screen is not None
+        lines = self.chat.visible(
+            self.ticks, focused, chat_lines_per_page(focused)
+        )
+        if not lines:
+            return
+        bottom = self.height - 48.0
+        if focused:
+            top = bottom - (len(lines) - 1) * CHAT_LINE_HEIGHT - CHAT_LINE_HEIGHT
+            solid(
+                batch,
+                font,
+                0.0,
+                top,
+                self.width,
+                (len(lines) + 1) * CHAT_LINE_HEIGHT,
+                CHAT_BACKGROUND,
+            )
+        for i, (line, alpha) in enumerate(lines):
+            y = bottom - i * CHAT_LINE_HEIGHT
+            color = rgba(255, 255, 255, int(255 * alpha))
+            draw_text(batch, font, line.text, 4.0, y, color)
 
     def render_terrain(self, backend: Any, program: Any, texture: Any) -> None:
         """Нарисовать меш мира с MVP камеры (вызывает ``App.render``)."""

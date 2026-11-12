@@ -97,6 +97,45 @@ SPRITES: dict[str, tuple[str, Optional[tuple[int, int, int, int]]]] = {
     ),
     "gui/sprites/container/slot": ("gui/sprites/container/slot.png", None),
     "gui/container/inventory": ("gui/container/inventory.png", None),
+    # -- Gameplay PART 4: HUD (сердца, еда, опыт, прицел) ----------------
+    # Rust ``hud_layout.rs`` берёт спрайты ``hud/heart/*``, ``hud/food_*``,
+    # ``hud/experience_bar_*`` и ``hud/crosshair`` (26.3 — спрайты, а не
+    # устаревшие icons.png/widgets.png).
+    "gui/sprites/hud/heart/container": ("gui/sprites/hud/heart/container.png", None),
+    "gui/sprites/hud/heart/full": ("gui/sprites/hud/heart/full.png", None),
+    "gui/sprites/hud/heart/half": ("gui/sprites/hud/heart/half.png", None),
+    "gui/sprites/hud/heart/hardcore_full": (
+        "gui/sprites/hud/heart/hardcore_full.png",
+        None,
+    ),
+    "gui/sprites/hud/heart/hardcore_half": (
+        "gui/sprites/hud/heart/hardcore_half.png",
+        None,
+    ),
+    "gui/sprites/hud/food_empty": ("gui/sprites/hud/food_empty.png", None),
+    "gui/sprites/hud/food_full": ("gui/sprites/hud/food_full.png", None),
+    "gui/sprites/hud/food_half": ("gui/sprites/hud/food_half.png", None),
+    "gui/sprites/hud/food_empty_hunger": (
+        "gui/sprites/hud/food_empty_hunger.png",
+        None,
+    ),
+    "gui/sprites/hud/food_full_hunger": (
+        "gui/sprites/hud/food_full_hunger.png",
+        None,
+    ),
+    "gui/sprites/hud/food_half_hunger": (
+        "gui/sprites/hud/food_half_hunger.png",
+        None,
+    ),
+    "gui/sprites/hud/experience_bar_background": (
+        "gui/sprites/hud/experience_bar_background.png",
+        None,
+    ),
+    "gui/sprites/hud/experience_bar_progress": (
+        "gui/sprites/hud/experience_bar_progress.png",
+        None,
+    ),
+    "gui/sprites/hud/crosshair": ("gui/sprites/hud/crosshair.png", None),
 }
 
 #: Логический размер в GUI-пикселях там, где он не равен размеру PNG
