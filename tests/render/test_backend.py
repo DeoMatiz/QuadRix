@@ -13,7 +13,7 @@ import pytest
 
 from quadrix.render.backend import BackendType, RenderBackend, create_backend
 from quadrix.render.backend_moderngl import ModernglBackend, load_shader
-from quadrix.render.mesher import mesh_chunk
+from quadrix.render.mesher import VERTEX_FLOATS, mesh_chunk
 from quadrix.render.texture_atlas import STONE_TEXTURE_PATH, TextureAtlas
 
 
@@ -146,7 +146,7 @@ def test_moderngl_draw_present_close_smoke() -> None:
         blocks[8, 8, 8] = 1
         vertices, indices = mesh_chunk(blocks, atlas)
         assert indices is None
-        assert vertices.shape == (36, 8)
+        assert vertices.shape == (36, VERTEX_FLOATS)
 
         mvp = np.identity(4, dtype=np.float32)
         backend.clear()

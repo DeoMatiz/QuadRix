@@ -176,10 +176,21 @@ FLUID_TEXTURES: dict[str, str] = {
     "minecraft:lava": "minecraft:block/lava_still",
 }
 
-#: FALLBACK-тинт серых текстур (grass/leaves/water) — Rust умножает их на
+#: Colormap травы (vanilla ``textures/colormap/grass.png``).
+#: Цвет = ``grass[x, y]`` при ``x=(1-temp)*255``, ``y=(1-down*temp)*255``
+#: (``GrassColor.get``). Для plains — ``temperature=0.8, downfall=0.4``.
+GRASS_COLORMAP_PATH = Path(
+    ".local/horizon-client/26.3/assets/minecraft/textures/colormap/grass.png"
+)
+#: Климат plains (vanilla ``Biome.PLAINS``): ``temperature``/``downfall``.
+PLAINS_TEMPERATURE = 0.8
+PLAINS_DOWNFALL = 0.4
+
+#: FALLBACK-тинт серых текстур (leaves/water) — Rust умножает их на
 #: ``TintSource``; здесь фиксированные ванильные цвета биомов.
+#: ``grass_block_top`` здесь НЕТ: он тонируется биомным цветом через
+#: ``face_tints`` (v_color), как в Rust ``TintSource::Grass``.
 TINTS: dict[str, tuple[int, int, int]] = {
-    "minecraft:block/grass_block_top": (0x91, 0xBD, 0x59),
     "minecraft:block/water_still": (0x3F, 0x76, 0xE4),
     "minecraft:block/water_flow": (0x3F, 0x76, 0xE4),
     "minecraft:block/oak_leaves": (0x48, 0xB5, 0x18),
@@ -192,6 +203,45 @@ TINTS: dict[str, tuple[int, int, int]] = {
     "minecraft:block/vine": (0x48, 0xB5, 0x18),
     "minecraft:block/lily_pad": (0x71, 0xC7, 0x4E),
 }
+
+@functools.lru_cache(maxsize=1)
+def _grass_colormap() -> Optional[np.ndarray]:
+    """Прочитать ``grass.png`` colormap (RGB, 256x256); ``None`` при ошибке."""
+    from quadrix.render.ui import load_png_rgba
+
+    try:
+        rgba = load_png_rgba(GRASS_COLORMAP_PATH)
+    except (OSError, ValueError) as exc:  # noqa: BLE001 - FALLBACK ниже
+        print(f"[QuadRix] grass colormap не прочитан: {exc}")
+        return None
+    return np.ascontiguousarray(rgba[:, :, :3], dtype=np.uint8)
+
+
+def grass_color(
+    temperature: float = PLAINS_TEMPERATURE,
+    downfall: float = PLAINS_DOWNFALL,
+) -> tuple[int, int, int]:
+    """Биомный цвет травы из ``grass.png`` (порт ``GrassColor.get``).
+
+    ``temperature``/``downfall`` — климат биома. Функция точно повторяет
+    vanilla: ``adjDownfall = clamp(downfall) * adjTemperature``,
+    ``x = (1 - adjTemperature) * 255``, ``y = (1 - adjDownfall) * 255``,
+    цвет = ``grass[x, y]``. Для plains ``(0.8, 0.4)`` это ``#91BD59`` —
+    тот же цвет, что Rust ``TintSource::Grass``.
+    """
+    temp = min(1.0, max(0.0, float(temperature)))
+    down = min(1.0, max(0.0, float(downfall))) * temp
+    x = int((1.0 - temp) * 255.0)
+    y = int((1.0 - down) * 255.0)
+    colormap = _grass_colormap()
+    if colormap is None:
+        # FALLBACK: официальный plains-цвет, если colormap недоступен.
+        return (0x91, 0xBD, 0x59)
+    x = min(max(x, 0), colormap.shape[1] - 1)
+    y = min(max(y, 0), colormap.shape[0] - 1)
+    r, g, b = (int(v) for v in colormap[y, x])
+    return (r, g, b)
+
 
 #: Сколько тайлов в ряд при упаковке атласа.
 _ATLAS_COLUMNS = 32
@@ -383,6 +433,7 @@ class BlockAtlas:
         *,
         sprite_rects: dict[str, tuple[int, int, int, int]],
         state_faces: np.ndarray,
+        state_tints: Optional[np.ndarray] = None,
         tile_pixels: int = TILE_PIXELS,
         registry: Optional[object] = None,
     ) -> None:
@@ -391,6 +442,12 @@ class BlockAtlas:
         self.height, self.width = self.image.shape[:2]
         self._sprite_rects = sprite_rects
         self._state_faces = state_faces
+        # Цвет грани (v_color): RGBA8, по умолчанию белый (без тонирования).
+        if state_tints is None:
+            state_tints = np.full(
+                (state_faces.shape[0], len(FACE_KEYS), 4), 255, dtype=np.uint8
+            )
+        self._state_tints = np.ascontiguousarray(state_tints, dtype=np.uint8)
         self.registry = registry
 
     # -- загрузка --------------------------------------------------------
@@ -438,6 +495,11 @@ class BlockAtlas:
         needed: set[str] = set()
         for faces in name_faces.values():
             needed.update(tex for tex in faces.values() if tex)
+        # Бок травы: база ``grass_block_side`` + оверлей ``..._overlay``
+        # (tintindex 0). ``face_textures`` берёт только первую грань, поэтому
+        # оверлей надо догрузить явно (Rust: ``side`` + ``overlay``).
+        if "minecraft:grass_block" in name_faces:
+            needed.add("minecraft:block/grass_block_side_overlay")
 
         from quadrix.render.ui import load_png_rgba
 
@@ -468,6 +530,11 @@ class BlockAtlas:
                         continue
                     tex, image = result
                     tiles.append((tex, _tile_image(image, TINTS.get(tex))))
+
+        # Бок травы: наложить оверлей (серый + alpha) с биомным tint на
+        # ``grass_block_side`` — в vanilla цвет травы на боку даёт именно
+        # ``grass_block_side_overlay`` (tintindex 0), а не сама база.
+        cls._composite_grass_side(tiles)
 
         image, sprite_px = cls._pack(tiles)
         fallback_px = sprite_px["__fallback__"]
@@ -500,6 +567,15 @@ class BlockAtlas:
                 tex = faces.get(fkey)
                 table[i, fi] = sprite_norm.get(tex, fallback_norm)
 
+        # состояние -> (6, 4) RGBA-цвет грани (v_color). Трава: UP берёт
+        # биомный цвет (``TintSource::Grass``), остальные грани белые —
+        # бок уже содержит оверлей, низ — земля без tint (как в Rust).
+        tints = np.full((len(states), len(FACE_KEYS), 4), 255, dtype=np.uint8)
+        grass_rgb = grass_color()
+        for i, state in enumerate(states):
+            if getattr(state, "name", "") == "minecraft:grass_block":
+                tints[i, 4, 0:3] = grass_rgb  # 4 = up (FACE_KEYS)
+
         print(
             f"[QuadRix] block atlas: {atlas_w}x{atlas_h} "
             f"тайлов={len(sprite_px)} блоков={len(states)}"
@@ -508,8 +584,37 @@ class BlockAtlas:
             image,
             sprite_rects=sprite_px,
             state_faces=table,
+            state_tints=tints,
             registry=registry,
         )
+
+    @staticmethod
+    def _composite_grass_side(tiles: list[tuple[str, np.ndarray]]) -> None:
+        """Наложить ``grass_block_side_overlay`` на бок травы (in-place).
+
+        В vanilla бок травы — земля + оверлей, тонированный биомным цветом
+        (tintindex 0). Оверлей серый и полупрозрачный: ``side = side*(1-a)
+        + overlay_rgb*tint*a``. Так tint применяется ТОЛЬКО к оверлею.
+        """
+        side = next(
+            (t for tex, t in tiles if tex == "minecraft:block/grass_block_side"),
+            None,
+        )
+        overlay = next(
+            (
+                t
+                for tex, t in tiles
+                if tex == "minecraft:block/grass_block_side_overlay"
+            ),
+            None,
+        )
+        if side is None or overlay is None:
+            return
+        grass = np.asarray(grass_color(), dtype=np.float32) / 255.0
+        alpha = (overlay[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
+        tinted = overlay[:, :, :3].astype(np.float32) * grass[None, None, :]
+        blended = side[:, :, :3].astype(np.float32) * (1.0 - alpha) + tinted * alpha
+        side[:, :, :3] = np.clip(blended, 0, 255).astype(np.uint8)
 
     @staticmethod
     def _pack(
@@ -559,6 +664,21 @@ class BlockAtlas:
         valid = (ids >= 0) & (ids < count)
         if valid.any():
             out[valid] = self._state_faces[ids[valid]]
+        return out
+
+    def face_tints(self, block_state_ids: np.ndarray) -> np.ndarray:
+        """Цвет всех граней (v_color): ``(m, 6, 4)`` uint8, RGBA.
+
+        Белый = без тонирования. UP травы — биомный цвет из ``grass.png``
+        (``TintSource::Grass`` в Rust), DOWN/бока — белые.
+        """
+        ids = np.asarray(block_state_ids).reshape(-1).astype(np.int64)
+        m = ids.size
+        out = np.full((m, len(FACE_KEYS), 4), 255, dtype=np.uint8)
+        count = self._state_tints.shape[0]
+        valid = (ids >= 0) & (ids < count)
+        if valid.any():
+            out[valid] = self._state_tints[ids[valid]]
         return out
 
     def load_many(self, block_state_ids: np.ndarray) -> np.ndarray:

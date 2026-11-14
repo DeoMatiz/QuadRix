@@ -4,8 +4,12 @@
 без запечённой текстуры, UV берутся из атласа, отсечение скрытых граней
 через padding-массив (никаких проверок границ).
 
-Формат вершины (stride 8 float32) — общий с terrain.vert:
-    in_pos(3) | in_normal(3) | in_uv(2)
+Формат вершины (stride 12 float32) — общий с terrain.vert:
+    in_pos(3) | in_normal(3) | in_uv(2) | in_color(4)
+
+``in_color`` — биомный tint грани (v_color, 0..1), как в Rust
+(``TerrainVertex::color`` = tint * shade * AO). Для травы UP-грань берёт
+цвет из ``grass.png`` colormap; остальные грани белые.
 
 Один чанк = один draw call. Индексы не нужны: прототип отдаёт triangle
 soup, поэтому ``mesh_chunk`` возвращает ``(vertices, None)``.
@@ -26,11 +30,11 @@ CHUNK_SIZE = 16
 # (default_state("minecraft:air") == 0).
 AIR_STATE_ID = 0
 
-# Сколько float на вершину: pos(3) + normal(3) + uv(2).
-VERTEX_FLOATS = 8
+# Сколько float на вершину: pos(3) + normal(3) + uv(2) + color(4).
+VERTEX_FLOATS = 12
 # Формат для moderngl.vertex_array.
-VERTEX_FORMAT = "3f 3f 2f"
-ATTRIBUTES = ("in_pos", "in_normal", "in_uv")
+VERTEX_FORMAT = "3f 3f 2f 4f"
+ATTRIBUTES = ("in_pos", "in_normal", "in_uv", "in_color")
 
 # Таблица граней: (нормаль, 4 угла CCW при взгляде снаружи).
 # Координаты углов — смещения от (x, y, z) блока в [0, 1].
@@ -126,6 +130,7 @@ def mesh_chunk(
 
         if texture_atlas is None:
             uvs = np.tile(QUAD_UV, (m, 1))
+            face_colors = np.ones((m, 4), dtype=np.float32)
         else:
             ids = blocks[xs, ys, zs]
             if use_faces:
@@ -144,8 +149,18 @@ def mesh_chunk(
             uvs[:, :, 0] = u0 + local[:, :, 0] * du
             uvs[:, :, 1] = v0 + local[:, :, 1] * dv
             uvs = uvs.reshape(-1, 2)
+            # v_color грани: биомный tint (только UP травы), иначе белый.
+            if hasattr(texture_atlas, "face_tints"):
+                face_colors = (
+                    np.asarray(texture_atlas.face_tints(ids)[:, fi, :], dtype=np.float32)
+                    / 255.0
+                )
+            else:
+                face_colors = np.ones((m, 4), dtype=np.float32)
 
-        parts.append(np.concatenate((tri, normals, uvs), axis=1))
+        # цвет на каждую из 6 вершин грани (порядок = TRIANGLE_ORDER)
+        colors = np.repeat(face_colors, 6, axis=0)
+        parts.append(np.concatenate((tri, normals, uvs, colors), axis=1))
 
     if not parts:
         return np.zeros((0, VERTEX_FLOATS), dtype=np.float32), None

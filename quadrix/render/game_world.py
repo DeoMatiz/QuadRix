@@ -125,11 +125,24 @@ class FlatWorld:
 def _build_region(
     world: FlatWorld, half: int = MESH_HALF
 ) -> np.ndarray:
-    """Массив блоков ``(2*half, ground_top, 2*half)`` для меша."""
+    """Массив блоков ``(2*half, ground_top, 2*half)`` для меша.
+
+    Слои берутся из ``FlatWorld`` (земля ниже, трава сверху), а не
+    заполняются одним ``SOLID_STATE_ID``: иначе верхний слой был бы камнем,
+    и трава в демо-мире не рисовалась бы вовсе.
+    """
     size = half * 2
+    from quadrix.world.block_placement import default_registry
+
+    registry = default_registry()
     blocks = np.full(
         (size, world.ground_top, size), SOLID_STATE_ID, dtype=np.uint16
     )
+    for y in range(world.ground_top):
+        name = world.block(0, y, 0)
+        state = registry.default_state(name)
+        if state is not None:
+            blocks[:, y, :] = np.uint16(state.id)
     return blocks
 
 
@@ -171,8 +184,8 @@ class TerrainRenderer:
             self.vertices,
             program,
             texture,
-            vertex_format="3f 3f 2f",
-            attributes=("in_pos", "in_normal", "in_uv"),
+            vertex_format="3f 3f 2f 4f",
+            attributes=("in_pos", "in_normal", "in_uv", "in_color"),
             mvp=mvp,
             depth_test=True,
             cull_face=True,
@@ -302,8 +315,8 @@ class ChunkTerrainRenderer:
             self.vertices,
             program,
             texture,
-            vertex_format="3f 3f 2f",
-            attributes=("in_pos", "in_normal", "in_uv"),
+            vertex_format="3f 3f 2f 4f",
+            attributes=("in_pos", "in_normal", "in_uv", "in_color"),
             mvp=mvp,
             depth_test=True,
             cull_face=True,

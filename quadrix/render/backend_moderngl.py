@@ -185,8 +185,8 @@ class ModernglBackend:
         program: Any,
         texture: Any = None,
         *,
-        vertex_format: str = "3f 3f 2f",
-        attributes: Sequence[str] = ("in_pos", "in_normal", "in_uv"),
+        vertex_format: str = "3f 3f 2f 4f",
+        attributes: Sequence[str] = ("in_pos", "in_normal", "in_uv", "in_color"),
         count: Optional[int] = None,
         mvp: Optional[np.ndarray] = None,
         depth_test: bool = True,
@@ -241,7 +241,8 @@ class ModernglBackend:
             owns_buffer = True
 
         if count is None:
-            count = buffer.size // (8 * 4)  # stride: pos(3) + normal(3) + uv(2)
+            # stride: pos(3) + normal(3) + uv(2) + color(4) = 12 float32
+            count = buffer.size // (12 * 4)
 
         if mvp is not None:
             # GLSL ждёт column-major, numpy даёт row-major -> транспонируем

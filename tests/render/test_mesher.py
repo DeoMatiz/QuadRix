@@ -30,8 +30,8 @@ def _single_block(block_id: int = STONE_ID, pos: tuple[int, int, int] = (8, 8, 8
 
 def test_constants() -> None:
     assert CHUNK_SIZE == 16
-    assert VERTEX_FLOATS == 8
-    assert VERTEX_FORMAT == "3f 3f 2f"
+    assert VERTEX_FLOATS == 12  # pos(3) + normal(3) + uv(2) + color(4)
+    assert VERTEX_FORMAT == "3f 3f 2f 4f"
     assert len(FACE_DEFS) == 6
     assert AIR_STATE_ID == 0
 
