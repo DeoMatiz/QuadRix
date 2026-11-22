@@ -21,12 +21,97 @@ import threading
 from typing import Optional, Callable, Any
 
 from quadrix.motion.core import PlayerMotion, travel as _module_travel
+from quadrix.core.geometry import Direction
 from quadrix.world.world_ray import clip, BlockHitResult, ClipContext, Vec3
-from quadrix.world.block_placement import default_placement, BlockPlacement, PlaceContext
+from quadrix.world.block_placement import (
+    default_placement,
+    BlockPlacement,
+    PlaceContext,
+    default_registry,
+)
 from quadrix.world.block_survival import default_survival, break_block
+from quadrix.world.registry import BlockStateId
+from quadrix.world.view_direction import view_vector
+from quadrix.render.interaction import pick_block, REACH_SURVIVAL
 from quadrix.protocol.packets.play import Chat
 
 LOG = logging.getLogger("quadrix.control")
+
+
+# ---------------------------------------------------------------------------
+# _parse_face — строковое имя грани в Direction (place face argument)
+# ---------------------------------------------------------------------------
+
+_FACE_ALIASES = {
+    "down": Direction.DOWN,
+    "bottom": Direction.DOWN,
+    "up": Direction.UP,
+    "top": Direction.UP,
+    "north": Direction.NORTH,
+    "south": Direction.SOUTH,
+    "west": Direction.WEST,
+    "east": Direction.EAST,
+}
+
+
+def _parse_face(face: str) -> Optional[Direction]:
+    return _FACE_ALIASES.get(str(face).strip().lower())
+
+
+# ---------------------------------------------------------------------------
+# _ControlWorld — изменяемая проекция мира для place/break.
+#
+# ``ClientWorld`` (quadrix.py) умеет только ``block(x, y, z) -> str``.
+# ``block_placement``/``block_survival`` ждут ``get_block``/``set_block``.
+# Обёртка держит overlay поставленных/сломанных блоков и делегирует
+# остальное исходному миру, поэтому raytrace видит изменения сразу.
+# ---------------------------------------------------------------------------
+
+class _ControlWorld:
+    """Mutable overlay over a block-name world (control place/break)."""
+
+    def __init__(self, world, registry) -> None:
+        self.base = world
+        self.registry = registry
+        self.overlay: dict[tuple[int, int, int], BlockStateId] = {}
+
+    @staticmethod
+    def _key(position) -> tuple[int, int, int]:
+        return (int(position[0]), int(position[1]), int(position[2]))
+
+    def block(self, x: int, y: int, z: int) -> str:
+        key = (int(x), int(y), int(z))
+        state_id = self.overlay.get(key)
+        if state_id is not None:
+            state = self.registry.state(state_id)
+            return state.name if state is not None else "minecraft:air"
+        return self.base.block(key[0], key[1], key[2])
+
+    def get_block(self, position) -> BlockStateId:
+        key = self._key(position)
+        state_id = self.overlay.get(key)
+        if state_id is not None:
+            return state_id
+        name = self.base.block(key[0], key[1], key[2])
+        found = self.registry.default_state(name)
+        if found is not None:
+            return found
+        return self.registry.default_state("minecraft:air")
+
+    def set_block(self, position, state, flags: int = 3) -> bool:
+        key = self._key(position)
+        if isinstance(state, BlockStateId):
+            state_id = state
+        elif isinstance(state, int):
+            state_id = BlockStateId(state)
+        elif isinstance(state, str):
+            state_id = self.registry.default_state(state)
+        else:
+            raise TypeError(f"[QuadRix] unsupported block state: {state!r}")
+        if state_id is None:
+            return False
+        self.overlay[key] = state_id
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -43,12 +128,15 @@ class _ClientWrapper:
         self.client = client
         self._placement = default_placement()
         self._survival = default_survival()
+        self._registry = None
+        self._collision = None
+        self._view: Optional[_ControlWorld] = None
 
     @property
     def pm(self):
         # Берём свежий motion у client: при создании ControlServer motion может быть None,
-        # а после client.prepare() — появится.
-        if self._pm is None and self.client is not None:
+        # а после client.prepare() — появится. Client — источник истины.
+        if self.client is not None:
             self._pm = getattr(self.client, "motion", None)
         return self._pm
 
@@ -122,56 +210,85 @@ class _ClientWrapper:
 
     # --- place ---
 
-    def place_block(self, block: str, face: Optional[str] = None) -> dict:
-        """Place a block using raytrace + block_placement.place.
+    def _world_view(self) -> _ControlWorld:
+        """Raytrace/placement view with a persistent place/break overlay."""
+        if self.world is None and self.client is not None:
+            self.world = getattr(self.client, "world", None)
+        if self.client is not None:
+            current = getattr(self.client, "world", None)
+            if current is not None and current is not self.world:
+                # Client replaced its world (e.g. reconnect): drop the overlay.
+                self.world = current
+                self._view = None
+        if self.world is None:
+            raise RuntimeError("world not available")
+        if self._registry is None:
+            from quadrix.world.collision.block_collision import default_collision_registry
 
-        If ray trace fails or placement is not possible, returns an error.
+            self._registry = default_registry()
+            self._collision = default_collision_registry(self._registry)
+        if (
+            self._view is None
+            or self._view.base is not self.world
+            or self._view.registry is not self._registry
+        ):
+            self._view = _ControlWorld(self.world, self._registry)
+        return self._view
+
+    def _pick(self, view: _ControlWorld) -> Optional[BlockHitResult]:
+        """Raytrace from the player's eyes along their view direction."""
+        start = self.pm.position.add_vector(Vec3(0.0, float(self.pm.eye_height()), 0.0))
+        look = view_vector(getattr(self.pm, "pitch", 0.0), self.pm.yaw)
+        return pick_block(
+            view,
+            start,
+            look,
+            REACH_SURVIVAL,
+            registry=self._registry,
+            collision=self._collision,
+        )
+
+    def place_block(self, block: str, face: Optional[str] = None) -> dict:
+        """Raytrace forward and place *block* against the hit face.
+
+        Placement goes through ``BlockPlacement`` (replaceability + survival)
+        and lands in the wrapper's mutable overlay, so the following break
+        command sees the newly placed block.
         """
+        if self.pm is None:
+            return {"ok": False, "error": "motion not ready"}
         try:
-            # Raytrace forward from player position
-            start = self.pm.position
-            # Look direction based on yaw/pitch
-            yaw = self.pm.yaw
-            pitch = self.pm.pitch
-            # Simple forward vector
-            import math
-            yaw_rad = math.radians(yaw)
-            pitch_rad = math.radians(pitch)
-            dx = -math.sin(yaw_rad) * math.cos(pitch_rad)
-            dy = math.sin(pitch_rad)
-            dz = math.cos(yaw_rad) * math.cos(pitch_rad)
-            # End point a few blocks away
-            end = Vec3(
-                start.x + dx * 4.0,
-                start.y + dy * 4.0,
-                start.z + dz * 4.0,
-            )
-            ctx = ClipContext(from_=start, to_=end, block_shape=None, fluid_shape=None)
-            # Need a world provider — use the pm's world if available
-            world = getattr(self, "world", None) or self.world
-            # clip returns Optional[BlockHitResult]
-            hit = clip(world, ctx)
+            view = self._world_view()
+            hit = self._pick(view)
             if hit is None:
                 return {"ok": False, "error": f"raytrace missed for block {block}"}
-            # Attempt placement at hit location
-            placement_pos = (int(hit.block.x), int(hit.block.y), int(hit.block.z))
-            # If face was specified, resolve it
-            face_dir = None
+
+            direction = hit.direction
             if face is not None:
-                # Map face string to Direction
-                from quadrix.core.geometry import Direction
-                face_dir = Direction(face.lower()) if hasattr(Direction, face.lower()) else None
-            # Use default placement
-            ok = self._placement.place(
-                world,
-                placement_pos,
-                block,
-                flags=11,
-            )
-            if ok:
-                return {"ok": True, "result": {"block": block, "pos": placement_pos}}
-            else:
-                return {"ok": False, "error": f"cannot place {block} at {placement_pos}"}
+                parsed = _parse_face(face)
+                if parsed is None:
+                    return {"ok": False, "error": f"unknown face: {face}"}
+                direction = parsed
+            nx, ny, nz = direction.normal()
+            pos = hit.block.offset(nx, ny, nz)
+
+            item = block if ":" in block else f"minecraft:{block}"
+            state = self._placement.placement_state(item)
+            if state is None:
+                return {"ok": False, "error": f"unknown block: {block}"}
+            target = (pos.x, pos.y, pos.z)
+            if not self._placement.can_place(view, state, target):
+                return {"ok": False, "error": f"cannot place {block} at {target}"}
+            if not self._placement.place(view, target, state, flags=11):
+                return {"ok": False, "error": f"cannot place {block} at {target}"}
+            return {
+                "ok": True,
+                "result": {
+                    "block": item,
+                    "pos": [pos.x, pos.y, pos.z],
+                    "face": direction.name.lower(),
+                },
+            }
         except Exception as exc:
             LOG.error("[QuadRix] place_block error: %s", exc, exc_info=True)
             return {"ok": False, "error": f"place failed: {exc}"}
@@ -179,35 +296,27 @@ class _ClientWrapper:
     # --- break ---
 
     def break_block(self, ticks: int = 20) -> dict:
-        """Break a block using raytrace + block_survival.break_block.
-
-        Raytraces forward from player, then breaks the hit block.
-        """
+        """Raytrace forward and break the hit block (``block_survival``)."""
+        if self.pm is None:
+            return {"ok": False, "error": "motion not ready"}
         try:
-            # Raytrace forward from player position
-            start = self.pm.position
-            import math
-            yaw = self.pm.yaw
-            pitch = self.pm.pitch
-            yaw_rad = math.radians(yaw)
-            pitch_rad = math.radians(pitch)
-            dx = -math.sin(yaw_rad) * math.cos(pitch_rad)
-            dy = math.sin(pitch_rad)
-            dz = math.cos(yaw_rad) * math.cos(pitch_rad)
-            end = Vec3(
-                start.x + dx * 4.0,
-                start.y + dy * 4.0,
-                start.z + dz * 4.0,
-            )
-            ctx = ClipContext(from_=start, to_=end, block_shape=None, fluid_shape=None)
-            world = getattr(self, "world", None) or self.world
-            hit = clip(world, ctx)
+            view = self._world_view()
+            hit = self._pick(view)
             if hit is None:
                 return {"ok": False, "error": "raytrace missed — no block in range"}
-            # Break the block at hit position
             pos = (int(hit.block.x), int(hit.block.y), int(hit.block.z))
-            drops = break_block(world, pos)
-            return {"ok": True, "result": {"block": pos, "drops": len(drops)}}
+            name = view.block(*pos)
+            if name == "minecraft:air":
+                return {"ok": False, "error": f"no block at {pos}"}
+            drops = break_block(view, pos)
+            return {
+                "ok": True,
+                "result": {
+                    "block": name,
+                    "pos": [pos[0], pos[1], pos[2]],
+                    "drops": len(drops),
+                },
+            }
         except Exception as exc:
             LOG.error("[QuadRix] break_block error: %s", exc, exc_info=True)
             return {"ok": False, "error": f"break failed: {exc}"}
@@ -601,10 +710,7 @@ class ControlServer:
                 return {"id": _request_id, "ok": False, "error": "motion not ready (client not prepared)"}
             block = args.get("block", "stone")
             face = args.get("face", None)
-            if self._wrapper is None:
-                result = self._wrapper.place_block(block, face)
-            else:
-                result = self._place_block_fallback(block, face)
+            result = self._wrapper.place_block(block, face)
             return {"id": _request_id, "ok": result.get("ok", False), "result": result.get("result"), "error": result.get("error"), "id": _request_id}
 
         if cmd == "break":
@@ -615,10 +721,7 @@ class ControlServer:
             if self._wrapper.pm is None:
                 return {"id": _request_id, "ok": False, "error": "motion not ready (client not prepared)"}
             ticks = int(args.get("ticks", 20))
-            if self._wrapper is None:
-                result = self._wrapper.break_block(ticks)
-            else:
-                result = self._break_block_fallback(ticks)
+            result = self._wrapper.break_block(ticks)
             return {"id": _request_id, "ok": result.get("ok", False), "result": result.get("result"), "error": result.get("error"), "id": _request_id}
 
         if cmd == "look":
@@ -698,36 +801,20 @@ class ControlServer:
     # --- fallback methods when no wrapper ---
 
     def _place_block_fallback(self, block: str, face: Optional[str]) -> dict:
-        """Fallback place without full wrapper — raytrace + attempt place."""
-        try:
-            import math
-            from quadrix.core.geometry import Vec3
-            # Simple raytrace assuming player at origin looking +z
-            start = Vec3(0.0, 64.0, 0.0)
-            yaw = 0.0
-            pitch = 0.0
-            yaw_rad = math.radians(yaw)
-            pitch_rad = math.radians(pitch)
-            dx = -math.sin(yaw_rad) * math.cos(pitch_rad)
-            dy = math.sin(pitch_rad)
-            dz = math.cos(yaw_rad) * math.cos(pitch_rad)
-            end = Vec3(start.x + dx * 4.0, start.y + dy * 4.0, start.z + dz * 4.0)
-            from quadrix.world.world_ray import clip as _clip
-            ctx = ClipContext(from_=start, to_=end, block_shape=None, fluid_shape=None)
-            # Use a dummy world (all air except target block)
-            from quadrix.world.block_collision import CachedCollisionRegistry
-            from quadrix.world.registry import BlockRegistry
-            registry = BlockRegistry.load(Path(".local/horizon-client-motion/block-registry.nbt"))
-            from quadrix.world.collision.block_collision import default_collision_registry
-            collision = default_collision_registry(registry)
-            # Can't fully instantiate world without more setup; just return error
+        """Fallback place when no wrapper was built (uses client.motion/world)."""
+        client = self.client
+        if client is None or getattr(client, "motion", None) is None:
             return {"ok": False, "error": "place fallback: world not available"}
-        except Exception as exc:
-            return {"ok": False, "error": f"place fallback error: {exc}"}
+        wrapper = _ClientWrapper(client.motion, getattr(client, "world", None), client)
+        return wrapper.place_block(block, face)
 
     def _break_block_fallback(self, ticks: int) -> dict:
-        """Fallback break without full wrapper."""
-        return {"ok": False, "error": "break fallback: world not available"}
+        """Fallback break when no wrapper was built (uses client.motion/world)."""
+        client = self.client
+        if client is None or getattr(client, "motion", None) is None:
+            return {"ok": False, "error": "break fallback: world not available"}
+        wrapper = _ClientWrapper(client.motion, getattr(client, "world", None), client)
+        return wrapper.break_block(ticks)
 
 
     def poll(self) -> None:

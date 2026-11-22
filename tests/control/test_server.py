@@ -364,6 +364,102 @@ def test_dispatch_place_and_break_return_structured():
         assert "error" in resp or "result" in resp
 
 
+# ---------------------------------------------------------------------------
+# place / break — real raytrace through pick_block + mutable overlay
+# ---------------------------------------------------------------------------
+
+
+class _BlockWorld:
+    """World with one stone block at (0, 65, 3), air elsewhere."""
+
+    def __init__(self, blocks=None) -> None:
+        self.blocks = dict(
+            {(0, 65, 3): "minecraft:stone"} if blocks is None else blocks
+        )
+
+    def block(self, x: int, y: int, z: int) -> str:
+        return self.blocks.get((int(x), int(y), int(z)), "minecraft:air")
+
+
+def _make_world_server() -> tuple[ControlServer, FakeClient]:
+    client = FakeClient()
+    client.world = _BlockWorld()
+    server = ControlServer(host="127.0.0.1", port=0, client=client)
+    return server, client
+
+
+def test_place_raytrace_miss_reports_error():
+    server, client = _make_world_server()
+    client.world = _BlockWorld({})
+    resp = server.dispatch_internal("place", {"block": "dirt"})
+    assert resp["ok"] is False
+    assert "raytrace missed" in resp["error"]
+
+
+def test_place_lands_on_face_adjacent_to_hit_block():
+    server, client = _make_world_server()
+    resp = server.dispatch_internal("place", {"block": "dirt"})
+    assert resp["ok"] is True
+    assert resp["result"]["block"] == "minecraft:dirt"
+    # The ray hits the north face of the stone at z=3 -> place at z=2.
+    assert resp["result"]["pos"] == [0, 65, 2]
+    assert resp["result"]["face"] == "north"
+    # The overlay is visible to a following raytrace, base world untouched.
+    assert server._wrapper._view.block(0, 65, 2) == "minecraft:dirt"
+    assert client.world.block(0, 65, 2) == "minecraft:air"
+
+
+def test_place_rejects_unknown_block_and_face():
+    server, _client = _make_world_server()
+    unknown_block = server.dispatch_internal("place", {"block": "not_a_block"})
+    assert unknown_block["ok"] is False
+    assert "unknown block" in unknown_block["error"]
+
+    unknown_face = server.dispatch_internal(
+        "place", {"block": "dirt", "face": "sideways"}
+    )
+    assert unknown_face["ok"] is False
+    assert "unknown face" in unknown_face["error"]
+
+
+def test_place_requires_motion():
+    server, client = _make_world_server()
+    client.motion = None
+    resp = server.dispatch_internal("place", {"block": "dirt"})
+    assert resp["ok"] is False
+    assert "motion not ready" in resp["error"]
+
+
+def test_break_removes_hit_block_from_overlay():
+    server, client = _make_world_server()
+    assert server.dispatch_internal("place", {"block": "dirt"})["ok"] is True
+    resp = server.dispatch_internal("break", {})
+    assert resp["ok"] is True
+    # Dirt was placed closer than the stone, so it is the block that breaks.
+    assert resp["result"]["block"] == "minecraft:dirt"
+    assert resp["result"]["pos"] == [0, 65, 2]
+    assert resp["result"]["drops"] == 1
+    assert server._wrapper._view.block(0, 65, 2) == "minecraft:air"
+    # The original stone is still there.
+    assert server._wrapper._view.block(0, 65, 3) == "minecraft:stone"
+
+
+def test_break_miss_reports_error():
+    server, client = _make_world_server()
+    client.world = _BlockWorld({})
+    resp = server.dispatch_internal("break", {})
+    assert resp["ok"] is False
+    assert "raytrace missed" in resp["error"]
+
+
+def test_break_requires_motion():
+    server, client = _make_world_server()
+    client.motion = None
+    resp = server.dispatch_internal("break", {})
+    assert resp["ok"] is False
+    assert "motion not ready" in resp["error"]
+
+
 def test_dispatch_unknown():
     server, _client = _make_server()
     resp = server.dispatch_internal("unknown", {})
