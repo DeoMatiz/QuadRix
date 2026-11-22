@@ -29,6 +29,12 @@ from quadrix.render.menu import (
     Settings,
     load_language,
 )
+from quadrix.render.world_screens import (
+    CreateWorldScreen,
+    SelectWorldScreen,
+    WorldEntry,
+    WorldsStore,
+)
 
 #: Корень репозитория: tests/render/test_app.py -> ../..
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,9 +185,14 @@ def test_app_handle_event_click_opens_options() -> None:
     assert isinstance(app.screen_stack.current, OptionsScreen)
 
 
-def test_app_handle_event_key_escape_pops_game_screen() -> None:
+def test_app_handle_event_key_escape_pops_game_screen(tmp_path) -> None:
     app = App.init(FakeBackend(), Settings())
-    game = app.open_singleplayer()
+    app.worlds_store = WorldsStore(tmp_path / "worlds.json")
+    create = app.open_singleplayer()
+    # Пустой список миров ведёт сразу в Create New World.
+    assert isinstance(create, CreateWorldScreen)
+    create.create()
+    game = app.screen_stack.current
     assert isinstance(game, GameScreen)
     assert app.screen_stack.current is game
 
@@ -190,9 +201,13 @@ def test_app_handle_event_key_escape_pops_game_screen() -> None:
     assert isinstance(app.screen_stack.current, MainMenu)
 
 
-def test_app_singleplayer_and_multiplayer_push_game_screen() -> None:
+def test_app_singleplayer_and_multiplayer_push_game_screen(tmp_path) -> None:
     app = App.init(FakeBackend(), Settings())
-    single = app.open_singleplayer()
+    app.worlds_store = WorldsStore(tmp_path / "worlds.json")
+    create = app.open_singleplayer()
+    assert isinstance(create, CreateWorldScreen)
+    create.create()
+    single = app.screen_stack.current
     assert isinstance(single, GameScreen) and single.kind == "singleplayer"
 
     app.screen_stack.pop()
@@ -204,11 +219,21 @@ def test_app_singleplayer_and_multiplayer_push_game_screen() -> None:
     assert app.screen_stack.current is multi
 
 
+def test_app_open_singleplayer_lists_saved_worlds(tmp_path) -> None:
+    """Сохранённые миры ведут в SelectWorldScreen, а не в Create."""
+    app = App.init(FakeBackend(), Settings())
+    app.worlds_store = WorldsStore(tmp_path / "worlds.json")
+    app.worlds_store.add(WorldEntry(folder="alpha", name="Alpha"))
+    screen = app.open_singleplayer()
+    assert isinstance(screen, SelectWorldScreen)
+    assert app.screen_stack.current is screen
+
+
 # ---------------------------------------------------------------------------
 # Settings → render: FOV и др.
 # ---------------------------------------------------------------------------
 
-def test_app_settings_fov_flows_to_render() -> None:
+def test_app_settings_fov_flows_to_render(tmp_path) -> None:
     app = App.init(FakeBackend(), Settings(fov=70.0))
     app.render()
     assert app.render_settings.fov == 70.0
@@ -218,7 +243,10 @@ def test_app_settings_fov_flows_to_render() -> None:
     assert app.render_settings.fov == 90.0
 
     # и в игру тоже: снимок передаётся GameScreen'у
-    game = app.open_singleplayer()
+    app.worlds_store = WorldsStore(tmp_path / "worlds.json")
+    create = app.open_singleplayer()
+    create.create()
+    game = app.screen_stack.current
     app.settings.fov = 100.0
     app.render()
     assert game.render_settings.fov == 100.0

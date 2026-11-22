@@ -185,6 +185,39 @@ def test_uv_not_flipped() -> None:
 # offscreen-рендер: трава не чёрная
 # ---------------------------------------------------------------------------
 
+def test_live_chunk_grass_mesh_matches_isolated() -> None:
+    """Живой путь: чанк сервера → ``chunk_blocks`` → меш; UP травы зелёный.
+
+    Проверяет, что state id из реального ``Chunk`` попадает в тот же
+    per-face UV/tint атласа, что и изолированный куб (без расхождения
+    registry ↔ атлас, которое давало «чёрный куб»).
+    """
+    from quadrix.render.game_world import chunk_blocks
+    from quadrix.world.chunk import Chunk
+
+    atlas = _atlas()
+    grass = _grass_state()
+    chunk = Chunk.empty(0, 0)
+    chunk.set(3, chunk.min_y + 4, 5, grass)
+    blocks = chunk_blocks(chunk)
+    assert int(blocks[3, 4, 5]) == grass
+
+    vertices, _ = mesh_chunk(blocks, atlas, cull_hidden=True, center=False)
+    up = _face_vertices(vertices, 4)
+    assert up.shape[0] == 6
+    color = up[0, 8:12]
+    assert float(color[3]) > 0.5  # не прозрачная
+    assert color[1] > color[0] > color[2]  # зелёный (g > r > b)
+    # UP — тайл grass_block_top, N/S/E/W — grass_block_side.
+    assert np.allclose(
+        _face_center(atlas.face_rects(np.asarray([grass]))[0][4]),
+        _sprite_center(atlas, "minecraft:block/grass_block_top"),
+    )
+    side = _face_vertices(vertices, 0)
+    assert side.shape[0] == 6
+    assert float(side[:, 8:11].mean()) > 0.1  # бок не чёрный
+
+
 def test_grass_not_black() -> None:
     """Offscreen-рендер куба травы: не чёрный, верх зелёный, низ коричневый."""
     try:

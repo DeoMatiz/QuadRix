@@ -4002,6 +4002,37 @@ files:
       (реальный en_us из .local). FALLBACK: flat_settings — WC4; наррация —
       WC2; рендер draw_create/create_field/tooltip — WC2; ввод (клик/фокус/
       tab/Enter, target_folder) — WC3.
+
+  - rust: >-
+      horizon-client/src/title.rs (Mode::Select / Mode::Create),
+      horizon-client/src/title/create_world.rs (draw_create/поля)
+    python: quadrix/render/world_screens.py
+    test: tests/render/test_world_screens.py
+    status: done
+    lines_python: 754
+    note: >
+      WC2+WC3+WC8. SelectWorldScreen (Mode::Select: список LIST_TOP/
+      LIST_BOTTOM/ROW_HEIGHT/ROW_WIDTH, поиск, WorldEntry, футер Play(10)/
+      Create(11)/Edit(13)/Delete(14)/Re-Create(15)/Back(12)) и
+      CreateWorldScreen (таб-бар, поля name/seed, cycle-кнопки id 20/23/24/
+      25/27/28, футер Create(21)/Cancel(22)). WorldsStore — реестр миров
+      saves/worlds.json. 31 test (реальный en_us из .local). FALLBACK:
+      level.dat/NBT не портирован (JSON); таб-бар текстом (нет gui/sprites/
+      tab/*); Edit/Re-Create/Game Rules/Experiments/Data Packs — заглушки
+      (WC7/позже); иконка мира — квадрат-заглушка; Play открывает локальный
+      плоский мир (нет интегрированного сервера). app.py: open_singleplayer
+      → Create (пусто) / Select (есть миры), _create_world/_play_world.
+
+  - rust: horizon-client-render/src/gfx.rs (upload/buffer path; фикс производительности)
+    python: quadrix/render/backend_moderngl.py
+    test: tests/render/test_backend.py
+    status: done
+    note: >
+      Фикс ~5 FPS при подключении. Backend.draw пересоздавал GPU-буфер и
+      VAO для полного terrain-меша каждый кадр (миллион вершин). Добавлен
+      кэш буфер/VAO по id(array) для numpy-мешей ≥256 КиБ (LRU до 8),
+      вытеснение/close освобождают GPU-ресурсы; UI-батчи (<порога) по-
+      прежнему пересобираются. 8 tests.
 # Управление по TCP JSON-lines (MCP-подобное). Команды: move/jump/sneak/sprint/fly/chat/place/break/look/state/stop. Порт по умолчанию 25566. --daemon в quadrix.py. 10+2 tests. FALLBACK: secure_chat pending (offline-mode ChatMessage).
 inventory:
   generated: '2026-11-22'

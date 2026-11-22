@@ -51,27 +51,31 @@ parts:
 
   - id: WC2
     name: CreateWorldScreen — отрисовка (draw_create/create_field/tooltip)
-    status: pending
+    status: done
     rust: horizon-client/src/title/create_world.rs + horizon-client/src/title.rs (draw_create dispatch)
-    python: quadrix/render/create_world.py
-    test: tests/render/test_create_world.py
+    python: quadrix/render/world_screens.py
+    test: tests/render/test_world_screens.py
     depends_on: [WC1]
     note: >
-      tab_header_background, menu_background, header/footer separators,
-      табы (nine-slice + фокус-подчёркивание), подписи полей, EditBox-
-      поля (name/seed), SwitchGrid подписи, tooltip.
+      Реализовано как :class:`CreateWorldScreen` в общем модуле
+      world_screens.py: menu_background, таб-бар (FALLBACK: текст вместо
+      gui/sprites/tab/*), подписи полей name/seed, SwitchGrid-подписи,
+      fутер Create(21)/Cancel(22). Tooltip и header/footer separators —
+      мелочи, добираются в WC10.
 
   - id: WC3
     name: CreateWorldScreen — ввод (клик/фокус/tab-клавиши/Enter)
-    status: pending
+    status: done
     rust: horizon-client/src/title.rs (Mode::Create click/key, target_folder)
-    python: quadrix/render/create_world.py
-    test: tests/render/test_create_world.py
+    python: quadrix/render/world_screens.py
+    test: tests/render/test_world_screens.py
     depends_on: [WC2]
     note: >
-      target_folder (FileUtil.findAvailableName), next_tab_index/numeric_key
-      (Ctrl+Tab/Ctrl+1..0), press/cycle по id 20/23/24/25/26/27/28/29..,
-      фокус полей, footer Create(21)/Cancel(22).
+      CreateWorldScreen.handle_click/handle_key: tab_at-переключение вкладок,
+      фокус полей name/seed (только активной вкладки), press/cycle по id
+      20/23/24/25/27/28, footer Create(21)/Cancel(22). Ctrl+Tab/Ctrl+цифра
+      (next_tab_index) и tooltip — WC10/позже; FolderName через
+      WorldsStore.unique_folder (FALLBACK).
 
   - id: WC4
     name: CreateFlatWorldScreen + FlatSettings/FlatLayer
@@ -111,12 +115,16 @@ parts:
 
   - id: WC8
     name: Select World (Mode::Select), список миров, поиск
-    status: pending
+    status: done
     rust: horizon-client/src/title.rs (Mode::Select)
-    python: quadrix/render/select_world.py
-    test: tests/render/test_select_world.py
+    python: quadrix/render/world_screens.py
+    test: tests/render/test_world_screens.py
     depends_on: [WC0]
-    note: WorldEntry, вкладки, поиск, кнопки Play/Create/Edit/Delete/Re-Create.
+    note: >
+      WorldEntry, WorldsStore (saves/worlds.json FALLBACK), список
+      LIST_TOP/LIST_BOTTOM/ROW_HEIGHT/ROW_WIDTH, поиск, кнопки
+      Play(10)/Create(11)/Edit(13)/Delete(14)/Re-Create(15)/Back(12).
+      Edit/Re-Create — заглушки (WC7); иконка мира — квадрат-заглушка.
 
   - id: WC9
     name: AccessibilityOnboardingScreen

@@ -13,6 +13,14 @@ from typing import Any, Callable, Optional, Sequence
 import numpy as np
 
 
+#: Минимальный размер numpy-меша (в байтах), который кэшируется на GPU.
+#: Мелкий UI-батч пересобирается каждый кадр — кэшировать его нет смысла
+#: (только лишняя память). Крупный terrain-меш переиспользует буфер/VAO.
+_CACHE_MIN_BYTES = 1 << 18  # 256 КиБ
+#: Предел числа кэшируемых мешей (terrain + запас на пересборку).
+_CACHE_MAX_ENTRIES = 8
+
+
 class ModernglBackend:
     """Рендер-бэкенд на moderngl + glfw.
 
@@ -52,6 +60,11 @@ class ModernglBackend:
         self._key_names: dict[int, str] = {}
         #: glfw key-code -> ванильное имя (``key.keyboard.w``) для InputState.
         self._key_vanilla: dict[int, str] = {}
+
+        #: Кэш крупных мешей: numpy-массив -> (массив, программа, буфер, vao, count).
+        #: Terrain передаёт один и тот же массив каждый кадр; без кэша GPU-буфер
+        #: и VAO пересоздавались бы на каждый кадр (5 FPS на миллионе вершин).
+        self._mesh_cache: dict[int, tuple[Any, Any, Any, Any, int]] = {}
 
     # ------------------------------------------------------------------
     # контекст / окно
@@ -234,15 +247,37 @@ class ModernglBackend:
         else:
             self.ctx.disable(moderngl.BLEND)
 
-        owns_buffer = False
-        buffer = vbo
+        buffer: Any = vbo
+        vao: Any = None
+        release_buffer = False
+        release_vao = False
         if isinstance(vbo, np.ndarray):
-            buffer = self.ctx.buffer(np.ascontiguousarray(vbo).tobytes())
-            owns_buffer = True
+            entry = self._mesh_cache.get(id(vbo))
+            if entry is not None and entry[0] is vbo and entry[1] is program:
+                # Тот же массив и программа — буфер и VAO уже на GPU.
+                _, _, buffer, vao, cached_count = entry
+                if count is None:
+                    count = cached_count
 
-        if count is None:
-            # stride: pos(3) + normal(3) + uv(2) + color(4) = 12 float32
-            count = buffer.size // (12 * 4)
+        if vao is None:
+            if isinstance(vbo, np.ndarray):
+                buffer = self.ctx.buffer(np.ascontiguousarray(vbo).tobytes())
+                release_buffer = True
+
+            if count is None:
+                # stride: pos(3) + normal(3) + uv(2) + color(4) = 12 float32
+                count = buffer.size // (12 * 4)
+
+            vao = self.ctx.vertex_array(
+                program, [(buffer, vertex_format, *attributes)]
+            )
+            release_vao = True
+
+            if isinstance(vbo, np.ndarray) and buffer.size >= _CACHE_MIN_BYTES:
+                # Крупный меш: буфер/VAO остаются на GPU между кадрами.
+                self._store_mesh(id(vbo), vbo, program, buffer, vao, count)
+                release_buffer = False
+                release_vao = False
 
         if mvp is not None:
             # GLSL ждёт column-major, numpy даёт row-major -> транспонируем
@@ -253,17 +288,50 @@ class ModernglBackend:
             if "texture0" in program:
                 program["texture0"] = 0
 
-        vao = self.ctx.vertex_array(
-            program, [(buffer, vertex_format, *attributes)]
-        )
         try:
             # Очистка кадра — отдельным вызовом ``clear()`` (один раз за
             # кадр), иначе каждый draw стирает панораму/предыдущий слой.
             vao.render(self._triangles(), vertices=count)
         finally:
-            vao.release()
-            if owns_buffer:
+            # Некэшированные объекты освобождаем после кадра; кэшированные
+            # живут в ``self._mesh_cache`` до пересборки/вытеснения.
+            if release_vao:
+                vao.release()
+            if release_buffer:
                 buffer.release()
+
+    def _store_mesh(
+        self,
+        key: int,
+        array: np.ndarray,
+        program: Any,
+        buffer: Any,
+        vao: Any,
+        count: int,
+    ) -> None:
+        """Запомнить GPU-буфер/VAO крупного меша (вытесняя старейший).
+
+        ``array`` держим рядом: ``id(array)`` не переиспользуется, пока
+        объект жив, поэтому ключ кэша остаётся корректным.
+        """
+        cache = self._mesh_cache
+        previous = cache.pop(key, None)
+        if previous is not None:
+            self._release_entry(previous)
+        cache[key] = (array, program, buffer, vao, count)
+        while len(cache) > _CACHE_MAX_ENTRIES:
+            oldest = next(iter(cache))
+            self._release_entry(cache.pop(oldest))
+
+    @staticmethod
+    def _release_entry(entry: tuple[Any, Any, Any, Any, int]) -> None:
+        """Освободить буфер/VAO записи кэша (ошибки глушим)."""
+        _, _, buffer, vao, _ = entry
+        for obj in (vao, buffer):
+            try:
+                obj.release()
+            except Exception:  # pragma: no cover - контекст мог умереть
+                pass
 
     def clear(self) -> None:
         """Очистить кадр цветом ``clear_color`` (вызывается один раз за кадр)."""
@@ -510,6 +578,10 @@ class ModernglBackend:
         if self._closed:
             return
         self._closed = True
+
+        for entry in self._mesh_cache.values():
+            self._release_entry(entry)
+        self._mesh_cache.clear()
 
         if self.ctx is not None:
             try:

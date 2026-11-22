@@ -93,6 +93,12 @@ from quadrix.render.multiplayer_screen import (
     ServersStore,
     parse_address,
 )
+from quadrix.render.world_screens import (
+    CreateWorldScreen,
+    SelectWorldScreen,
+    WorldEntry,
+    WorldsStore,
+)
 from quadrix.render.ui import Batch, Button, Font
 from quadrix.world.block_placement import (
     PlacementContext,
@@ -1070,6 +1076,8 @@ class App:
         self.client_factory: Optional[Any] = None
         #: Список сохранённых серверов (multiplayer_screen.ServersStore).
         self.servers_store = ServersStore()
+        #: Список одиночных миров (world_screens.WorldsStore).
+        self.worlds_store = WorldsStore()
         #: Снимок настроек, которые получает рендер (см. ``RenderSettings``).
         self.render_settings = self._snapshot_settings()
         self.screen_stack = ScreenStack(self._build_main_menu())
@@ -1201,9 +1209,85 @@ class App:
         _log("экран: LanguageScreen")
         return screen
 
-    def open_singleplayer(self) -> GameScreen:
-        """MainMenu → Singleplayer → GameScreen (локальный плоский мир)."""
-        return self._open_game("singleplayer")
+    def open_singleplayer(self) -> Screen:
+        """MainMenu → Select World (или Create, если миров нет).
+
+        Порт ``title.rs::enter_singleplayer``: пустой список сохранений ведёт
+        сразу в Create New World, иначе — в SelectWorldScreen.
+        """
+        if len(self.worlds_store) == 0:
+            return self._open_create_world()
+        return self._open_select_world()
+
+    def _open_select_world(self) -> SelectWorldScreen:
+        """Открыть список миров (SelectWorldScreen)."""
+        current = self.screen_stack.current
+        screen = SelectWorldScreen(
+            width=current.width,
+            height=current.height,
+            store=self.worlds_store,
+            stack=self.screen_stack,
+            on_play=self._play_world,
+            on_create=self._open_create_world,
+            on_back=self._singleplayer_back,
+        )
+        self.screen_stack.push(screen)
+        _log("экран: SelectWorldScreen")
+        return screen
+
+    def _open_create_world(self) -> CreateWorldScreen:
+        """Открыть создание мира (CreateWorldScreen)."""
+        current = self.screen_stack.current
+        screen = CreateWorldScreen(
+            width=current.width,
+            height=current.height,
+            stack=self.screen_stack,
+            on_create=self._create_world,
+            on_cancel=self._singleplayer_back,
+        )
+        self.screen_stack.push(screen)
+        _log("экран: CreateWorldScreen")
+        return screen
+
+    def _singleplayer_back(self) -> None:
+        """Back из одиночных экранов → предыдущий экран."""
+        self.screen_stack.pop()
+
+    def _create_world(
+        self,
+        name: str,
+        seed: str,
+        creative: bool,
+        options: Any,
+    ) -> GameScreen:
+        """Создать запись мира и запустить игру.
+
+        FALLBACK: интегрированного сервера нет — мир сохраняется как запись
+        (``saves/worlds.json``), а игра открывается на локальном плоском мире
+        (``App._open_game``). Опции создания (сид/пресет) пока не применяются.
+        """
+        folder = self.worlds_store.unique_folder(name)
+        hardcore = bool(getattr(options, "hardcore", False))
+        mode = "creative" if creative else "hardcore" if hardcore else "survival"
+        entry = WorldEntry(
+            folder=folder,
+            name=name,
+            game_mode=mode,
+            hardcore=hardcore,
+            cheats=bool(options.allow_commands(creative)),
+        )
+        self.worlds_store.add(entry)
+        _log(f"мир создан: {name!r} (папка {folder}, сид {seed!r})")
+        # Заменить Create на нижележащий экран, затем запустить игру.
+        if isinstance(self.screen_stack.current, CreateWorldScreen):
+            self.screen_stack.pop()
+        return self._play_world(entry)
+
+    def _play_world(self, entry: WorldEntry) -> GameScreen:
+        """Запустить одиночный мир (FALLBACK: локальный плоский мир)."""
+        game = self._open_game("singleplayer")
+        _log(f"играем мир {entry.name!r} ({entry.folder})")
+        return game
 
     def open_multiplayer(self) -> MultiplayerScreen:
         """MainMenu → Multiplayer → список серверов (PART 3).
