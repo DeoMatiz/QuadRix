@@ -84,6 +84,12 @@ SPRITES: dict[str, tuple[str, Optional[tuple[int, int, int, int]]]] = {
     "gui/menu_list_background": ("gui/menu_list_background.png", None),
     "gui/header_separator": ("gui/header_separator.png", None),
     "gui/footer_separator": ("gui/footer_separator.png", None),
+    # ui.rs::scrollbar_sprites (WC4: списки слоёв/пресетов flat-мира).
+    "gui/sprites/widget/scroller_background": (
+        "gui/sprites/widget/scroller_background.png",
+        None,
+    ),
+    "gui/sprites/widget/scroller": ("gui/sprites/widget/scroller.png", None),
     "gui/title/minecraft": ("gui/title/minecraft.png", None),
     "gui/title/edition": ("gui/title/edition.png", None),
     "gui/sprites/icon/language": ("gui/sprites/icon/language.png", None),

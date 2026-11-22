@@ -21,8 +21,9 @@ FALLBACK (см. ``PORTING_STATE.yaml``):
     * список миров хранится в ``saves/worlds.json`` (Rust — ``level.dat``/NBT);
     * Create open: Play открывает локальный плоский мир (нет интегрированного
       сервера), см. ``App._play_world``;
-    * Re-Create/Edit/Game Rules/Experiments/Data Packs/Customize — заглушки
-      (``_not_ported``), PART'ы WC5/WC6/WC7/WC9.
+    * Re-Create/Edit/Game Rules/Experiments/Data Packs/Customize(single-biome)
+      — заглушки (``_not_ported``), PART'ы WC5/WC6/WC7/WC9. Customize для
+      flat-пресета открывает :class:`quadrix.render.flat.FlatWorldScreen` (WC4).
 """
 
 from __future__ import annotations
@@ -583,8 +584,11 @@ class CreateWorldScreen(Screen):
         elif bid == 22:
             self.cancel()
         elif bid == 26:
-            # FALLBACK: CreateFlatWorldScreen / CreateBuffetWorldScreen — PART WC5/WC6.
-            self._not_ported("customize", 26)
+            if self.options.world_type == cw.WorldPreset.SINGLE_BIOME_SURFACE:
+                # FALLBACK: CreateBuffetWorldScreen — PART WC5.
+                self._not_ported("customize", 26)
+            else:
+                self.open_flat()
         elif bid in (20, 23, 24, 25, 27, 28):
             self.creative = self.options.cycle(bid, self.creative, 1)
             self._persist_fields()
@@ -597,6 +601,32 @@ class CreateWorldScreen(Screen):
 
     def _not_ported(self, what: str, bid: int) -> None:
         _log(f"кнопка id={bid} ({what}) ещё не портирована")
+
+    # -- Customize → CreateFlatWorldScreen (WC4) -------------------------
+
+    def open_flat(self) -> None:
+        """Customize (id 26) для flat-пресета: открыть редактор слоёв."""
+        from quadrix.render import flat as _flat
+
+        if self.stack is None:
+            self._not_ported("customize", 26)
+            return
+        self._persist_fields()
+        screen = _flat.FlatWorldScreen(
+            width=self.width,
+            height=self.height,
+            stack=self.stack,
+            settings=self.options.flat_settings,
+            on_done=self._apply_flat,
+        )
+        self.stack.push(screen)
+
+    def _apply_flat(self, settings: Any) -> None:
+        """Done в редакторе: сохранить слои и вернуться в Create New World."""
+        self.options.world_type = cw.WorldPreset.FLAT
+        self.options.flat_settings = settings
+        if self.stack is not None:
+            self.stack.pop()
 
     # -- действия --------------------------------------------------------
 

@@ -386,3 +386,65 @@ def test_create_world_renders_each_tab(font: Font) -> None:
         batch = Batch()
         screen.render(batch, font)
         assert batch.quads
+
+
+# ---------------------------------------------------------------------------
+# Customize → CreateFlatWorldScreen (WC4)
+# ---------------------------------------------------------------------------
+
+def test_create_world_customize_opens_flat_screen() -> None:
+    from quadrix.render.flat import FlatWorldScreen
+    from quadrix.render.menu import ScreenStack
+
+    screen = CreateWorldScreen(854.0, 480.0, options=cw.WorldOptions(tab=1))
+    stack = ScreenStack(screen)
+    screen.stack = stack
+    screen.options.world_type = cw.WorldPreset.FLAT
+    screen._on_button(26)
+    assert isinstance(stack.current, FlatWorldScreen)
+    assert stack.depth() == 2
+
+    # Done возвращает в Create World и сохраняет слои.
+    flat = stack.current
+    flat.state.selected = 0  # верхний слой — grass_block
+    flat._on_button(70)
+    flat._on_button(72)
+    assert stack.depth() == 1
+    assert stack.current is screen
+    assert screen.options.world_type is cw.WorldPreset.FLAT
+    assert [layer.block for layer in screen.options.flat_settings.layers] == [
+        "minecraft:bedrock", "minecraft:dirt",
+    ]
+
+
+def test_create_world_customize_cancel_keeps_settings() -> None:
+    from quadrix.render.flat import FlatWorldScreen
+    from quadrix.render.menu import ScreenStack
+
+    screen = CreateWorldScreen(854.0, 480.0, options=cw.WorldOptions(tab=1))
+    stack = ScreenStack(screen)
+    screen.stack = stack
+    screen.options.world_type = cw.WorldPreset.FLAT
+    screen.options.flat_settings = None
+    screen._on_button(26)
+    flat = stack.current
+    assert isinstance(flat, FlatWorldScreen)
+    flat.state.selected = 0
+    flat._on_button(70)
+    flat.handle_key("escape")  # Cancel — не применяет
+    assert stack.depth() == 1
+    assert screen.options.flat_settings is None
+
+
+def test_create_world_customize_without_stack_is_safe(capsys) -> None:
+    screen = CreateWorldScreen(854.0, 480.0, options=cw.WorldOptions(tab=1))
+    screen.options.world_type = cw.WorldPreset.FLAT
+    screen._on_button(26)  # не должно падать без stack
+    assert "[QuadRix]" in capsys.readouterr().out
+
+
+def test_create_world_customize_single_biome_not_ported(capsys) -> None:
+    screen = CreateWorldScreen(854.0, 480.0, options=cw.WorldOptions(tab=1))
+    screen.options.world_type = cw.WorldPreset.SINGLE_BIOME_SURFACE
+    screen._on_button(26)
+    assert "[QuadRix]" in capsys.readouterr().out

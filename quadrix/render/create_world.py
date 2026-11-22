@@ -14,8 +14,9 @@
     * Сетки вкладок 210x117 / 310x117 / 210x76.
     * Футер: две кнопки по 150 шириной, 8 друг от друга, в 33 пикселях.
 
-FALLBACK: ``flat_settings`` (``title/flat.rs::FlatSettings``) — PART WC4;
-здесь ``Optional[Any]`` и ``None``. ``rules`` — :class:`GameRules`
+FALLBACK: ``flat_settings`` (``title/flat.rs::FlatSettings``) портирован в
+PART WC4 (:mod:`quadrix.render.flat`); здесь тип ``Optional[Any]``, чтобы не
+тянуть import. ``rules`` — :class:`GameRules`
 (``quadrix.core.gamerules``, уже портирован). Наррация
 (``widgets::Narratable``) — PART WC2. ``world_gen`` и ``of_world``
 (``save::WorldGen`` / ``Level``) — PART сохранения мира.
@@ -313,8 +314,10 @@ class WorldOptions:
 
 
 def _flat_default() -> Any:
-    """FALLBACK: ``FlatSettings::default()`` — PART WC4."""
-    return None
+    """``FlatSettings::default()`` — overworld-набор (PART WC4)."""
+    from quadrix.render.flat import FlatSettings
+
+    return FlatSettings.default()
 
 
 # ---------------------------------------------------------------------------

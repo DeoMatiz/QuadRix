@@ -79,12 +79,18 @@ parts:
 
   - id: WC4
     name: CreateFlatWorldScreen + FlatSettings/FlatLayer
-    status: pending
+    status: done
     rust: horizon-client/src/title/flat.rs
     python: quadrix/render/flat.py
     test: tests/render/test_flat.py
     depends_on: [WC1]
-    note: PresetFlatWorldScreen, список слоёв, from_tag/to_tag, from_world.
+    note: >
+      PresetFlatWorldScreen, список слоёв, from_tag/to_tag, from_world.
+      FlatSettings/FlatLayer, Page/Preset/State, загрузка 9 пресетов из
+      .local + registries/biomes, геометрия/ввод/рендер и обёртка
+      FlatWorldScreen. CreateWorldScreen id 26 открывает её для FLAT; Done
+      применяет options.flat_settings. FALLBACK: from_world (level.dat),
+      3D-иконки предметов, наррация/row_target. 54 test.
 
   - id: WC5
     name: CreateBuffetWorldScreen

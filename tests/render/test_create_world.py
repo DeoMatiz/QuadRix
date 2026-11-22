@@ -219,3 +219,13 @@ def test_buttons_more_tab() -> None:
     bs = buttons(854.0, 480.0, False, o)
     assert [b.id for b in bs] == [29, 30, 31, 21, 22]
     assert bs[0].label == "Game Rules"
+
+
+def test_flat_default_is_flat_settings() -> None:
+    """``_flat_default`` — это ``FlatSettings::default()`` (WC4)."""
+    from quadrix.render.create_world import _flat_default
+    from quadrix.render.flat import FlatSettings
+
+    s = _flat_default()
+    assert isinstance(s, FlatSettings)
+    assert s.to_share() == FlatSettings.default().to_share()

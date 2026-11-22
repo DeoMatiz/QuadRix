@@ -4023,6 +4023,31 @@ files:
       плоский мир (нет интегрированного сервера). app.py: open_singleplayer
       → Create (пусто) / Select (есть миры), _create_world/_play_world.
 
+  - rust: horizon-client/src/title/flat.rs
+    python: quadrix/render/flat.py
+    test: tests/render/test_flat.py
+    status: done
+    lines_python: 1154
+    note: >
+      WC4. CreateFlatWorldScreen + PresetFlatWorldScreen: FlatLayer/
+      FlatSettings (default, from_tag/to_tag round-trip, to_share, parse
+      «layers;biome»), Page/Preset/State (open_presets/back_to_layers/
+      remove_selected/apply_share/select_preset), загрузка пресетов из
+      .local (data/minecraft/tags/worldgen/flat_level_generator_preset/
+      visible.json → 9 пресетов, registries.json 1286 блоков, worldgen/
+      biomes.json 67), геометрия list_area/buttons/layer_row/preset_row/
+      click/focus_row/share_field/wheel/drag/release + Scroll (ui.rs::Scroll),
+      имена/иконки (layer_item/item_name/preset_name/pretty) и draw (menu_
+      background, list_background, separators, scrollbar, slot). Обёртка
+      FlatWorldScreen(Screen) для ScreenStack. CreateWorldScreen id 26
+      (Customize) открывает её для WorldPreset.FLAT; Done (72) применяет слои
+      через options.flat_settings, Cancel/Escape на слоях закрывает, на
+      странице пресетов — назад к слоям. _flat_default() = FlatSettings.
+      default(). 54 test (реальные данные .local, en_us). FALLBACK:
+      FlatSettings::from_world (level.dat-world_gen_settings, PART сохранения);
+      3D-модели предметов (ItemRenderer) не портированы — слот + плоский
+      спрайт/заливка; наррация/row_target (контроллер) не портированы.
+
   - rust: horizon-client-render/src/gfx.rs (upload/buffer path; фикс производительности)
     python: quadrix/render/backend_moderngl.py
     test: tests/render/test_backend.py
