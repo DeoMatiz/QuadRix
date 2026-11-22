@@ -68,9 +68,15 @@ def test_game_screen_handle_key() -> None:
     # Отпускание ненажатой — False.
     assert game.handle_key_up("key.keyboard.w") is False
 
-    # Короткое имя (меню): escape → on_close.
+    # Short name (menu): escape opens the PauseScreen, it does NOT close the
+    # world (regression: ESC used to disconnect/close immediately).
     assert game.handle_key("escape") is True
+    assert closed == []
+    assert game.pause_menu is not None
+    # The bottom row button (id 2) leaves the world -> on_close.
+    game.leave_from_pause()
     assert closed == [1]
+    assert game.pause_menu is None
     assert game.handle_key("w") is False
 
 

@@ -185,7 +185,10 @@ def test_app_handle_event_click_opens_options() -> None:
     assert isinstance(app.screen_stack.current, OptionsScreen)
 
 
-def test_app_handle_event_key_escape_pops_game_screen(tmp_path) -> None:
+def test_app_handle_event_key_escape_opens_pause(tmp_path) -> None:
+    """Escape opens the PauseScreen; the world stays open (no disconnect)."""
+    from quadrix.render.pause_screen import PauseMenuScreen
+
     app = App.init(FakeBackend(), Settings())
     app.worlds_store = WorldsStore(tmp_path / "worlds.json")
     create = app.open_singleplayer()
@@ -197,7 +200,34 @@ def test_app_handle_event_key_escape_pops_game_screen(tmp_path) -> None:
     assert app.screen_stack.current is game
 
     assert app.handle_event("key", "escape") is True
-    assert app.screen_stack.current is not game
+    # Pause pushed on top; GameScreen (and app.game) survive underneath.
+    assert isinstance(app.screen_stack.current, PauseMenuScreen)
+    assert app.screen_stack.depth() == 3
+    assert app.game is game
+
+    # Escape again resumes: back to the world, no disconnect.
+    assert app.handle_event("key", "escape") is True
+    assert app.screen_stack.current is game
+    assert app.game is game
+
+
+def test_app_pause_leave_returns_to_title(tmp_path) -> None:
+    """Bottom pause button (id 2) is the only one that leaves the world."""
+    app = App.init(FakeBackend(), Settings())
+    app.worlds_store = WorldsStore(tmp_path / "worlds.json")
+    create = app.open_singleplayer()
+    create.create()
+    game = app.screen_stack.current
+    assert isinstance(game, GameScreen)
+
+    pause = game.open_pause_menu()
+    assert pause is not None
+    assert app.screen_stack.current is pause
+    leave = pause.buttons[-1]
+    assert leave.label_plain() == "Save and Quit to Title"
+    pause.handle_click(leave.x + 1.0, leave.y + 1.0)
+
+    assert app.game is None
     assert isinstance(app.screen_stack.current, MainMenu)
 
 

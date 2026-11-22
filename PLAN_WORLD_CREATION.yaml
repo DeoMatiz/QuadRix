@@ -146,3 +146,24 @@ parts:
       Обязательно для визуальной идентичности. gui_atlas уже знает
       nine_slice/title_button/tiled/blit/button_sprite; экраны WC2..WC8
       должны использовать их, а не сплошные заливки.
+
+  # Вне исходного плана WC, но запрошено пользователем в этой же сессии:
+  # «нормальное ESC-меню в игре» — раньше Escape сразу закрывал мир.
+  - id: WC11
+    name: PauseScreen (in-game ESC menu)
+    status: done
+    rust: horizon-client/src/game/screens.rs   # pause_grid/pause_buttons/pause_icons/execute_pause_action
+    python: quadrix/render/pause_screen.py
+    test: tests/render/test_pause_screen.py
+    depends_on: [WC3]
+    note: >
+      Escape в игре больше НЕ закрывает соединение/мир: открывается
+      PauseMenuScreen (мир остаётся под ним). Покидает мир только нижняя
+      кнопка id 2 (Save and Quit to Title / Disconnect). app.py:
+      GameScreen.open_pause_menu/resume_from_pause/leave_from_pause; рендер
+      terrain при self.game (виден за паузой/инвентарём/чатом); App.tick
+      замирает на паузе только для локального мира. FALLBACK: серверные
+      ссылки/additions/split/stats/advancements/world options и иконки
+      bug/social/friends/reporting не портированы (лог); блюр фона не
+      портирован (фон gui/menu_background alpha 64 поверх мира).
+

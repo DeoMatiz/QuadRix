@@ -40,3 +40,7 @@ desktop.ini
 # --- Logs / temp ---
 *.log
 *.tmp
+
+# --- Runtime data (singleplayer world registry / server list) ---
+saves/
+servers.json

@@ -136,6 +136,16 @@ SPRITES: dict[str, tuple[str, Optional[tuple[int, int, int, int]]]] = {
         None,
     ),
     "gui/sprites/hud/crosshair": ("gui/sprites/hud/crosshair.png", None),
+    # -- Pause menu (game/screens.rs::pause_icons) ----------------------
+    "gui/sprites/pause_menu/bug": ("gui/sprites/pause_menu/bug.png", None),
+    "gui/sprites/pause_menu/social_interactions": (
+        "gui/sprites/pause_menu/social_interactions.png",
+        None,
+    ),
+    "gui/sprites/pause_menu/player_reporting": (
+        "gui/sprites/pause_menu/player_reporting.png",
+        None,
+    ),
 }
 
 #: Логический размер в GUI-пикселях там, где он не равен размеру PNG

@@ -4033,6 +4033,27 @@ files:
       кэш буфер/VAO по id(array) для numpy-мешей ≥256 КиБ (LRU до 8),
       вытеснение/close освобождают GPU-ресурсы; UI-батчи (<порога) по-
       прежнему пересобираются. 8 tests.
+
+  - rust: horizon-client/src/game/screens.rs (PauseScreen: pause_grid/pause_buttons/pause_icons/execute_pause_action)
+    python: quadrix/render/pause_screen.py
+    test: tests/render/test_pause_screen.py
+    status: done
+    lines_python: 288
+    note: >
+      Меню паузы. Регрессия: Escape в игре раньше звал GameScreen._back и
+      сразу закрывал соединение/мир; теперь Escape открывает PauseMenuScreen
+      (мир под ним), а покидает мир только нижняя кнопка id 2. pause_grid
+      (2 колонки 98, padding 4), pause_buttons (id 0 returnToGame, 1 options,
+      2 returnToMenu/disconnect, 3 stats, 4 advancements, 9 world options),
+      pause_icons (bug/social/friends/reporting), resume/leave/escape.
+      app.py: GameScreen.open_pause_menu/resume_from_pause/leave_from_pause,
+      render мира при self.game (за паузой/инвентарём/чатом), tick замирает
+      на паузе только для локального мира (мультиплеер тикает). 17 tests
+      (реальный en_us из .local). FALLBACK: серверные ссылки (11), additions
+      (14), split (30), stats/advancements/world options и иконки 10/12/13/15
+      — не портированы (лог); блюр фона (extractBackground) не портирован,
+      фон — gui/menu_background (alpha 64) поверх мира.
+
 # Управление по TCP JSON-lines (MCP-подобное). Команды: move/jump/sneak/sprint/fly/chat/place/break/look/state/stop. Порт по умолчанию 25566. --daemon в quadrix.py. 10+2 tests. FALLBACK: secure_chat pending (offline-mode ChatMessage).
 inventory:
   generated: '2026-11-22'

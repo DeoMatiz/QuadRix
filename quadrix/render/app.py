@@ -87,6 +87,7 @@ from quadrix.render.menu import (
     solid,
 )
 from quadrix.render.panorama import Panorama, Rotation, load_panorama
+from quadrix.render.pause_screen import PauseMenuScreen
 from quadrix.render.remote import RemoteConnection
 from quadrix.render.multiplayer_screen import (
     MultiplayerScreen,
@@ -282,6 +283,8 @@ class GameScreen(Screen):
         self.inventory = inventory if inventory is not None else PlayerInventory()
         self.hotbar = Hotbar(self.inventory)
         self.inventory_screen: Optional[InventoryScreen] = None
+        #: Открытое меню паузы (``PauseScreen``) — ``None``, если игра идёт.
+        self.pause_menu: Optional[PauseMenuScreen] = None
         self.mining: Optional[Mining] = None
         self.destroy_delay: int = 0
         self._rng = _random.Random()
@@ -376,6 +379,61 @@ class GameScreen(Screen):
             self.on_close()
         if self.stack is not None:
             self.stack.pop()
+
+    # -- меню паузы (screens.rs::PauseScreen) -----------------------------
+
+    def open_pause_menu(self) -> Optional[PauseMenuScreen]:
+        """Открыть паузу (``Escape`` в игре) — НЕ закрывая мир.
+
+        Раньше ``Escape`` сразу звал ``_back`` и закрывал соединение/мир —
+        это неверно: ваниль открывает ``PauseScreen``, и только его нижняя
+        кнопка (id 2) покидает мир/сервер.
+        """
+        if self.pause_menu is not None:
+            return self.pause_menu
+        screen = PauseMenuScreen(
+            self.width,
+            self.height,
+            remote=bool(self.remote is not None or self.client is not None),
+            stack=self.stack,
+            on_resume=self.resume_from_pause,
+            on_leave=self.leave_from_pause,
+        )
+        self.pause_menu = screen
+        if self.stack is not None:
+            self.stack.push(screen)
+        # ``Gui.setScreen`` отпускает удержанные клавиши: иначе игрок
+        # «залипал» бы на бегу после снятия паузы.
+        self.input_state.keys.clear()
+        if self.on_pointer is not None:
+            self.on_pointer(False)
+        return screen
+
+    def resume_from_pause(self) -> None:
+        """Return to Game (id 0) / ``Escape`` в паузе: снять паузу."""
+        screen = self.pause_menu
+        if screen is None:
+            return
+        self.pause_menu = None
+        stack = self.stack
+        if stack is not None:
+            inner = getattr(stack, "_stack", None)
+            if inner and inner[-1] is screen:
+                stack.pop()
+        if self.on_pointer is not None:
+            self.on_pointer(True)
+
+    def leave_from_pause(self) -> None:
+        """Save and Quit to Title / Disconnect (id 2): покинуть мир/сервер."""
+        screen = self.pause_menu
+        self.pause_menu = None
+        stack = self.stack
+        if stack is not None:
+            inner = getattr(stack, "_stack", None)
+            if inner and inner[-1] is screen:
+                stack.pop()
+        # Теперь ``_back`` закрывает соединение (мультиплеер) или мир.
+        self._back()
 
     # -- горячий старт (Gameplay PART 2) --------------------------------
 
@@ -879,7 +937,8 @@ class GameScreen(Screen):
         if self.inventory_screen is not None:
             return bool(self.inventory_screen.handle_key(key, ch))
         if key == "escape":
-            self._back()
+            # Ваниль: Escape в игре открывает PauseScreen, а не закрывает мир.
+            self.open_pause_menu()
             return True
         if key == "t":
             self.open_chat("")
@@ -1684,8 +1743,13 @@ class App:
         """Один игровой такт (20 Гц): счётчик + движение игрока."""
         self.ticks += 1
         if self.game is not None:
-            self.game.render_settings = self.render_settings
-            self.game.update(TICK_SECONDS)
+            top = self.screen_stack.current
+            # Локальный мир замирает на паузе (``PauseScreen``); мультиплеер
+            # продолжает тикать, иначе порвётся по keepalive (``remote.rs``).
+            local = self.game.remote is None and self.game.client is None
+            if not (local and isinstance(top, PauseMenuScreen)):
+                self.game.render_settings = self.render_settings
+                self.game.update(TICK_SECONDS)
 
     def render(self) -> int:
         """Кадр: очистка + панорама + экран → батч → ``backend.draw``.
@@ -1716,13 +1780,11 @@ class App:
             )
             self.panorama.draw(backend, self.width, self.height, yaw)
 
-        # Terrain — фон игрового экрана (рисуется до HUD-батча).
-        current = self.screen_stack.current
-        if (
-            isinstance(current, GameScreen)
-            and self.terrain_program is not None
-        ):
-            current.render_terrain(
+        # Terrain — фон игрового экрана (рисуется до HUD-батча). Пока мир
+        # открыт (``self.game``), он виден и за паузой/инвентарём/чатом:
+        # ``Gui`` рисует мир под не-игровыми экранами.
+        if self.game is not None and self.terrain_program is not None:
+            self.game.render_terrain(
                 backend, self.terrain_program, self.terrain_texture
             )
 
