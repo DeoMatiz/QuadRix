@@ -21,10 +21,12 @@ FALLBACK (см. ``PORTING_STATE.yaml``):
     * список миров хранится в ``saves/worlds.json`` (Rust — ``level.dat``/NBT);
     * Create open: Play открывает локальный плоский мир (нет интегрированного
       сервера), см. ``App._play_world``;
-    * Re-Create/Edit/Game Rules/Experiments/Data Packs — заглушки
-      (``_not_ported``), PART'ы WC6/WC7/WC9. Customize открывает
+    * Re-Create/Edit/Game Rules/Data Packs — заглушки (``_not_ported``),
+      PART'ы WC7/WC9. Customize открывает
       :class:`quadrix.render.flat.FlatWorldScreen` (WC4) или
-      :class:`quadrix.render.buffet.BuffetWorldScreen` (WC5) по типу пресета.
+      :class:`quadrix.render.buffet.BuffetWorldScreen` (WC5) по типу пресета;
+      Experiments (id 30) открывает :class:`quadrix.render.experiments.
+      ExperimentsScreen` (WC6), а ``offer_data_packs`` — экран подтверждения.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from quadrix.render import create_world as cw
 from quadrix.render.menu import (
     BACKGROUND,
     LABEL_COLOR,
+    PACK_ROOT,
     Screen,
     ScreenStack,
     ScrollableList,
@@ -593,8 +596,10 @@ class CreateWorldScreen(Screen):
             self.creative = self.options.cycle(bid, self.creative, 1)
             self._persist_fields()
             self.build()
-        elif bid in (29, 30, 31):
-            # FALLBACK: Game Rules / Experiments / Data Packs — PART WC7.
+        elif bid == 30:
+            self.open_experiments()
+        elif bid in (29, 31):
+            # FALLBACK: Game Rules / Data Packs — PART WC7.
             self._not_ported("more", bid)
         else:
             _log(f"неизвестная кнопка id={bid}")
@@ -653,6 +658,68 @@ class CreateWorldScreen(Screen):
         self.options.single_biome = biome
         if self.stack is not None:
             self.stack.pop()
+
+    # -- Experiments → ExperimentsScreen (WC6) ---------------------------
+
+    def open_experiments(self) -> None:
+        """Experiments (id 30): открыть список feature-паков со switch."""
+        from quadrix.render import experiments as _exp
+
+        if self.stack is None:
+            self._not_ported("experiments", 30)
+            return
+        self._persist_fields()
+        enabled = [p for p in self.options.data_packs if p != "vanilla"]
+        screen = _exp.ExperimentsScreen(
+            width=self.width,
+            height=self.height,
+            stack=self.stack,
+            enabled=enabled,
+            on_done=self._experiments_done,
+        )
+        self.stack.push(screen)
+
+    def _experiments_done(self, flags: Any) -> None:
+        """Done: слить switches в ``options.data_packs`` (title.rs).
+
+        Прочие паки сохраняют порядок, включённые feature-паки дописываются
+        в обратном порядке экрана.
+        """
+        for flag in flags:
+            self.options.data_packs = [
+                p for p in self.options.data_packs if p != flag.id
+            ]
+        for flag in reversed(flags):
+            if flag.enabled:
+                self.options.data_packs.append(flag.id)
+
+    # -- Data Packs' Done → ConfirmExperimentalFeatures (WC6) ------------
+
+    def offer_data_packs(self, ids: list[str]) -> None:
+        """``title.rs::offer_data_packs``: feature-пак в выборе → confirm.
+
+        Выбор с feature-паком сперва спрашивает подтверждение; иначе
+        применяется сразу.
+        """
+        from quadrix.render import experiments as _exp
+
+        if any(p.id in ids for p in _exp.feature_packs(PACK_ROOT)):
+            if self.stack is not None:
+                self.stack.push(
+                    _exp.ConfirmExperimentsScreen(
+                        width=self.width,
+                        height=self.height,
+                        stack=self.stack,
+                        selected=list(ids),
+                        on_proceed=self._apply_data_packs,
+                    )
+                )
+            return
+        self._apply_data_packs(ids)
+
+    def _apply_data_packs(self, ids: list[str]) -> None:
+        """``set_data_packs``: выбор паков нового мира."""
+        self.options.data_packs = list(ids)
 
     # -- действия --------------------------------------------------------
 

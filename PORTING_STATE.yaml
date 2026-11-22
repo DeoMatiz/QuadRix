@@ -4067,6 +4067,33 @@ files:
       (контроллер) не портированы; каретка/выделение/clipboard поля поиска
       (title.caret) — простая вставка/backspace.
 
+  - rust: >
+      horizon-client/src/title/experiments.rs +
+      horizon-client/src/title/confirm_experiments.rs
+    python: quadrix/render/experiments.py
+    test: tests/render/test_experiments.py
+    status: done
+    lines_python: 711
+    note: >
+      WC6. ExperimentsScreen + ConfirmExperimentalFeaturesScreen. Flag/
+      Outcome/repository_flags (dataPack.<id>.name/.description), геометрия
+      content_top/grid_left/footer/warning_lines/grid_top/switch_rect/
+      experiments_click и draw (header/footer 33, WARNING 310, GRID 299,
+      switch 44, FLAG_HEIGHT 42); ConfirmClick/Entry/confirm_entries/
+      message_lines/block_top/details_rect/footer_pair/footer_single/
+      confirm_click и draw (DetailsScreen). feature_packs (PART datapack.rs):
+      resources/data/minecraft/datapacks → 3 пака, id = имя папки, sorted,
+      features.enabled из pack.mcmeta. Обёртки Screen. CreateWorldScreen id 30
+      открывает Experiments; Done сливает switches в options.data_packs
+      (прочие сохраняют порядок, включённые дописываются в обратном порядке
+      экрана), Cancel отбрасывает. offer_data_packs (title.rs): feature-пак в
+      выборе → ConfirmExperimentsScreen, иначе применяется сразу; Proceed
+      применяет pending, Back/Escape из Details — назад. Добавлен
+      Font.split_lines (font.rs::StringSplitter). 26 test + 4 split_lines в
+      test_ui.py (реальные .local/en_us). FALLBACK: datapack.rs частично
+      (без world-паков file/, zip и функций команд); bold-стиль DetailsScreen
+      не портирован; экран Data Packs (id 31) — позже.
+
   - rust: horizon-client-render/src/gfx.rs (upload/buffer path; фикс производительности)
     python: quadrix/render/backend_moderngl.py
     test: tests/render/test_backend.py

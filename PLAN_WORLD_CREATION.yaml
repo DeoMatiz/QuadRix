@@ -108,11 +108,19 @@ parts:
 
   - id: WC6
     name: Experiments + ConfirmExperimentalFeatures
-    status: pending
+    status: done
     rust: horizon-client/src/title/experiments.rs + confirm_experiments.rs
     python: quadrix/render/experiments.py
     test: tests/render/test_experiments.py
     depends_on: [WC1]
+    note: >
+      ExperimentsScreen (feature-паки со switch, WARNING 310/GRID 299) и
+      ConfirmExperimentalFeaturesScreen (Details/Proceed/Back). feature_packs
+      (PART datapack.rs) из .local (3 пака), repository_flags/confirm_entries,
+      геометрия/ввод/рендер и обёртки Screen. Font.split_lines (font.rs).
+      CreateWorldScreen id 30 открывает Experiments, Done сливает switches в
+      options.data_packs; offer_data_packs → confirm. 26 test (+4 split_lines).
+      FALLBACK: datapack.rs частично, bold DetailsScreen, экран Data Packs.
 
   - id: WC7
     name: WorldManagement / Edit / Backup / Optimize / Delete / Recover экраны

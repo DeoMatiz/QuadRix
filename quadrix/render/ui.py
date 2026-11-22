@@ -429,6 +429,54 @@ class Font:
         plain = text.resolved().plain()
         return int(math.ceil(sum(self.glyph(c).advance for c in plain)))
 
+    def split_lines(self, text: str, max_width: float) -> list[tuple[str, bool]]:
+        """``font.rs::Font::split_lines`` (``StringSplitter.splitLines``).
+
+        Возвращает ``(строка, wrapped)``: строка рвётся на ``\\n`` либо когда
+        символ переполняет ``max_width`` (никогда — первый видимый), у
+        последнего пробела или прямо перед символом; ``\\n``/пробел на разрыве
+        отбрасывается. ``wrapped`` — строка продолжает перенесённую.
+        """
+        max_width = max(float(max_width), 1.0)
+        chars = list(text)
+        n = len(chars)
+        out: list[tuple[str, bool]] = []
+        start = 0
+        wrapped = False
+        force_new_line = False
+        while True:
+            width = 0.0
+            had_visible = False
+            last_space: Optional[int] = None
+            split: Optional[int] = None
+            for i in range(start, n):
+                c = chars[i]
+                if c == "\n":
+                    split = i
+                    break
+                if c == " ":
+                    last_space = i
+                advance = self.advance(c)
+                width += advance
+                if not had_visible or width <= max_width:
+                    had_visible = had_visible or advance != 0.0
+                else:
+                    split = last_space if last_space is not None else i
+                    break
+            if split is None:
+                break
+            new_line = chars[split] == "\n"
+            skip = 1 if (new_line or chars[split] == " ") else 0
+            force_new_line = new_line
+            out.append(("".join(chars[start:split]), wrapped))
+            wrapped = not new_line
+            start = split + skip
+        if start < n:
+            out.append(("".join(chars[start:n]), wrapped))
+        elif force_new_line:
+            out.append(("", False))
+        return out
+
     # -- отрисовка -------------------------------------------------------
 
     def render(

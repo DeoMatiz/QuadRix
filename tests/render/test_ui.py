@@ -103,6 +103,38 @@ def test_font_render_advances_and_empty() -> None:
     assert quads[1].x == font.width("a ")  # 6 + 4 = 10
 
 
+def test_font_split_lines_newlines() -> None:
+    font = _font()
+    # 'a' advance 6; без переноса всё в одну строку.
+    assert font.split_lines("aaa", 100.0) == [("aaa", False)]
+    assert font.split_lines("", 100.0) == []
+    # явный \n рвёт строку, сам символ отбрасывается.
+    assert font.split_lines("ab\ncd", 100.0) == [("ab", False), ("cd", False)]
+    # завершающий \n даёт пустую строку.
+    assert font.split_lines("ab\n", 100.0) == [("ab", False), ("", False)]
+
+
+def test_font_split_lines_wraps_at_last_space() -> None:
+    font = _font()
+    # максимум = ширина "aaa" (18): рвём на пробеле, пробел отбрасывается.
+    out = font.split_lines("aaa bbb", 18.0)
+    assert out == [("aaa", False), ("bbb", True)]  # вторая — продолжение
+
+
+def test_font_split_lines_breaks_mid_word() -> None:
+    font = _font()
+    # нет пробела: рвём прямо перед переполняющим символом.
+    out = font.split_lines("aaaa", 12.0)
+    assert out == [("aa", False), ("aa", True)]
+
+
+def test_font_split_lines_clamps_max_width() -> None:
+    font = _font()
+    # max_width <= 0 поднимается до 1: 'a' (6) уже не влезает → по символу.
+    out = font.split_lines("aa", 0.0)
+    assert out == [("a", False), ("a", True)]
+
+
 def test_font_atlas_from_real_ascii_png() -> None:
     assert ASCII_PNG.exists()
     ascii_rgba = load_png_rgba(ASCII_PNG)
