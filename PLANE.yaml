@@ -1,0 +1,134 @@
+# QuadRix execution plan — inventory + next porting batch
+#
+# Produced after auditing PORTING_STATE.yaml against the real Rust tree and the
+# quadrix/ Python tree. One Rust file per task (Golden Rule 1). Every task ends
+# with a pytest run and a PORTING_STATE.yaml status update.
+#
+# Legend:
+#   status: pending | in_progress | done | deferred | blocked
+#   rust:   path relative to horizon/crates/
+#   python: target module relative to repo root
+#   test:   pytest file relative to repo root
+
+plan: horizon-rust-to-quadrix-python
+created: 2026-11-22
+baseline_regression: "1331 passed, 1 skipped"
+last_regression: "1423 passed, 1 skipped (after T2-T7)"
+# Отдельный план меню создания мира: PLAN_WORLD_CREATION.yaml (WC0..WC10).
+wc_plan: PLAN_WORLD_CREATION.yaml
+
+tasks:
+
+  - id: T1
+    name: PORTING_STATE.yaml inventory reconciliation
+    status: done
+    deliverables:
+      - "append `inventory:` section: crate totals, unported module list, broken-path audit, already-present-but-marked-pending notes"
+      - "correct statuses for the modules delivered by T3..T6"
+    note: >
+      Authoritative inventory appended at the end of PORTING_STATE.yaml instead
+      of mass-rewriting 200+ wrong Rust paths. Path corrections are recorded in
+      the inventory section for gradual fix-up.
+
+  - id: T2
+    name: Control server place/break via real interaction path
+    status: done
+    rust: null   # new feature, not a Rust port (AGENTS.md "Control server")
+    python: quadrix/control/server.py
+    test: tests/control/test_server.py
+    changes:
+      - "place/break use quadrix.render.interaction.pick_block (reach/aim/clip) instead of the raw clip() call that always missed"
+      - "resolve block name -> BlockStateId via BlockPlacement.placement_state"
+      - "apply the local block set through a mutable _ControlWorld overlay over ClientWorld, so a following break/raytrace sees it"
+      - "hit block + face direction -> adjacent placement position; break uses block_survival.break_block"
+      - "NOT implemented: serverbound UseItemOn/PlayerAction packets (client-side simulation only)"
+    data: .local/horizon-client-motion/block-registry.nbt
+
+  - id: T3
+    name: Fluids (4 modules)
+    status: done
+    modules:
+      - rust: horizon-world/src/fluid.rs
+        python: quadrix/world/fluid.py
+        test: tests/world/test_fluid.py
+      - rust: horizon-world/src/fluid_box.rs
+        python: quadrix/world/fluid_box.py
+        test: tests/world/test_fluid_box.py
+      - rust: horizon-world/src/fluid_occupancy.rs
+        python: quadrix/world/fluid_occupancy.py
+        test: tests/world/test_fluid_occupancy.py
+      - rust: horizon-world/src/fluid_shape.rs
+        python: quadrix/world/fluid_shape.py
+        test: tests/world/test_fluid_shape.py
+    data: .local/horizon-client-motion/block-registry.nbt
+    deferred:
+      - rust: horizon-world/src/liquid_collision.rs
+        reason: depends on unported collision_context.rs / entity_obstruction.rs
+
+  - id: T4
+    name: Food (4 modules)
+    status: done
+    modules:
+      - rust: horizon-world/src/food.rs
+        python: quadrix/world/food.py
+        test: tests/world/test_food.py
+      - rust: horizon-world/src/food_properties.rs
+        python: quadrix/world/food_properties.py
+        test: tests/world/test_food_properties.py
+      - rust: horizon-world/src/food_storage.rs
+        python: quadrix/world/food_storage.py
+        test: tests/world/test_food_storage.py
+      - rust: horizon-world/src/player_food.rs
+        python: quadrix/world/player_food.py
+        test: tests/world/test_player_food.py
+    data: .local/horizon-client-motion/block-registry.nbt
+
+  - id: T5
+    name: Damage immunity / reduction (2 modules)
+    status: done
+    modules:
+      - rust: horizon-world/src/damage_immunity.rs
+        python: quadrix/world/damage_immunity.py
+        test: tests/world/test_damage_immunity.py
+      - rust: horizon-world/src/damage_reduction.rs
+        python: quadrix/world/damage_reduction.py
+        test: tests/world/test_damage_reduction.py
+    note: >
+      damage_reduction reimplements combat_rules::after_armor / after_magic locally
+      (f32 arithmetic) using world.weapon()/server_level()/modify_armor_effectiveness;
+      it does not delegate to quadrix.combat.armor_reduction.
+
+  - id: T6
+    name: Item durability / blocking (2 modules + view_direction dep)
+    status: done
+    modules:
+      - rust: horizon-world/src/view_direction.rs
+        python: quadrix/world/view_direction.py
+        test: tests/world/test_view_direction.py
+        note: dependency of item_blocking
+      - rust: horizon-world/src/item_durability.rs
+        python: quadrix/world/item_durability.py
+        test: tests/world/test_item_durability.py
+      - rust: horizon-world/src/item_blocking.rs
+        python: quadrix/world/item_blocking.py
+        test: tests/world/test_item_blocking.py
+
+  - id: T7
+    name: Tests + YAML updates + full regression
+    status: done
+    note: "targeted pytest per module, then full `python -m pytest tests/ -q`"
+
+# ---------------------------------------------------------------------------
+# Deferred / backlog (not this batch)
+# ---------------------------------------------------------------------------
+backlog:
+  - rust: horizon-world/src/damage_source.rs
+    reason: depends on worldgen/tags.rs tag machinery; health.py already loads damage data
+  - rust: horizon-world/src/status_effect.rs (+ active_effects, active_effect_tick, effect_attribute_modifiers)
+    reason: needs java_hash_map / object_open_map / attributes ports first
+  - rust: horizon-items/src/enchant.rs
+    reason: 55 KB, PARTed
+  - rust: horizon-command/**
+    reason: large subsystem, PARTed
+  - rust: horizon-client-render/**, horizon-client/src/game/**, mobs/**
+    reason: low priority, PARTed, performance-gated (AGENTS.md rule 8)

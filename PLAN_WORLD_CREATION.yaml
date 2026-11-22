@@ -1,0 +1,140 @@
+# QuadRix — план портирования меню одиночного мира (Create World и окружение)
+#
+# Составлен после чтения Rust-источников title.rs / title/*.rs и обзора
+# Python-дерева quadrix/render/*. Один Rust-файл на PART (Golden Rule 1).
+# Каждый PART заканчивается pytest и обновлением PORTING_STATE.yaml.
+#
+# Цель пользователя: функциональная И визуальная идентичность меню создания
+# одиночного мира Horizon. Визуальный слой ванильных виджетов (nine-slice,
+# табы, фон) уже частично есть в quadrix/render/gui_atlas.py + ui.py.
+#
+# Legend:
+#   status: pending | in_progress | done | deferred | blocked
+#   rust:   путь относительно horizon/crates/
+#   python: целевой модуль относительно корня репозитория
+#   test:   файл pytest относительно корня репозитория
+
+plan: world-creation-menu
+created: 2026-11-22
+parent_plan: PLANE.yaml
+baseline_regression: "1423 passed, 1 skipped"
+
+parts:
+
+  - id: WC0
+    name: WorldPreset (save.rs, фрагмент)
+    status: done
+    rust: horizon-client/src/save.rs          # enum WorldPreset L3384-3472, WorldGen — позже
+    python: quadrix/save/world_preset.py
+    test: tests/save/test_world_preset.py
+    depends_on: []
+    note: >
+      Обязательная зависимость Create World (кнопка типа мира и
+      WorldOptions.world_type). Порт WorldPreset: ALL, id(), of_id(),
+      label(), next(), prev(), of_generator(). WorldGen/CreateWorld
+      откладываются до PART сохранения мира.
+
+  - id: WC1
+    name: CreateWorldScreen — модель и геометрия
+    status: done
+    rust: horizon-client/src/title/create_world.rs
+    python: quadrix/render/create_world.py
+    test: tests/render/test_create_world.py
+    depends_on: [WC0]
+    note: >
+      WorldOptions (поля, default, difficulty/commands/bonus_chest/
+      single_biome/word_gen, press/cycle), геометрия (round_toward, tabs,
+      tab_at, tab_count, grid, field_rect, field_at), подписи
+      (labelled/on_off/game_mode), buttons(w,h,creative,o) и
+      button_narration. Рендер (draw_create/create_field/create_tooltip)
+      и клики/фокус — следующие PART.
+
+  - id: WC2
+    name: CreateWorldScreen — отрисовка (draw_create/create_field/tooltip)
+    status: pending
+    rust: horizon-client/src/title/create_world.rs + horizon-client/src/title.rs (draw_create dispatch)
+    python: quadrix/render/create_world.py
+    test: tests/render/test_create_world.py
+    depends_on: [WC1]
+    note: >
+      tab_header_background, menu_background, header/footer separators,
+      табы (nine-slice + фокус-подчёркивание), подписи полей, EditBox-
+      поля (name/seed), SwitchGrid подписи, tooltip.
+
+  - id: WC3
+    name: CreateWorldScreen — ввод (клик/фокус/tab-клавиши/Enter)
+    status: pending
+    rust: horizon-client/src/title.rs (Mode::Create click/key, target_folder)
+    python: quadrix/render/create_world.py
+    test: tests/render/test_create_world.py
+    depends_on: [WC2]
+    note: >
+      target_folder (FileUtil.findAvailableName), next_tab_index/numeric_key
+      (Ctrl+Tab/Ctrl+1..0), press/cycle по id 20/23/24/25/26/27/28/29..,
+      фокус полей, footer Create(21)/Cancel(22).
+
+  - id: WC4
+    name: CreateFlatWorldScreen + FlatSettings/FlatLayer
+    status: pending
+    rust: horizon-client/src/title/flat.rs
+    python: quadrix/render/flat.py
+    test: tests/render/test_flat.py
+    depends_on: [WC1]
+    note: PresetFlatWorldScreen, список слоёв, from_tag/to_tag, from_world.
+
+  - id: WC5
+    name: CreateBuffetWorldScreen
+    status: pending
+    rust: horizon-client/src/title/buffet.rs
+    python: quadrix/render/buffet.py
+    test: tests/render/test_buffet.py
+    depends_on: [WC1]
+
+  - id: WC6
+    name: Experiments + ConfirmExperimentalFeatures
+    status: pending
+    rust: horizon-client/src/title/experiments.rs + confirm_experiments.rs
+    python: quadrix/render/experiments.py
+    test: tests/render/test_experiments.py
+    depends_on: [WC1]
+
+  - id: WC7
+    name: WorldManagement / Edit / Backup / Optimize / Delete / Recover экраны
+    status: pending
+    rust: horizon-client/src/title/world_management.rs (+ title.rs режимы)
+    python: quadrix/render/world_management.py
+    test: tests/render/test_world_management.py
+    depends_on: [WC0]
+    note: >
+      Большой набор подэкранов; PART делится дальше (Edit, Backup,
+      Optimize, Delete, Recover) при реализации.
+
+  - id: WC8
+    name: Select World (Mode::Select), список миров, поиск
+    status: pending
+    rust: horizon-client/src/title.rs (Mode::Select)
+    python: quadrix/render/select_world.py
+    test: tests/render/test_select_world.py
+    depends_on: [WC0]
+    note: WorldEntry, вкладки, поиск, кнопки Play/Create/Edit/Delete/Re-Create.
+
+  - id: WC9
+    name: AccessibilityOnboardingScreen
+    status: pending
+    rust: horizon-client/src/title/onboarding.rs
+    python: quadrix/render/onboarding.py
+    test: tests/render/test_onboarding.py
+    depends_on: []
+
+  - id: WC10
+    name: Визуальный слой ванильных виджетов (nine-slice/табы/фон/логотип)
+    status: in_progress   # частично уже есть в gui_atlas.py/ui.py; добиваем недостающее
+    rust: >-
+      horizon-client-render/src/ui.rs + screen_draw.rs + graphics_style.rs
+    python: quadrix/render/ui.py + quadrix/render/gui_atlas.py
+    test: tests/render/test_ui.py + tests/render/test_gui_atlas.py
+    depends_on: []
+    note: >
+      Обязательно для визуальной идентичности. gui_atlas уже знает
+      nine_slice/title_button/tiled/blit/button_sprite; экраны WC2..WC8
+      должны использовать их, а не сплошные заливки.
