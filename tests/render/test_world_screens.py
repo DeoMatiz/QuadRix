@@ -443,8 +443,30 @@ def test_create_world_customize_without_stack_is_safe(capsys) -> None:
     assert "[QuadRix]" in capsys.readouterr().out
 
 
-def test_create_world_customize_single_biome_not_ported(capsys) -> None:
+def test_create_world_customize_single_biome_opens_buffet() -> None:
+    from quadrix.render.buffet import BuffetWorldScreen
+    from quadrix.render.menu import ScreenStack
+
+    screen = CreateWorldScreen(854.0, 480.0, options=cw.WorldOptions(tab=1))
+    stack = ScreenStack(screen)
+    screen.stack = stack
+    screen.options.world_type = cw.WorldPreset.SINGLE_BIOME_SURFACE
+    screen.options.single_biome = "minecraft:plains"
+    screen._on_button(26)
+    assert isinstance(stack.current, BuffetWorldScreen)
+    buffet = stack.current
+    index = next(
+        i for i, b in enumerate(buffet.state.biomes) if b.id == "minecraft:desert"
+    )
+    buffet.state.select(index)
+    buffet._on_button(80)  # Done
+    assert stack.depth() == 1
+    assert screen.options.world_type is cw.WorldPreset.SINGLE_BIOME_SURFACE
+    assert screen.options.single_biome == "minecraft:desert"
+
+
+def test_create_world_customize_single_biome_without_stack_is_safe(capsys) -> None:
     screen = CreateWorldScreen(854.0, 480.0, options=cw.WorldOptions(tab=1))
     screen.options.world_type = cw.WorldPreset.SINGLE_BIOME_SURFACE
-    screen._on_button(26)
+    screen._on_button(26)  # без stack — лог, не падение
     assert "[QuadRix]" in capsys.readouterr().out

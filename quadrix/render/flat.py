@@ -81,6 +81,13 @@ __all__ = [
     "button_ui",
     "draw_buttons",
     "FlatWorldScreen",
+    # Общие виджеты списка (``ui.rs``/``title.rs``): ими пользуется и buffet.py.
+    "centered",
+    "list_background",
+    "separators",
+    "scrollbar",
+    "edit_box",
+    "ui_hovered",
 ]
 
 
@@ -821,12 +828,12 @@ def _draw_layers(
     atlas: Any,
 ) -> None:
     w, h = size
-    _centered(batch, font, lang.get_or(
+    centered(batch, font, lang.get_or(
         "createWorld.customize.flat.title", "Superflat Customization"
     ), 8.0, w)
     top, bottom, left, content = list_area(state, (w, h))
-    _list_background(batch, atlas, top, bottom, w)
-    _separators(batch, atlas, top, bottom, w)
+    list_background(batch, atlas, top, bottom, w)
+    separators(batch, atlas, top, bottom, w)
     right = left + ROW_WIDTH
     draw_text(batch, font, lang.get_or(
         "createWorld.customize.flat.tile", "Layer Material"
@@ -857,7 +864,7 @@ def _draw_layers(
         draw_text(batch, font, label,
                   right - _text_width(font, label) - 2.0, y + 5.0,
                   rgba(255, 255, 255, 255))
-    _scrollbar(batch, atlas, left + ROW_WIDTH + 6.0, top, bottom, content,
+    scrollbar(batch, atlas, left + ROW_WIDTH + 6.0, top, bottom, content,
                state.scroll.amount)
 
 
@@ -870,7 +877,7 @@ def _draw_presets(
     atlas: Any,
 ) -> None:
     w, h = size
-    _centered(batch, font, lang.get_or(
+    centered(batch, font, lang.get_or(
         "createWorld.customize.presets.title", "Select a Preset"
     ), 8.0, w)
     draw_text(batch, font, lang.get_or(
@@ -878,14 +885,14 @@ def _draw_presets(
         "Want to share your preset with someone? Use the box below!",
     ), 51.0, 30.0, rgba(160, 160, 160, 255))
     field = share_field((w, h))
-    _edit_box(batch, font, field, state.share, state.share_focused)
+    edit_box(batch, font, field, state.share, state.share_focused)
     draw_text(batch, font, lang.get_or(
         "createWorld.customize.presets.list",
         "Alternatively, here are some we made earlier!",
     ), 51.0, 68.0, rgba(160, 160, 160, 255))
     top, bottom, left, content = list_area(state, (w, h))
-    _list_background(batch, atlas, top, bottom, w)
-    _separators(batch, atlas, top, bottom, w)
+    list_background(batch, atlas, top, bottom, w)
+    separators(batch, atlas, top, bottom, w)
     offset = math.trunc(state.preset_scroll.amount)
     for row, preset in enumerate(state.presets):
         y = top + 2.0 + row * PRESET_ROW - offset
@@ -898,11 +905,11 @@ def _draw_presets(
         _slot(batch, font, atlas, preset.display, left + 2.0, y + 2.0)
         draw_text(batch, font, preset_name(preset.id),
                   left + 2.0 + 18.0 + 5.0, y + 7.0, rgba(255, 255, 255, 255))
-    _scrollbar(batch, atlas, left + ROW_WIDTH + 6.0, top, bottom, content,
+    scrollbar(batch, atlas, left + ROW_WIDTH + 6.0, top, bottom, content,
                state.preset_scroll.amount)
 
 
-def _centered(batch: Batch, font: Optional[Font], text: str, y: float, w: float) -> None:
+def centered(batch: Batch, font: Optional[Font], text: str, y: float, w: float) -> None:
     """``title.rs::centered``: строка по центру ширины ``w``."""
     width = _text_width(font, text)
     draw_text(batch, font, text, math.floor((w - width) / 2.0), y)
@@ -919,16 +926,16 @@ def _format_translation(line: str, value: str) -> str:
     return line
 
 
-def _list_background(batch: Batch, atlas: Any, top: float, bottom: float, w: float) -> None:
+def list_background(batch: Batch, atlas: Any, top: float, bottom: float, w: float) -> None:
     """``ui::list_background`` для строк списка."""
     if atlas is not None and atlas.tiled(
-        batch, "gui/menu_list_background", 0.0, top, w, bottom - top, 32.0
+        batch, "gui/menulist_background", 0.0, top, w, bottom - top, 32.0
     ):
         return
     solid(batch, None, 0.0, top, w, bottom - top, rgba(0, 0, 0, 160))
 
 
-def _separators(batch: Batch, atlas: Any, top: float, bottom: float, w: float) -> None:
+def separators(batch: Batch, atlas: Any, top: float, bottom: float, w: float) -> None:
     """``ui::separators``: разделители над/под списком."""
     if atlas is None:
         return
@@ -936,7 +943,7 @@ def _separators(batch: Batch, atlas: Any, top: float, bottom: float, w: float) -
     atlas.tiled(batch, "gui/footer_separator", 0.0, bottom, w, 2.0, 32.0)
 
 
-def _scrollbar(
+def scrollbar(
     batch: Batch, atlas: Any, x: float, top: float, bottom: float,
     content: float, scroll: float,
 ) -> None:
@@ -955,7 +962,7 @@ def _scrollbar(
     solid(batch, None, x, y, 6.0, bar, rgba(128, 128, 128, 255))
 
 
-def _edit_box(
+def edit_box(
     batch: Batch, font: Optional[Font], field: list[float], value: str, focused: bool
 ) -> None:
     """``EditBox`` share-текста (рамка + текст + каретка)."""

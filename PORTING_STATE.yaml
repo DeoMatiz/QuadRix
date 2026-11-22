@@ -4048,6 +4048,25 @@ files:
       3D-модели предметов (ItemRenderer) не портированы — слот + плоский
       спрайт/заливка; наррация/row_target (контроллер) не портированы.
 
+  - rust: horizon-client/src/title/buffet.rs
+    python: quadrix/render/buffet.py
+    test: tests/render/test_buffet.py
+    status: done
+    lines_python: 493
+    note: >
+      WC5. CreateBuffetWorldScreen (пресет одного биома): Biome/State
+      (query/query_focused/biome, rows/selected/name/select), load
+      (worldgen/biomes.json → 67, sort по (name.lower(), id)), display_name
+      (biome.<ns>.<path>), геометрия list_area/search_box/row_at/click/
+      focus_row/wheel/drag/release/buttons (Done 80 / Cancel 81) и draw.
+      Обёртка BuffetWorldScreen(Screen). CreateWorldScreen id 26 открывает её
+      для SINGLE_BIOME_SURFACE; Done применяет options.single_biome, Cancel/
+      Escape закрывает. Общие виджеты списка перенесены в flat.py
+      (centered/list_background/separators/scrollbar/edit_box/ui_hovered).
+      20 test (реальные данные .local, en_us). FALLBACK: наррация/row_target
+      (контроллер) не портированы; каретка/выделение/clipboard поля поиска
+      (title.caret) — простая вставка/backspace.
+
   - rust: horizon-client-render/src/gfx.rs (upload/buffer path; фикс производительности)
     python: quadrix/render/backend_moderngl.py
     test: tests/render/test_backend.py

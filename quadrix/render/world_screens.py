@@ -21,9 +21,10 @@ FALLBACK (см. ``PORTING_STATE.yaml``):
     * список миров хранится в ``saves/worlds.json`` (Rust — ``level.dat``/NBT);
     * Create open: Play открывает локальный плоский мир (нет интегрированного
       сервера), см. ``App._play_world``;
-    * Re-Create/Edit/Game Rules/Experiments/Data Packs/Customize(single-biome)
-      — заглушки (``_not_ported``), PART'ы WC5/WC6/WC7/WC9. Customize для
-      flat-пресета открывает :class:`quadrix.render.flat.FlatWorldScreen` (WC4).
+    * Re-Create/Edit/Game Rules/Experiments/Data Packs — заглушки
+      (``_not_ported``), PART'ы WC6/WC7/WC9. Customize открывает
+      :class:`quadrix.render.flat.FlatWorldScreen` (WC4) или
+      :class:`quadrix.render.buffet.BuffetWorldScreen` (WC5) по типу пресета.
 """
 
 from __future__ import annotations
@@ -585,8 +586,7 @@ class CreateWorldScreen(Screen):
             self.cancel()
         elif bid == 26:
             if self.options.world_type == cw.WorldPreset.SINGLE_BIOME_SURFACE:
-                # FALLBACK: CreateBuffetWorldScreen — PART WC5.
-                self._not_ported("customize", 26)
+                self.open_buffet()
             else:
                 self.open_flat()
         elif bid in (20, 23, 24, 25, 27, 28):
@@ -625,6 +625,32 @@ class CreateWorldScreen(Screen):
         """Done в редакторе: сохранить слои и вернуться в Create New World."""
         self.options.world_type = cw.WorldPreset.FLAT
         self.options.flat_settings = settings
+        if self.stack is not None:
+            self.stack.pop()
+
+    # -- Customize → CreateBuffetWorldScreen (WC5) -----------------------
+
+    def open_buffet(self) -> None:
+        """Customize (id 26) для single-biome: открыть список биомов."""
+        from quadrix.render import buffet as _buffet
+
+        if self.stack is None:
+            self._not_ported("customize", 26)
+            return
+        self._persist_fields()
+        screen = _buffet.BuffetWorldScreen(
+            width=self.width,
+            height=self.height,
+            stack=self.stack,
+            biome=self.options.single_biome,
+            on_done=self._apply_buffet,
+        )
+        self.stack.push(screen)
+
+    def _apply_buffet(self, biome: str) -> None:
+        """Done в списке биомов: сохранить биом и вернуться."""
+        self.options.world_type = cw.WorldPreset.SINGLE_BIOME_SURFACE
+        self.options.single_biome = biome
         if self.stack is not None:
             self.stack.pop()
 

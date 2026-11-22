@@ -94,11 +94,17 @@ parts:
 
   - id: WC5
     name: CreateBuffetWorldScreen
-    status: pending
+    status: done
     rust: horizon-client/src/title/buffet.rs
     python: quadrix/render/buffet.py
     test: tests/render/test_buffet.py
     depends_on: [WC1]
+    note: >
+      Список биомов одного биома с поиском: Biome/State, load из
+      worldgen/biomes.json (67), display_name, геометрия/ввод/рендер и
+      обёртка BuffetWorldScreen. CreateWorldScreen id 26 открывает её для
+      SINGLE_BIOME_SURFACE; Done возвращает options.single_biome. FALLBACK:
+      наррация/row_target, каретка/clipboard поля поиска. 20 test.
 
   - id: WC6
     name: Experiments + ConfirmExperimentalFeatures
